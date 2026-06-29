@@ -1,0 +1,57 @@
+[gd_scene format=3 uid="uid://c2y5cgwfot8fj"]
+
+[ext_resource type="PackedScene" uid="uid://dqamr7y2lr6wb" path="res://agents/Tank/tank.scn" id="1_eom7a"]
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_cyscs"]
+size = Vector2(5, 3)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_nx8d5"]
+albedo_color = Color(0.2516, 0.68, 0.39440006, 1)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_cyscs"]
+size = Vector3(5, 0.001, 3)
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_eom7a"]
+sky_horizon_color = Color(0.66224277, 0.6717428, 0.6867428, 1)
+ground_horizon_color = Color(0.66224277, 0.6717428, 0.6867428, 1)
+
+[sub_resource type="Sky" id="Sky_nx8d5"]
+sky_material = SubResource("ProceduralSkyMaterial_eom7a")
+
+[sub_resource type="Environment" id="Environment_2y6o6"]
+background_mode = 2
+sky = SubResource("Sky_nx8d5")
+tonemap_mode = 2
+glow_enabled = true
+
+[node name="TanksScenario" type="Node3D" unique_id=651348079]
+
+[node name="Environment" type="Node3D" parent="." unique_id=1098615820]
+
+[node name="Floor" type="StaticBody3D" parent="Environment" unique_id=1837786907]
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Environment/Floor" unique_id=322680629]
+mesh = SubResource("PlaneMesh_cyscs")
+surface_material_override/0 = SubResource("StandardMaterial3D_nx8d5")
+
+[node name="CollisionShape3D2" type="CollisionShape3D" parent="Environment/Floor" unique_id=994055451]
+shape = SubResource("BoxShape3D_cyscs")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="Environment" unique_id=41947263]
+transform = Transform3D(-0.8660254, -0.43301278, 0.25, 0, 0.49999997, 0.86602545, -0.50000006, 0.75, -0.43301266, 0, 0, 0)
+shadow_enabled = true
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="Environment" unique_id=2089702709]
+environment = SubResource("Environment_2y6o6")
+
+[node name="Camera3D" type="Camera3D" parent="." unique_id=1398719326]
+transform = Transform3D(0.99999666, -0.001467463, 0.0021234108, 0, 0.82266164, 0.5685313, -0.0025811475, -0.56852937, 0.8226589, -0.04316268, 2.548347, 3.083829)
+
+[node name="Agents" type="Node" parent="." unique_id=1308854801]
+
+[node name="Tank" parent="Agents" unique_id=664201308 instance=ExtResource("1_eom7a")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.2260449, 0.016843975, -0.6884999)
+
+[node name="Tank2" parent="Agents" unique_id=1089950526 instance=ExtResource("1_eom7a")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.1421198, 0.016843975, -0.6884999)
+manualControl = false

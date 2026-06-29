@@ -1,0 +1,14 @@
+[gd_scene load_steps=3 format=3 uid="uid://bdr70i7hngmev"]
+
+[ext_resource type="PackedScene" uid="uid://b54iiv3dsjayt" path="res://assets/tank/tank.glb" id="1_guhwr"]
+
+[sub_resource type="SphereShape3D" id="SphereShape3D_ddbtr"]
+radius = 0.025
+
+[node name="tank2" instance=ExtResource("1_guhwr")]
+
+[node name="CharacterBody3D" type="CharacterBody3D" parent="." index="1"]
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="CharacterBody3D" index="0"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.025, 0)
+shape = SubResource("SphereShape3D_ddbtr")
