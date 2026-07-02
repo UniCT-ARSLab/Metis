@@ -1,6 +1,7 @@
 [gd_scene format=3 uid="uid://c2y5cgwfot8fj"]
 
-[ext_resource type="PackedScene" uid="uid://dqamr7y2lr6wb" path="res://agents/Tank/tank.scn" id="1_eom7a"]
+[ext_resource type="PackedScene" uid="uid://ckcj3fbm54314" path="res://agents/Tank/tank.tscn" id="1_eom7a"]
+[ext_resource type="PackedScene" uid="uid://dgnhnv2ffdgkt" path="res://scenarios/tanks/scenario_controller.tscn" id="1_nx8d5"]
 
 [sub_resource type="PlaneMesh" id="PlaneMesh_cyscs"]
 size = Vector2(5, 3)
@@ -24,7 +25,20 @@ sky = SubResource("Sky_nx8d5")
 tonemap_mode = 2
 glow_enabled = true
 
+[sub_resource type="CylinderMesh" id="CylinderMesh_eom7a"]
+top_radius = 0.1
+bottom_radius = 0.1
+height = 0.2
+
+[sub_resource type="CylinderShape3D" id="CylinderShape3D_nx8d5"]
+height = 0.2
+radius = 0.1
+
 [node name="TanksScenario" type="Node3D" unique_id=651348079]
+
+[node name="ScenarioController" parent="." unique_id=1293921414 node_paths=PackedStringArray("tank", "target") instance=ExtResource("1_nx8d5")]
+tank = NodePath("../Agents/Tank")
+target = NodePath("../Target")
 
 [node name="Environment" type="Node3D" parent="." unique_id=1098615820]
 
@@ -45,13 +59,22 @@ shadow_enabled = true
 environment = SubResource("Environment_2y6o6")
 
 [node name="Camera3D" type="Camera3D" parent="." unique_id=1398719326]
-transform = Transform3D(0.99999666, -0.001467463, 0.0021234108, 0, 0.82266164, 0.5685313, -0.0025811475, -0.56852937, 0.8226589, -0.04316268, 2.548347, 3.083829)
+transform = Transform3D(0.9997216, 0.016435327, -0.016931614, 0, 0.7175446, 0.6965126, 0.023596598, -0.6963186, 0.7173449, -0.006845627, 1.0543814, 1.5451802)
 
 [node name="Agents" type="Node" parent="." unique_id=1308854801]
 
-[node name="Tank" parent="Agents" unique_id=664201308 instance=ExtResource("1_eom7a")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.2260449, 0.016843975, -0.6884999)
+[node name="Tank" parent="Agents" unique_id=1089950526 instance=ExtResource("1_eom7a")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.2561896, 0, 0)
 
-[node name="Tank2" parent="Agents" unique_id=1089950526 instance=ExtResource("1_eom7a")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.1421198, 0.016843975, -0.6884999)
+[node name="Tank2" parent="Agents" unique_id=2107215311 instance=ExtResource("1_eom7a")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.0731688, 0, 0)
 manualControl = false
+
+[node name="Target" type="Area3D" parent="." unique_id=1815520715 groups=["target"]]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.10049996, 1.1670119)
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Target" unique_id=995929452]
+mesh = SubResource("CylinderMesh_eom7a")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Target" unique_id=55847602]
+shape = SubResource("CylinderShape3D_nx8d5")

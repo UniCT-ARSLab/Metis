@@ -1,0 +1,161 @@
+[gd_scene format=3 uid="uid://ckcj3fbm54314"]
+
+[ext_resource type="Script" uid="uid://dkrv4abablkul" path="res://agents/Tank/tank.gd" id="1_jgq1b"]
+[ext_resource type="Script" uid="uid://byrdvsguqdev3" path="res://scripts/agent/Agent.gd" id="2_k1kma"]
+[ext_resource type="PackedScene" uid="uid://cur0khgnvey27" path="res://agents/Tank/mesh.scn" id="3_k1kma"]
+[ext_resource type="Script" uid="uid://d1xuba84xevcv" path="res://scripts/agent/RewardSystem.gd" id="4_7dpgw"]
+[ext_resource type="Script" uid="uid://dyq1fjgcu1wqu" path="res://scripts/agent/reward_components/StepPenaltyReward.gd" id="5_y1s7q"]
+[ext_resource type="Script" uid="uid://cmxl6ko0bmgpr" path="res://scripts/agent/reward_components/MovementReward.gd" id="6_g2rcs"]
+[ext_resource type="Script" uid="uid://bhw2062f0e3vg" path="res://scripts/agent/reward_components/StuckPenaltyReward.gd" id="7_5ne7s"]
+[ext_resource type="Script" uid="uid://b1oe6cauwxkrf" path="res://scripts/agent/reward_components/ObservationThresholdReward.gd" id="8_e2dfk"]
+
+[sub_resource type="SphereShape3D" id="SphereShape3D_f2qhv"]
+radius = 0.057358228
+
+[node name="Tank" type="CharacterBody3D" unique_id=1089950526]
+script = ExtResource("1_jgq1b")
+
+[node name="Agent" type="Node" parent="." unique_id=905330640]
+script = ExtResource("2_k1kma")
+metadata/_custom_type_script = "uid://byrdvsguqdev3"
+
+[node name="RewardSystem" type="Node" parent="Agent" unique_id=625923553]
+script = ExtResource("4_7dpgw")
+
+[node name="StepPenalty" type="Node" parent="Agent/RewardSystem" unique_id=1644918576]
+script = ExtResource("5_y1s7q")
+term_name = "step"
+
+[node name="Movement" type="Node" parent="Agent/RewardSystem" unique_id=1416979168]
+script = ExtResource("6_g2rcs")
+term_name = "movement"
+
+[node name="StuckPenalty" type="Node" parent="Agent/RewardSystem" unique_id=191633301]
+script = ExtResource("7_5ne7s")
+term_name = "stuck"
+
+[node name="FrontObstaclePenalty" type="Node" parent="Agent/RewardSystem" unique_id=315473332]
+script = ExtResource("8_e2dfk")
+observation_prefix = "ray_frontobstaclesensors"
+gate_observation = "move_input"
+gate_min_value = 0.2
+term_name = "front_obstacle"
+
+[node name="RearObstaclePenalty" type="Node" parent="Agent/RewardSystem" unique_id=487977916]
+script = ExtResource("8_e2dfk")
+observation_prefix = "ray_rearobstaclesensors"
+gate_observation = "move_input"
+gate_max_value = -0.2
+term_name = "rear_obstacle"
+
+[node name="TargetVisibleReward" type="Node" parent="Agent/RewardSystem" unique_id=79120644]
+script = ExtResource("8_e2dfk")
+observation_prefix = "target_visible"
+value = 0.005
+threshold = 0.5
+mode = 1
+term_name = "target_visible"
+metadata/_custom_type_script = "uid://b1oe6cauwxkrf"
+
+[node name="TargetCenterSignalReward" type="Node" parent="Agent/RewardSystem" unique_id=89141868]
+script = ExtResource("8_e2dfk")
+observation_prefix = "target_signal_center"
+value = 0.02
+threshold = 0.05
+mode = 1
+term_name = "target_signal_center"
+metadata/_custom_type_script = "uid://b1oe6cauwxkrf"
+
+[node name="Mesh" parent="." unique_id=474342407 instance=ExtResource("3_k1kma")]
+transform = Transform3D(-8.7422775e-10, 0, -0.02, 0, 0.02, 0, 0.02, 0, -8.7422775e-10, 0, 0, 0)
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="." unique_id=810998181]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.058210254, 0)
+shape = SubResource("SphereShape3D_f2qhv")
+debug_color = Color(0.678012, 0.50533205, 0, 0.41960785)
+
+[node name="FrontObstacleSensors" type="Node3D" parent="." unique_id=1339399316]
+transform = Transform3D(-4.371139e-08, 0, -1, 0, 1, 0, 1, 0, -4.371139e-08, 0, 0.030419849, 0)
+
+[node name="ObstacleSensor" type="RayCast3D" parent="FrontObstacleSensors" unique_id=1733503939]
+target_position = Vector3(0.15, 0, 0)
+
+[node name="ObstacleSensor2" type="RayCast3D" parent="FrontObstacleSensors" unique_id=1230621601]
+transform = Transform3D(0.9659258, 0, 0.25881904, 0, 1, 0, -0.25881904, 0, 0.9659258, 0, 0, 0)
+target_position = Vector3(0.15, 0, 0)
+
+[node name="ObstacleSensor3" type="RayCast3D" parent="FrontObstacleSensors" unique_id=1297205345]
+transform = Transform3D(0.8660255, 0, 0.50000006, 0, 1, 0, -0.50000006, 0, 0.8660255, 0, 0, 0)
+target_position = Vector3(0.15, 0, 0)
+
+[node name="ObstacleSensor4" type="RayCast3D" parent="FrontObstacleSensors" unique_id=1981301125]
+transform = Transform3D(0.70710677, 0, 0.7071069, 0, 1, 0, -0.7071069, 0, 0.70710677, 0, 0, 0)
+target_position = Vector3(0.15, 0, 0)
+
+[node name="ObstacleSensor5" type="RayCast3D" parent="FrontObstacleSensors" unique_id=1894330001]
+transform = Transform3D(0.70710695, 0, -0.7071067, 0, 1, 0, 0.7071067, 0, 0.70710695, 0, 0, 0)
+target_position = Vector3(0.15, 0, 0)
+
+[node name="ObstacleSensor6" type="RayCast3D" parent="FrontObstacleSensors" unique_id=916961603]
+transform = Transform3D(0.86602545, 0, -0.49999997, 0, 1, 0, 0.49999997, 0, 0.86602545, 0, 0, 0)
+target_position = Vector3(0.15, 0, 0)
+
+[node name="ObstacleSensor7" type="RayCast3D" parent="FrontObstacleSensors" unique_id=1400208354]
+transform = Transform3D(0.9659258, 0, -0.258819, 0, 1, 0, 0.258819, 0, 0.9659258, 0, 0, 0)
+target_position = Vector3(0.15, 0, 0)
+
+[node name="RearObstacleSensors" type="Node3D" parent="." unique_id=1001328067]
+transform = Transform3D(1.3113416e-07, 0, 1, 0, 1, 0, -1, 0, 1.3113416e-07, 0, 0.030419849, 0)
+
+[node name="ObstacleSensor" type="RayCast3D" parent="RearObstacleSensors" unique_id=1949148438]
+target_position = Vector3(0.15, 0, 0)
+
+[node name="ObstacleSensor2" type="RayCast3D" parent="RearObstacleSensors" unique_id=1755131588]
+transform = Transform3D(0.9659258, 0, 0.25881904, 0, 1, 0, -0.25881904, 0, 0.9659258, 0, 0, 0)
+target_position = Vector3(0.15, 0, 0)
+
+[node name="ObstacleSensor3" type="RayCast3D" parent="RearObstacleSensors" unique_id=1861118699]
+transform = Transform3D(0.8660255, 0, 0.50000006, 0, 1, 0, -0.50000006, 0, 0.8660255, 0, 0, 0)
+target_position = Vector3(0.15, 0, 0)
+
+[node name="ObstacleSensor4" type="RayCast3D" parent="RearObstacleSensors" unique_id=2080961512]
+transform = Transform3D(0.70710677, 0, 0.7071069, 0, 1, 0, -0.7071069, 0, 0.70710677, 0, 0, 0)
+target_position = Vector3(0.15, 0, 0)
+
+[node name="ObstacleSensor5" type="RayCast3D" parent="RearObstacleSensors" unique_id=1020046346]
+transform = Transform3D(0.70710695, 0, -0.7071067, 0, 1, 0, 0.7071067, 0, 0.70710695, 0, 0, 0)
+target_position = Vector3(0.15, 0, 0)
+
+[node name="ObstacleSensor6" type="RayCast3D" parent="RearObstacleSensors" unique_id=1961348712]
+transform = Transform3D(0.86602545, 0, -0.49999997, 0, 1, 0, 0.49999997, 0, 0.86602545, 0, 0, 0)
+target_position = Vector3(0.15, 0, 0)
+
+[node name="ObstacleSensor7" type="RayCast3D" parent="RearObstacleSensors" unique_id=807425405]
+transform = Transform3D(0.9659258, 0, -0.258819, 0, 1, 0, 0.258819, 0, 0.9659258, 0, 0, 0)
+target_position = Vector3(0.15, 0, 0)
+
+[node name="ViewSensor" type="Node3D" parent="." unique_id=1045978904]
+
+[node name="LineOfSightSensor" type="RayCast3D" parent="ViewSensor" unique_id=11835788]
+transform = Transform3D(-4.371139e-08, 0, -1, 0, 1, 0, 1, 0, -4.371139e-08, 0, 0.09006241, 0)
+target_position = Vector3(0.5, 0, 0)
+collide_with_areas = true
+debug_shape_custom_color = Color(0.8066953, 0, 0.18377393, 1)
+
+[node name="LineOfViewSensor" type="RayCast3D" parent="ViewSensor" unique_id=1026499567]
+transform = Transform3D(-4.371139e-08, 0, -1, 0, 1, 0, 1, 0, -4.371139e-08, 0, 0.030168697, 0)
+target_position = Vector3(1, 0, 0)
+collide_with_areas = true
+debug_shape_custom_color = Color(0.7290001, 0, 0.81, 1)
+
+[node name="LineOfViewSensorRight" type="RayCast3D" parent="ViewSensor" unique_id=721697063]
+transform = Transform3D(-0.25881907, 0, -0.9659258, 0, 1, 0, 0.9659258, 0, -0.25881907, 0, 0.030168697, 0)
+target_position = Vector3(1, 0, 0)
+collide_with_areas = true
+debug_shape_custom_color = Color(0.7290001, 0, 0.81, 1)
+
+[node name="LineOfViewSensorLeft" type="RayCast3D" parent="ViewSensor" unique_id=1423975790]
+transform = Transform3D(0.258819, 0, -0.9659258, 0, 1, 0, 0.9659258, 0, 0.258819, 0, 0.030168697, 0)
+target_position = Vector3(1, 0, 0)
+collide_with_areas = true
+debug_shape_custom_color = Color(0.7290001, 0, 0.81, 1)
