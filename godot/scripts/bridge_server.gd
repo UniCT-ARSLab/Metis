@@ -1,4 +1,5 @@
 extends Node
+class_name BridgeServer
 
 @export var port := 5555
 @export var controller_path: NodePath
@@ -66,10 +67,10 @@ func _handle_line(line: String) -> void:
 				"ok": true,
 				"version": 1
 			})
+		"spec":
+			_send(_call_spec())
 		"reset":
-			var seed := int(request.get("seed", 0))
-			var observed_teams: Variant = request.get("teams", [0])
-			var reset_reply: Dictionary = controller.reset_episode(seed, observed_teams as Array)
+			var reset_reply: Dictionary = _call_reset(request)
 			var reset_agents: Variant = reset_reply.get("agents", [])
 			print("[BridgeServer] reset ok port=%d agents=%d" % [port, reset_agents.size()])
 			_send(reset_reply)
@@ -81,28 +82,15 @@ func _handle_line(line: String) -> void:
 					"error": "config requires an object"
 				})
 				return
-			_send(controller.configure(config as Dictionary))
+			_send(_call_config(config as Dictionary))
 		"step":
-			var actions: Variant = request.get("actions", {})
-			if typeof(actions) != TYPE_DICTIONARY:
-				_send({
-					"ok": false,
-					"error": "step requires an actions object"
-				})
-				return
-			var controlled_teams: Variant = request.get("controlled_teams", [0])
-			var observed_step_teams: Variant = request.get("teams", controlled_teams)
-			var step_reply: Dictionary = controller.step_episode(
-				actions as Dictionary,
-				controlled_teams as Array,
-				observed_step_teams as Array
-			)
+			var step_reply: Dictionary = await _call_step(request)
 			var info: Dictionary = step_reply.get("info", {})
 			var terminated: Variant = step_reply.get("terminated", false)
 			var truncated: Variant = step_reply.get("truncated", false)
 			print(
-				"[BridgeServer] step ok port=%d episode_step=%s terminated=%s truncated=%s" %
-				[port, str(info.get("episode_step", "?")), str(terminated), str(truncated)]
+				"[BridgeServer] step ok port=%d step=%s terminated=%s truncated=%s" %
+				[port, str(info.get("step", info.get("episode_step", "?"))), str(terminated), str(truncated)]
 			)
 			_send(step_reply)
 		"close":
@@ -115,6 +103,67 @@ func _handle_line(line: String) -> void:
 				"ok": false,
 				"error": "Unknown command: %s" % cmd
 			})
+
+func _call_reset(request:Dictionary) -> Dictionary:
+	if controller.has_method("reset_episode_with_request"):
+		return controller.reset_episode_with_request(request)
+
+	if controller.has_method("reset_episode"):
+		if controller.has_method("step_episode"):
+			var seed := int(request.get("seed", 0))
+			var teams: Variant = request.get("teams", [0])
+			if typeof(teams) != TYPE_ARRAY:
+				teams = [0]
+			return controller.reset_episode(seed, teams as Array)
+		return controller.reset_episode()
+
+	return {"ok": false, "error": "Controller has no reset_episode"}
+
+
+func _call_config(config:Dictionary) -> Dictionary:
+	if controller.has_method("configure"):
+		return controller.configure(config)
+	return {
+		"ok": true,
+		"ignored": true,
+		"reason": "Controller has no configure method"
+	}
+
+
+func _call_spec() -> Dictionary:
+	if controller.has_method("get_spec"):
+		return controller.get_spec()
+
+	return {
+		"ok": false,
+		"error": "Controller has no get_spec method"
+	}
+
+
+func _call_step(request:Dictionary) -> Dictionary:
+	var actions: Variant = request.get("actions", 0)
+
+	if controller.has_method("step"):
+		return await controller.step(actions)
+
+	if controller.has_method("step_episode"):
+		if typeof(actions) != TYPE_DICTIONARY:
+			return {
+				"ok": false,
+				"error": "step_episode requires an actions object"
+			}
+
+		var controlled_teams: Variant = request.get("controlled_teams", [0])
+		if typeof(controlled_teams) != TYPE_ARRAY:
+			controlled_teams = [0]
+
+		var teams: Variant = request.get("teams", controlled_teams)
+		if typeof(teams) != TYPE_ARRAY:
+			teams = controlled_teams
+
+		return controller.step_episode(actions as Dictionary, controlled_teams as Array, teams as Array)
+
+	return {"ok": false, "error": "Controller has no step method"}
 
 func _send(payload: Dictionary) -> void:
 	if client == null:

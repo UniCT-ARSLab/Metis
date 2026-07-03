@@ -53,8 +53,20 @@ func get_observation_vector() -> Array:
 	return agent.get_observation_vector()
 
 
+func get_observation_size() -> int:
+	return agent.get_observation_size()
+
+
 func get_observations() -> Dictionary:
 	return agent.get_observations()
+
+
+func get_action_count() -> int:
+	return agent.get_action_count()
+
+
+func get_action_names() -> Array:
+	return agent.get_action_names()
 
 
 func reset_reward() -> void:
@@ -119,6 +131,12 @@ func manual_control() -> void:
 		_move_input = Input.get_axis("move_back", "move_forward")
 		_turn_input = Input.get_axis("turn_right", "turn_left")
 
+func reset_all(original_position:Transform3D):
+	if original_position!= null:
+		transform = original_position
+	clear_inputs()
+	velocity = Vector3.ZERO
+	reset_reward()
 
 func _register_observations() -> void:
 	_find_raycasts(self, _raycasts)

@@ -1,5 +1,6 @@
 [gd_scene format=3 uid="uid://c2y5cgwfot8fj"]
 
+[ext_resource type="Script" uid="uid://d38lybllmy6tq" path="res://scripts/bridge_server.gd" id="1_2y6o6"]
 [ext_resource type="PackedScene" uid="uid://ckcj3fbm54314" path="res://agents/Tank/tank.tscn" id="1_eom7a"]
 [ext_resource type="PackedScene" uid="uid://dgnhnv2ffdgkt" path="res://scenarios/tanks/scenario_controller.tscn" id="1_nx8d5"]
 
@@ -25,6 +26,30 @@ sky = SubResource("Sky_nx8d5")
 tonemap_mode = 2
 glow_enabled = true
 
+[sub_resource type="BoxMesh" id="BoxMesh_2y6o6"]
+size = Vector3(0.115, 0.555, 5.265)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_g7x0a"]
+size = Vector3(0.115, 0.555, 5.265)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_ehv67"]
+size = Vector3(0.115, 0.555, 5.265)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_t4a2h"]
+size = Vector3(0.115, 0.555, 5.265)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_lcct3"]
+size = Vector3(0.115, 0.555, 5.265)
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_p8j0h"]
+top_radius = 0.09
+bottom_radius = 0.18
+height = 0.825
+
+[sub_resource type="CylinderShape3D" id="CylinderShape3D_qx68c"]
+height = 0.825
+radius = 0.135
+
 [sub_resource type="CylinderMesh" id="CylinderMesh_eom7a"]
 top_radius = 0.1
 bottom_radius = 0.1
@@ -36,8 +61,13 @@ radius = 0.1
 
 [node name="TanksScenario" type="Node3D" unique_id=651348079]
 
-[node name="ScenarioController" parent="." unique_id=1293921414 node_paths=PackedStringArray("tank", "target") instance=ExtResource("1_nx8d5")]
-tank = NodePath("../Agents/Tank")
+[node name="BridgeServer" type="Node" parent="." unique_id=1507754248]
+script = ExtResource("1_2y6o6")
+controller_path = NodePath("../ScenarioController")
+metadata/_custom_type_script = "uid://d38lybllmy6tq"
+
+[node name="ScenarioController" parent="." unique_id=1293921414 node_paths=PackedStringArray("controlled_agents", "target") instance=ExtResource("1_nx8d5")]
+controlled_agents = [NodePath("../Agents/Tank"), NodePath("../Agents/Tank2"), NodePath("../Agents/Tank3")]
 target = NodePath("../Target")
 
 [node name="Environment" type="Node3D" parent="." unique_id=1098615820]
@@ -58,6 +88,104 @@ shadow_enabled = true
 [node name="WorldEnvironment" type="WorldEnvironment" parent="Environment" unique_id=2089702709]
 environment = SubResource("Environment_2y6o6")
 
+[node name="Walls" type="StaticBody3D" parent="Environment" unique_id=1973456835]
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Environment/Walls" unique_id=293481788]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.5712748, 0, 0)
+mesh = SubResource("BoxMesh_2y6o6")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Environment/Walls" unique_id=62858241]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.5712748, 0, 0)
+shape = SubResource("BoxShape3D_g7x0a")
+
+[node name="MeshInstance3D2" type="MeshInstance3D" parent="Environment/Walls" unique_id=856388056]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2.5367422, 0, 0)
+mesh = SubResource("BoxMesh_2y6o6")
+
+[node name="CollisionShape3D2" type="CollisionShape3D" parent="Environment/Walls" unique_id=872400567]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2.5367422, 0, 0)
+shape = SubResource("BoxShape3D_ehv67")
+
+[node name="MeshInstance3D3" type="MeshInstance3D" parent="Environment/Walls" unique_id=1908158960]
+transform = Transform3D(-4.371139e-08, 0, -1, 0, 1, 0, 1, 0, -4.371139e-08, 0.0060658455, 0, 1.5430955)
+mesh = SubResource("BoxMesh_2y6o6")
+
+[node name="CollisionShape3D3" type="CollisionShape3D" parent="Environment/Walls" unique_id=5089729]
+transform = Transform3D(-4.371139e-08, 0, -1, 0, 1, 0, 1, 0, -4.371139e-08, 0.0060658455, 0, 1.5430955)
+shape = SubResource("BoxShape3D_t4a2h")
+
+[node name="MeshInstance3D4" type="MeshInstance3D" parent="Environment/Walls" unique_id=1270566485]
+transform = Transform3D(-4.371139e-08, 0, -1, 0, 1, 0, 1, 0, -4.371139e-08, 0.0060658455, 0, -1.5541937)
+mesh = SubResource("BoxMesh_2y6o6")
+
+[node name="CollisionShape3D4" type="CollisionShape3D" parent="Environment/Walls" unique_id=454708478]
+transform = Transform3D(-4.371139e-08, 0, -1, 0, 1, 0, 1, 0, -4.371139e-08, 0.0060658455, 0, -1.5541937)
+shape = SubResource("BoxShape3D_lcct3")
+
+[node name="Obstacles" type="Node" parent="Environment" unique_id=578724054]
+
+[node name="Obstacle" type="StaticBody3D" parent="Environment/Obstacles" unique_id=366725570]
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Environment/Obstacles/Obstacle" unique_id=1222232524]
+mesh = SubResource("CylinderMesh_p8j0h")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Environment/Obstacles/Obstacle" unique_id=804377804]
+shape = SubResource("CylinderShape3D_qx68c")
+
+[node name="Obstacle2" type="StaticBody3D" parent="Environment/Obstacles" unique_id=681798040]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.6651534, 0, 0.5406203)
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Environment/Obstacles/Obstacle2" unique_id=1796307805]
+mesh = SubResource("CylinderMesh_p8j0h")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Environment/Obstacles/Obstacle2" unique_id=915023252]
+shape = SubResource("CylinderShape3D_qx68c")
+
+[node name="Obstacle3" type="StaticBody3D" parent="Environment/Obstacles" unique_id=1746325169]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.5017418, 0, 0.5406203)
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Environment/Obstacles/Obstacle3" unique_id=890515862]
+mesh = SubResource("CylinderMesh_p8j0h")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Environment/Obstacles/Obstacle3" unique_id=1102543673]
+shape = SubResource("CylinderShape3D_qx68c")
+
+[node name="Obstacle4" type="StaticBody3D" parent="Environment/Obstacles" unique_id=468125689]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.6925752, 0, 0.675091)
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Environment/Obstacles/Obstacle4" unique_id=1441681266]
+mesh = SubResource("CylinderMesh_p8j0h")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Environment/Obstacles/Obstacle4" unique_id=1651022050]
+shape = SubResource("CylinderShape3D_qx68c")
+
+[node name="Obstacle5" type="StaticBody3D" parent="Environment/Obstacles" unique_id=1686681852]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.0095098, 0, 0.675091)
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Environment/Obstacles/Obstacle5" unique_id=1904215353]
+mesh = SubResource("CylinderMesh_p8j0h")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Environment/Obstacles/Obstacle5" unique_id=1564721165]
+shape = SubResource("CylinderShape3D_qx68c")
+
+[node name="Obstacle6" type="StaticBody3D" parent="Environment/Obstacles" unique_id=1060251003]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.49116862, 0, 0.675091)
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Environment/Obstacles/Obstacle6" unique_id=1714435723]
+mesh = SubResource("CylinderMesh_p8j0h")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Environment/Obstacles/Obstacle6" unique_id=711854855]
+shape = SubResource("CylinderShape3D_qx68c")
+
+[node name="Obstacle7" type="StaticBody3D" parent="Environment/Obstacles" unique_id=1984063510]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.49116862, 0, 0.858418)
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Environment/Obstacles/Obstacle7" unique_id=783181963]
+mesh = SubResource("CylinderMesh_p8j0h")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Environment/Obstacles/Obstacle7" unique_id=1599180213]
+shape = SubResource("CylinderShape3D_qx68c")
+
 [node name="Camera3D" type="Camera3D" parent="." unique_id=1398719326]
 transform = Transform3D(0.9997216, 0.016435327, -0.016931614, 0, 0.7175446, 0.6965126, 0.023596598, -0.6963186, 0.7173449, -0.006845627, 1.0543814, 1.5451802)
 
@@ -65,13 +193,19 @@ transform = Transform3D(0.9997216, 0.016435327, -0.016931614, 0, 0.7175446, 0.69
 
 [node name="Tank" parent="Agents" unique_id=1089950526 instance=ExtResource("1_eom7a")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.2561896, 0, 0)
+manualControl = false
 
 [node name="Tank2" parent="Agents" unique_id=2107215311 instance=ExtResource("1_eom7a")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.0731688, 0, 0)
 manualControl = false
 
+[node name="Tank3" parent="Agents" unique_id=1970893581 instance=ExtResource("1_eom7a")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.20209265, 0, -0.976848)
+manualControl = false
+
 [node name="Target" type="Area3D" parent="." unique_id=1815520715 groups=["target"]]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.10049996, 1.1670119)
+collision_layer = 2
 
 [node name="MeshInstance3D" type="MeshInstance3D" parent="Target" unique_id=995929452]
 mesh = SubResource("CylinderMesh_eom7a")
