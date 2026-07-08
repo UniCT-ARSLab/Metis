@@ -187,7 +187,7 @@ mesh = SubResource("CylinderMesh_p8j0h")
 shape = SubResource("CylinderShape3D_qx68c")
 
 [node name="Camera3D" type="Camera3D" parent="." unique_id=1398719326]
-transform = Transform3D(0.9997216, 0.016435327, -0.016931614, 0, 0.7175446, 0.6965126, 0.023596598, -0.6963186, 0.7173449, -0.006845627, 1.0543814, 1.5451802)
+transform = Transform3D(0.9997216, 0.016435327, -0.016931614, 0, 0.7175446, 0.6965126, 0.023596598, -0.6963186, 0.7173449, -0.007, 1.954, 1.81)
 
 [node name="Agents" type="Node" parent="." unique_id=1308854801]
 

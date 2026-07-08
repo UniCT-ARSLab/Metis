@@ -4,8 +4,8 @@ extends Node
 @export var target:Area3D
 
 @export_category("RL Info")
-@export var reward_target_reached = 1.0
-@export var first_seen_reward = 0.1
+@export var reward_target_reached = 5.0
+@export var first_seen_reward = 0.2
 @export var max_steps:= 500
 
 var step_count := 0
@@ -49,16 +49,18 @@ func step(actions:Variant):
 	_refresh_agents()
 	step_count += 1
 
+	var applied_actions := {}
 	for agent in _agents:
-		var agent_action := _get_action_for_agent(actions, agent)
-		agent.apply_action(agent_action)
+		var agent_action: Variant = _get_action_for_agent(actions, agent)
+		var applied_action: int = agent.apply_action(agent_action)
+		applied_actions[_agent_id(agent)] = applied_action
 
 	await get_tree().physics_frame
 
 	var truncated := step_count >= max_steps
 	var channels := []
 	for agent in _agents:
-		channels.append(_build_agent_step_result(agent, truncated))
+		channels.append(_build_agent_step_result(agent, truncated, applied_actions.get(_agent_id(agent), 0)))
 
 	if _should_return_single_agent_response(actions):
 		if channels.is_empty():
@@ -105,7 +107,18 @@ func reset_episode():
 		var original_transform: Transform3D = agent.transform
 		if _original_agent_transforms.has(agent_id):
 			original_transform = _original_agent_transforms[agent_id]
-		agent.reset_all(original_transform)
+		agent.reset_all(original_transform, false)
+
+	await get_tree().physics_frame
+	for agent in _agents:
+		agent.refresh_sensors()
+
+	await get_tree().physics_frame
+	for agent in _agents:
+		agent.refresh_sensors()
+		agent.reset_reward()
+
+	for agent in _agents:
 		channels.append(_build_agent_reset_result(agent))
 	
 	if channels.size() == 1:
@@ -160,7 +173,7 @@ func _build_agent_reset_result(agent:Tank) -> Dictionary:
 	}
 
 
-func _build_agent_step_result(agent:Tank, truncated:bool) -> Dictionary:
+func _build_agent_step_result(agent:Tank, truncated:bool, applied_action:int = 0) -> Dictionary:
 	var agent_id := _agent_id(agent)
 	var local_reward := float(agent.get_reward())
 	var scenario_reward := compute_reward_scenario(agent)
@@ -179,15 +192,16 @@ func _build_agent_step_result(agent:Tank, truncated:bool) -> Dictionary:
 			"local_term_rewards": agent.get_reward_terms(),
 			"scenario_reward": scenario_reward,
 			"target_reached": terminated,
-			"target_first_seen": bool(_target_first_seen.get(agent_id, false))
+			"target_first_seen": bool(_target_first_seen.get(agent_id, false)),
+			"applied_action": applied_action
 		}
 	}
 
 
-func _get_action_for_agent(actions:Variant, agent:Tank) -> int:
+func _get_action_for_agent(actions:Variant, agent:Tank) -> Variant:
 	if typeof(actions) == TYPE_DICTIONARY:
 		var action_map: Dictionary = actions
-		return int(action_map.get(_agent_id(agent), 0))
+		return action_map.get(_agent_id(agent), 0)
 
 	return int(actions)
 

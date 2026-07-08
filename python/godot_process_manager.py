@@ -6,12 +6,13 @@ from pathlib import Path
 
 
 class GodotProcessManager:
-    def __init__(self, godot_bin=None, project_dir=None, logs_dir=None):
+    def __init__(self, godot_bin=None, project_dir=None, logs_dir=None, scene_path=None):
         self.godot_bin = godot_bin or os.environ.get("GODOT_BIN")
         if not self.godot_bin:
             raise RuntimeError("Set GODOT_BIN or pass godot_bin explicitly.")
         self.project_dir = Path(project_dir or Path(__file__).resolve().parents[1] / "godot")
         self.logs_dir = Path(logs_dir or Path(__file__).resolve().parent / "logs")
+        self.scene_path = scene_path
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.processes = []
 
@@ -31,11 +32,20 @@ class GodotProcessManager:
         text = log_path.read_text(errors="ignore").splitlines()
         return "\n".join(text[-lines:]) if text else "<empty log file>"
 
-    def start_many(self, ports, headless=True):
+    def start_many(self, ports, headless=True, debug=False):
         args_prefix = [self.godot_bin]
         if headless:
             args_prefix.append("--headless")
+        if debug:
+            args_prefix.append("--debug")
+            args_prefix.append("--debug-collisions")
+            args_prefix.append("--debug-paths")
+            args_prefix.append("--debug-navigation")
+            args_prefix.append("--debug-avoidance")
+
         args_prefix += ["--path", str(self.project_dir)]
+        if self.scene_path:
+            args_prefix.append(str(self.scene_path))
 
         for port in ports:
             log_path = self.logs_dir / f"godot_{port}.log"

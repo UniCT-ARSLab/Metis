@@ -45,8 +45,66 @@ func _physics_process(delta):
 
 
 func apply_action(action:Variant) -> int:
+	if typeof(action) == TYPE_STRING or typeof(action) == TYPE_STRING_NAME:
+		var action_name := str(action)
+		if action_name == "manual":
+			return apply_manual_action()
+		var named_action_id := _action_id_from_name(action_name)
+		if named_action_id < 0:
+			clear_inputs()
+			return 0
+		clear_inputs()
+		agent.act(named_action_id)
+		return named_action_id
+
 	clear_inputs()
-	return agent.act(action)
+	var action_id := int(action)
+	if agent.act(action_id) != OK:
+		return 0
+	return action_id
+
+
+func apply_manual_action() -> int:
+	var action_id := get_manual_action_id()
+	clear_inputs()
+	agent.act(action_id)
+	return action_id
+
+
+func get_manual_action_id() -> int:
+	var move_axis := Input.get_axis("move_back", "move_forward")
+	var turn_axis := Input.get_axis("turn_left", "turn_right")
+	var deadzone := 0.2
+	var move := 0
+	var turn := 0
+
+	if move_axis > deadzone:
+		move = 1
+	elif move_axis < -deadzone:
+		move = -1
+
+	if turn_axis > deadzone:
+		turn = 1
+	elif turn_axis < -deadzone:
+		turn = -1
+
+	if move > 0 and turn > 0:
+		return _action_id_from_name("forward_right")
+	if move > 0 and turn < 0:
+		return _action_id_from_name("forward_left")
+	if move < 0 and turn > 0:
+		return _action_id_from_name("backward_right")
+	if move < 0 and turn < 0:
+		return _action_id_from_name("backward_left")
+	if move > 0:
+		return _action_id_from_name("move_forward")
+	if move < 0:
+		return _action_id_from_name("move_backward")
+	if turn > 0:
+		return _action_id_from_name("turn_right")
+	if turn < 0:
+		return _action_id_from_name("turn_left")
+	return _action_id_from_name("idle")
 
 
 func get_observation_vector() -> Array:
@@ -99,44 +157,62 @@ func move_backward() -> void:
 
 
 func turn_right() -> void:
-	_turn_input = 1
+	_turn_input = -1
 
 
 func turn_left() -> void:
-	_turn_input = -1
+	_turn_input = 1
 
 
 func forward_right() -> void:
 	_move_input = 1
-	_turn_input = 1
+	_turn_input = -1
 
 
 func forward_left() -> void:
 	_move_input = 1
-	_turn_input = -1
+	_turn_input = 1
 
 
 func backward_right() -> void:
 	_move_input = -1
-	_turn_input = 1
+	_turn_input = -1
 
 
 func backward_left() -> void:
 	_move_input = -1
-	_turn_input = -1
+	_turn_input = 1
 
 
 func manual_control() -> void:
 	if manualControl:
 		_move_input = Input.get_axis("move_back", "move_forward")
-		_turn_input = Input.get_axis("turn_right", "turn_left")
+		_turn_input = -Input.get_axis("turn_left", "turn_right")
 
-func reset_all(original_position:Transform3D):
+func reset_all(original_position:Transform3D, reset_rewards := true):
 	if original_position!= null:
 		transform = original_position
 	clear_inputs()
 	velocity = Vector3.ZERO
-	reset_reward()
+	if has_method("reset_physics_interpolation"):
+		reset_physics_interpolation()
+	reset_raycast_state()
+	if reset_rewards:
+		refresh_sensors()
+		reset_reward()
+
+func reset_raycast_state() -> void:
+	for raycast in _raycasts:
+		if is_instance_valid(raycast):
+			raycast.clear_exceptions()
+			raycast.enabled = false
+
+func refresh_sensors() -> void:
+	for raycast in _raycasts:
+		if is_instance_valid(raycast):
+			raycast.clear_exceptions()
+			raycast.enabled = true
+			raycast.force_raycast_update()
 
 func _register_observations() -> void:
 	_find_raycasts(self, _raycasts)
@@ -184,6 +260,13 @@ func _get_sensor_base_name(raycast:RayCast3D) -> String:
 		parent_name.to_lower().replace(" ", "_"),
 		str(raycast.name).to_lower().replace(" ", "_")
 	]
+
+func _action_id_from_name(action_name:String) -> int:
+	var action_names := agent.get_action_names()
+	for idx in range(action_names.size()):
+		if str(action_names[idx]) == action_name:
+			return idx
+	return -1
 
 func _build_reward_context() -> Dictionary:
 	return {

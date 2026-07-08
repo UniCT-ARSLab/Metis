@@ -1,0 +1,97 @@
+[gd_scene format=3 uid="uid://bau21h7w5ej3x"]
+
+[ext_resource type="Script" uid="uid://dgp74mhn03x02" path="res://agents/Car/car.gd" id="1_5ftgc"]
+[ext_resource type="PackedScene" uid="uid://dr8xr7wsecjae" path="res://assets/models/car/sedan-sports.glb" id="2_fs0mh"]
+[ext_resource type="Script" uid="uid://byrdvsguqdev3" path="res://scripts/agent/Agent.gd" id="2_vfwxj"]
+[ext_resource type="Script" uid="uid://d1xuba84xevcv" path="res://scripts/agent/RewardSystem.gd" id="3_vfwxj"]
+[ext_resource type="Script" path="res://scripts/agent/reward_components/ForwardVelocityReward.gd" id="4_forward_velocity"]
+[ext_resource type="Script" uid="uid://dyq1fjgcu1wqu" path="res://scripts/agent/reward_components/StepPenaltyReward.gd" id="5_time"]
+[ext_resource type="Script" uid="uid://dheahoedootoj" path="res://scripts/agent/reward_components/EventReward.gd" id="6_collision"]
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_5ftgc"]
+radius = 0.6669922
+height = 2.5665283
+
+[node name="Car" type="CharacterBody3D" unique_id=832978756]
+script = ExtResource("1_5ftgc")
+
+[node name="Agent" type="Node" parent="." unique_id=1128095891]
+script = ExtResource("2_vfwxj")
+metadata/_custom_type_script = "uid://byrdvsguqdev3"
+
+[node name="RewardSystem" type="Node" parent="Agent" unique_id=1749491164]
+script = ExtResource("3_vfwxj")
+metadata/_custom_type_script = "uid://d1xuba84xevcv"
+
+[node name="ForwardVelocityReward" type="Node" parent="Agent/RewardSystem" unique_id=1889551391]
+script = ExtResource("4_forward_velocity")
+term_name = "forward_velocity"
+
+[node name="TimePenalty" type="Node" parent="Agent/RewardSystem" unique_id=1545930821]
+script = ExtResource("5_time")
+penalty = -0.0005
+term_name = "time"
+
+[node name="CollisionPenalty" type="Node" parent="Agent/RewardSystem" unique_id=497898485]
+script = ExtResource("6_collision")
+event_name = "collision"
+scale = -5.0
+term_name = "collision"
+
+[node name="Mesh" parent="." unique_id=540980627 instance=ExtResource("2_fs0mh")]
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="." unique_id=1555286248]
+transform = Transform3D(1, 0, 0, 0, -4.371139e-08, -1, 0, 1, -4.371139e-08, 0, 0.6689594, -0.039733887)
+shape = SubResource("CapsuleShape3D_5ftgc")
+
+[node name="ViewSensors" type="Node3D" parent="." unique_id=639709734]
+
+[node name="RayCast3D" type="RayCast3D" parent="ViewSensors" unique_id=79769249]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.261369, 1.0533442)
+target_position = Vector3(0, 0, 5)
+debug_shape_custom_color = Color(0, 1, 0, 1)
+
+[node name="RayCast3D2" type="RayCast3D" parent="ViewSensors" unique_id=365763750]
+transform = Transform3D(0.9659258, 0, 0.25881904, 0, 1, 0, -0.25881904, 0, 0.9659258, 0, 0.261369, 1.0533442)
+target_position = Vector3(0, 0, 5)
+debug_shape_custom_color = Color(0, 1, 0, 1)
+
+[node name="RayCast3D3" type="RayCast3D" parent="ViewSensors" unique_id=1447342298]
+transform = Transform3D(0.86602545, 0, 0.50000006, 0, 1, 0, -0.50000006, 0, 0.86602545, 0, 0.261369, 1.0533442)
+target_position = Vector3(0, 0, 5)
+debug_shape_custom_color = Color(0, 1, 0, 1)
+
+[node name="RayCast3D4" type="RayCast3D" parent="ViewSensors" unique_id=1409550767]
+transform = Transform3D(0.70710677, 0, 0.7071068, 0, 1, 0, -0.7071068, 0, 0.70710677, 0, 0.261369, 1.0533442)
+target_position = Vector3(0, 0, 5)
+debug_shape_custom_color = Color(0, 1, 0, 1)
+
+[node name="RayCast3D5" type="RayCast3D" parent="ViewSensors" unique_id=1688696447]
+transform = Transform3D(0.49999994, 0, 0.86602545, 0, 1, 0, -0.86602545, 0, 0.49999994, 0, 0.261369, 1.0533442)
+target_position = Vector3(0, 0, 5)
+debug_shape_custom_color = Color(0, 1, 0, 1)
+
+[node name="RayCast3D6" type="RayCast3D" parent="ViewSensors" unique_id=1307421514]
+transform = Transform3D(0.5000001, 0, -0.86602545, 0, 1, 0, 0.86602545, 0, 0.5000001, 0, 0.261369, 1.0533442)
+target_position = Vector3(0, 0, 5)
+debug_shape_custom_color = Color(0, 1, 0, 1)
+
+[node name="RayCast3D7" type="RayCast3D" parent="ViewSensors" unique_id=1671324541]
+transform = Transform3D(0.7071069, 0, -0.70710677, 0, 1, 0, 0.70710677, 0, 0.7071069, 0, 0.261369, 1.0533442)
+target_position = Vector3(0, 0, 5)
+debug_shape_custom_color = Color(0, 1, 0, 1)
+
+[node name="RayCast3D8" type="RayCast3D" parent="ViewSensors" unique_id=857745637]
+transform = Transform3D(0.86602545, 0, -0.49999994, 0, 1, 0, 0.49999994, 0, 0.86602545, 0, 0.261369, 1.0533442)
+target_position = Vector3(0, 0, 5)
+debug_shape_custom_color = Color(0, 1, 0, 1)
+
+[node name="RayCast3D9" type="RayCast3D" parent="ViewSensors" unique_id=1164977168]
+transform = Transform3D(0.9659258, 0, -0.25881892, 0, 1, 0, 0.25881892, 0, 0.9659258, 0, 0.261369, 1.0533442)
+target_position = Vector3(0, 0, 5)
+debug_shape_custom_color = Color(0, 1, 0, 1)
+
+[node name="StatusText" type="Label3D" parent="." unique_id=1697598515]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.7446976, 0)
+billboard = 1
+text = "TEST"

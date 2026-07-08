@@ -70,7 +70,7 @@ func _handle_line(line: String) -> void:
 		"spec":
 			_send(_call_spec())
 		"reset":
-			var reset_reply: Dictionary = _call_reset(request)
+			var reset_reply: Dictionary = await _call_reset(request)
 			var reset_agents: Variant = reset_reply.get("agents", [])
 			print("[BridgeServer] reset ok port=%d agents=%d" % [port, reset_agents.size()])
 			_send(reset_reply)
@@ -92,6 +92,7 @@ func _handle_line(line: String) -> void:
 				"[BridgeServer] step ok port=%d step=%s terminated=%s truncated=%s" %
 				[port, str(info.get("step", info.get("episode_step", "?"))), str(terminated), str(truncated)]
 			)
+			
 			_send(step_reply)
 		"close":
 			_send({
@@ -106,7 +107,7 @@ func _handle_line(line: String) -> void:
 
 func _call_reset(request:Dictionary) -> Dictionary:
 	if controller.has_method("reset_episode_with_request"):
-		return controller.reset_episode_with_request(request)
+		return await controller.reset_episode_with_request(request)
 
 	if controller.has_method("reset_episode"):
 		if controller.has_method("step_episode"):
@@ -114,8 +115,8 @@ func _call_reset(request:Dictionary) -> Dictionary:
 			var teams: Variant = request.get("teams", [0])
 			if typeof(teams) != TYPE_ARRAY:
 				teams = [0]
-			return controller.reset_episode(seed, teams as Array)
-		return controller.reset_episode()
+			return await controller.reset_episode(seed, teams as Array)
+		return await controller.reset_episode()
 
 	return {"ok": false, "error": "Controller has no reset_episode"}
 
