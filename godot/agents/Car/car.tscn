@@ -4,7 +4,7 @@
 [ext_resource type="PackedScene" uid="uid://dr8xr7wsecjae" path="res://assets/models/car/sedan-sports.glb" id="2_fs0mh"]
 [ext_resource type="Script" uid="uid://byrdvsguqdev3" path="res://scripts/agent/Agent.gd" id="2_vfwxj"]
 [ext_resource type="Script" uid="uid://d1xuba84xevcv" path="res://scripts/agent/RewardSystem.gd" id="3_vfwxj"]
-[ext_resource type="Script" path="res://scripts/agent/reward_components/ForwardVelocityReward.gd" id="4_forward_velocity"]
+[ext_resource type="Script" uid="uid://di4is147y7tvs" path="res://scripts/agent/reward_components/ForwardVelocityReward.gd" id="4_forward_velocity"]
 [ext_resource type="Script" uid="uid://dyq1fjgcu1wqu" path="res://scripts/agent/reward_components/StepPenaltyReward.gd" id="5_time"]
 [ext_resource type="Script" uid="uid://dheahoedootoj" path="res://scripts/agent/reward_components/EventReward.gd" id="6_collision"]
 
@@ -13,6 +13,7 @@ radius = 0.6669922
 height = 2.5665283
 
 [node name="Car" type="CharacterBody3D" unique_id=832978756]
+collision_mask = 6
 script = ExtResource("1_5ftgc")
 
 [node name="Agent" type="Node" parent="." unique_id=1128095891]
@@ -49,49 +50,62 @@ shape = SubResource("CapsuleShape3D_5ftgc")
 [node name="RayCast3D" type="RayCast3D" parent="ViewSensors" unique_id=79769249]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.261369, 1.0533442)
 target_position = Vector3(0, 0, 5)
+collision_mask = 2
 debug_shape_custom_color = Color(0, 1, 0, 1)
 
 [node name="RayCast3D2" type="RayCast3D" parent="ViewSensors" unique_id=365763750]
 transform = Transform3D(0.9659258, 0, 0.25881904, 0, 1, 0, -0.25881904, 0, 0.9659258, 0, 0.261369, 1.0533442)
 target_position = Vector3(0, 0, 5)
+collision_mask = 2
 debug_shape_custom_color = Color(0, 1, 0, 1)
 
 [node name="RayCast3D3" type="RayCast3D" parent="ViewSensors" unique_id=1447342298]
 transform = Transform3D(0.86602545, 0, 0.50000006, 0, 1, 0, -0.50000006, 0, 0.86602545, 0, 0.261369, 1.0533442)
 target_position = Vector3(0, 0, 5)
+collision_mask = 2
 debug_shape_custom_color = Color(0, 1, 0, 1)
 
 [node name="RayCast3D4" type="RayCast3D" parent="ViewSensors" unique_id=1409550767]
 transform = Transform3D(0.70710677, 0, 0.7071068, 0, 1, 0, -0.7071068, 0, 0.70710677, 0, 0.261369, 1.0533442)
 target_position = Vector3(0, 0, 5)
+collision_mask = 2
 debug_shape_custom_color = Color(0, 1, 0, 1)
 
 [node name="RayCast3D5" type="RayCast3D" parent="ViewSensors" unique_id=1688696447]
 transform = Transform3D(0.49999994, 0, 0.86602545, 0, 1, 0, -0.86602545, 0, 0.49999994, 0, 0.261369, 1.0533442)
 target_position = Vector3(0, 0, 5)
+collision_mask = 2
 debug_shape_custom_color = Color(0, 1, 0, 1)
 
 [node name="RayCast3D6" type="RayCast3D" parent="ViewSensors" unique_id=1307421514]
 transform = Transform3D(0.5000001, 0, -0.86602545, 0, 1, 0, 0.86602545, 0, 0.5000001, 0, 0.261369, 1.0533442)
 target_position = Vector3(0, 0, 5)
+collision_mask = 2
 debug_shape_custom_color = Color(0, 1, 0, 1)
 
 [node name="RayCast3D7" type="RayCast3D" parent="ViewSensors" unique_id=1671324541]
 transform = Transform3D(0.7071069, 0, -0.70710677, 0, 1, 0, 0.70710677, 0, 0.7071069, 0, 0.261369, 1.0533442)
 target_position = Vector3(0, 0, 5)
+collision_mask = 2
 debug_shape_custom_color = Color(0, 1, 0, 1)
 
 [node name="RayCast3D8" type="RayCast3D" parent="ViewSensors" unique_id=857745637]
 transform = Transform3D(0.86602545, 0, -0.49999994, 0, 1, 0, 0.49999994, 0, 0.86602545, 0, 0.261369, 1.0533442)
 target_position = Vector3(0, 0, 5)
+collision_mask = 2
 debug_shape_custom_color = Color(0, 1, 0, 1)
 
 [node name="RayCast3D9" type="RayCast3D" parent="ViewSensors" unique_id=1164977168]
 transform = Transform3D(0.9659258, 0, -0.25881892, 0, 1, 0, 0.25881892, 0, 0.9659258, 0, 0.261369, 1.0533442)
 target_position = Vector3(0, 0, 5)
+collision_mask = 2
 debug_shape_custom_color = Color(0, 1, 0, 1)
 
 [node name="StatusText" type="Label3D" parent="." unique_id=1697598515]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.7446976, 0)
 billboard = 1
 text = "TEST"
+
+[node name="Camera3D" type="Camera3D" parent="." unique_id=467021622]
+transform = Transform3D(-0.99932706, -0.021276413, 0.029878713, 0, 0.8145775, 0.58005476, -0.03668001, 0.57966435, -0.8140294, 0.010704011, 4.699168, -3.9074554)
+current = true

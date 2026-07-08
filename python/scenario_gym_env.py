@@ -1,6 +1,7 @@
 import json
 import socket
 from pathlib import Path
+from collections import OrderedDict
 
 import numpy as np
 
@@ -62,6 +63,9 @@ class ScenarioGymEnv(gym.Env):
         self.action_names = list(first_spec.get("action_names", []))
         self.action_low = np.asarray(first_spec.get("action_low", [-1.0] * self.action_size), dtype=np.float32)
         self.action_high = np.asarray(first_spec.get("action_high", [1.0] * self.action_size), dtype=np.float32)
+        self.action_space_spec = OrderedDict(first_spec.get("action_space", {}))
+        if self.action_space_spec and not self.action_names:
+            self.action_names = list(self.action_space_spec.keys())
 
         if self.multi_agent:
             dims = {int(item["obs_dim"]) for item in self.agent_specs}
@@ -77,6 +81,11 @@ class ScenarioGymEnv(gym.Env):
                 lows = np.tile(self.action_low, (len(self.agent_specs), 1))
                 highs = np.tile(self.action_high, (len(self.agent_specs), 1))
                 self.action_space = spaces.Box(low=lows, high=highs, dtype=np.float32)
+            elif self.action_type == "hybrid":
+                self.action_space = spaces.Dict({
+                    agent_id: self._gym_space_from_action_spec(self._spec_for_agent(agent_id).get("action_space", {}))
+                    for agent_id in self.agent_ids
+                })
             else:
                 self.action_space = spaces.MultiDiscrete([self.num_actions] * len(self.agent_specs))
             self.observation_space = spaces.Box(
@@ -88,6 +97,8 @@ class ScenarioGymEnv(gym.Env):
         else:
             if self.action_type == "continuous":
                 self.action_space = spaces.Box(low=self.action_low, high=self.action_high, dtype=np.float32)
+            elif self.action_type == "hybrid":
+                self.action_space = self._gym_space_from_action_spec(self.action_space_spec)
             else:
                 self.action_space = spaces.Discrete(self.num_actions)
             self.observation_space = spaces.Box(
@@ -109,6 +120,47 @@ class ScenarioGymEnv(gym.Env):
             if str(item["id"]) == agent_id:
                 return item
         raise KeyError(agent_id)
+
+    def _gym_space_from_action_spec(self, action_space_spec):
+        components = OrderedDict(action_space_spec or {})
+        if not components:
+            raise RuntimeError("Cannot build hybrid action space from an empty action_space spec")
+
+        result = OrderedDict()
+        for name, component in components.items():
+            component = dict(component)
+            action_type = str(component.get("action_type", component.get("type", "discrete")))
+            size = int(component.get("size", 1))
+            if action_type == "continuous":
+                low = self._component_bound(component.get("low", -1.0), size, -1.0)
+                high = self._component_bound(component.get("high", 1.0), size, 1.0)
+                result[str(name)] = spaces.Box(low=low, high=high, dtype=np.float32)
+            elif action_type == "discrete":
+                result[str(name)] = spaces.Discrete(size)
+            else:
+                raise RuntimeError(f"Unsupported action component type {action_type!r} for {name!r}")
+        return spaces.Dict(result)
+
+    def _component_bound(self, value, size, default):
+        array = np.asarray(value if isinstance(value, (list, tuple)) else [value], dtype=np.float32)
+        if array.size == 0:
+            array = np.asarray([default], dtype=np.float32)
+        if array.size == 1:
+            return np.full((size,), float(array[0]), dtype=np.float32)
+        if array.size != size:
+            raise RuntimeError(f"Action bound has size {array.size}, expected {size}")
+        return array.astype(np.float32)
+
+    def _jsonable_action(self, action):
+        if isinstance(action, np.ndarray):
+            return action.astype(np.float32).tolist()
+        if isinstance(action, np.generic):
+            return action.item()
+        if isinstance(action, dict):
+            return {str(key): self._jsonable_action(value) for key, value in action.items()}
+        if isinstance(action, (list, tuple)):
+            return [self._jsonable_action(value) for value in action]
+        return action
 
     def _send(self, payload):
         self.file.write((json.dumps(payload) + "\n").encode("utf-8"))
@@ -198,7 +250,7 @@ class ScenarioGymEnv(gym.Env):
         if self.multi_agent:
             if isinstance(action, dict):
                 action_payload = {
-                    str(agent_id): value
+                    str(agent_id): self._jsonable_action(value)
                     for agent_id, value in action.items()
                 }
             elif self.action_type == "continuous":
@@ -207,6 +259,17 @@ class ScenarioGymEnv(gym.Env):
                     agent_id: action_array[idx].tolist()
                     for idx, agent_id in enumerate(self.agent_ids)
                 }
+            elif self.action_type == "hybrid":
+                if isinstance(action, dict) and all(agent_id in action for agent_id in self.agent_ids):
+                    action_payload = {
+                        agent_id: self._jsonable_action(action[agent_id])
+                        for agent_id in self.agent_ids
+                    }
+                else:
+                    action_payload = {
+                        agent_id: self._jsonable_action(action[idx])
+                        for idx, agent_id in enumerate(self.agent_ids)
+                    }
             else:
                 action_array = np.asarray(action, dtype=np.int32).reshape(len(self.agent_specs))
                 action_payload = {
@@ -218,6 +281,8 @@ class ScenarioGymEnv(gym.Env):
                 action_payload = {self.agent_id: action}
             elif self.action_type == "continuous":
                 action_payload = {self.agent_id: np.asarray(action, dtype=np.float32).reshape(self.action_size).tolist()}
+            elif self.action_type == "hybrid":
+                action_payload = {self.agent_id: self._jsonable_action(action)}
             else:
                 action_payload = {self.agent_id: int(action)}
 

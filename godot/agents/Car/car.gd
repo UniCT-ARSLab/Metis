@@ -11,6 +11,10 @@ class_name Car
 @export var update_raycast_debug_colors := true
 @export var raycast_clear_debug_color := Color(0.0, 1.0, 0.0, 1.0)
 @export var raycast_hit_debug_color := Color(1.0, 0.0, 0.0, 1.0)
+@export var auto_manage_camera := false
+
+@onready var camera: Camera3D = $Camera3D
+
 
 var _rotate_input = 0.0
 var _move_input = 0.0
@@ -55,6 +59,7 @@ func reset_all(original_position:Transform3D, reset_rewards := true):
 	_total_time = 0.0
 	_crashed = false
 	status_text.text = "OK"
+	set_camera_current(false)
 	
 	if original_position!= null:
 		transform = original_position
@@ -159,6 +164,22 @@ func clear_inputs() -> void:
 
 func get_action_type() -> String:
 	return "continuous"
+
+func get_action_space() -> Dictionary:
+	return {
+		"move_input": {
+			"size": 1,
+			"action_type": "continuous",
+			"low": -1.0,
+			"high": 1.0
+		},
+		"rotation_input": {
+			"size": 1,
+			"action_type": "continuous",
+			"low": -1.0,
+			"high": 1.0
+		}
+	}
 
 func get_action_size() -> int:
 	return 2
@@ -307,8 +328,18 @@ func _update_crash_state() -> void:
 		if normal.dot(Vector3.UP) >= crash_floor_normal_threshold:
 			continue
 		_crashed = true
+		if auto_manage_camera:
+			set_camera_current(false)
 		agent.add_reward_event("collision", 1.0)
 		return
+
+func set_camera_current(enabled:bool) -> void:
+	if camera == null:
+		return
+	if enabled:
+		camera.make_current()
+	else:
+		camera.current = false
 
 func _is_continuous_action(action:Variant) -> bool:
 	if typeof(action) == TYPE_ARRAY or typeof(action) == TYPE_PACKED_FLOAT32_ARRAY or typeof(action) == TYPE_PACKED_FLOAT64_ARRAY:
@@ -321,8 +352,8 @@ func _continuous_action_values(action:Variant) -> Array:
 	if typeof(action) == TYPE_DICTIONARY:
 		var action_map: Dictionary = action
 		return [
-			float(action_map.get("move_input", 0.0)),
-			float(action_map.get("rotation_input", 0.0))
+			_action_component_float(action_map.get("move_input", 0.0)),
+			_action_component_float(action_map.get("rotation_input", 0.0))
 		]
 
 	if typeof(action) == TYPE_ARRAY or typeof(action) == TYPE_PACKED_FLOAT32_ARRAY or typeof(action) == TYPE_PACKED_FLOAT64_ARRAY:
@@ -336,3 +367,11 @@ func _continuous_action_values(action:Variant) -> Array:
 		return [move_value, rotation_value]
 
 	return [0.0, 0.0]
+
+func _action_component_float(value:Variant) -> float:
+	if typeof(value) == TYPE_ARRAY or typeof(value) == TYPE_PACKED_FLOAT32_ARRAY or typeof(value) == TYPE_PACKED_FLOAT64_ARRAY:
+		var values: Array = Array(value)
+		if values.is_empty():
+			return 0.0
+		return float(values[0])
+	return float(value)

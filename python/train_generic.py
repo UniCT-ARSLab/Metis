@@ -10,6 +10,7 @@ from scenario_gym_env import ScenarioGymEnv
 BACKENDS = {
     "dqn": "train_generic_dqn.py",
     "ddpg": "train_generic_ddpg.py",
+    "ppo": "train_generic_ppo.py",
 }
 
 
@@ -17,12 +18,12 @@ def parse_args(argv):
     parser = argparse.ArgumentParser(
         description=(
             "Unified Godot training entrypoint. With --algorithm auto it inspects "
-            "the scenario action space and delegates to DQN for discrete actions "
-            "or DDPG for continuous actions."
+            "the scenario action space and delegates to DQN for discrete actions, "
+            "DDPG for continuous actions, or PPO for hybrid actions."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--algorithm", choices=["auto", "dqn", "ddpg"], default="auto")
+    parser.add_argument("--algorithm", choices=["auto", "dqn", "ddpg", "ppo"], default="auto")
     parser.add_argument("--probe-port", type=int, default=None)
     parser.add_argument("--num-envs", type=int, default=1)
     parser.add_argument("--base-port", type=int, default=6200)
@@ -102,7 +103,9 @@ def select_backend(args):
         return "dqn"
     if action_type == "continuous":
         return "ddpg"
-    raise RuntimeError(f"Unsupported action_type={action_type!r}; expected 'discrete' or 'continuous'.")
+    if action_type == "hybrid":
+        return "ppo"
+    raise RuntimeError(f"Unsupported action_type={action_type!r}; expected 'discrete', 'continuous' or 'hybrid'.")
 
 
 def main():

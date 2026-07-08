@@ -22,6 +22,7 @@ var _previous_progress := {}
 @export_category("RL Info")
 @export var reward_target_reached = 5.0
 @export var max_steps:= 500
+@export var manage_agent_cameras := true
 
 var step_count := 0
 var _agents: Array[Node] = []
@@ -89,6 +90,7 @@ func step(actions:Variant):
 	var channels := []
 	for agent in _agents:
 		channels.append(_build_agent_step_result(agent, truncated, applied_actions.get(_agent_id(agent), 0)))
+	_update_current_agent_camera()
 
 	if _should_return_single_agent_response(actions):
 		if channels.is_empty():
@@ -163,6 +165,7 @@ func reset_episode(seed := 0):
 
 	for agent in _agents:
 		channels.append(_build_agent_reset_result(agent))
+	_update_current_agent_camera()
 	
 	if channels.size() == 1:
 		var single: Dictionary = channels[0].duplicate(true)
@@ -183,22 +186,27 @@ func get_spec() -> Dictionary:
 
 	var agent_specs := []
 	for agent in _agents:
+		var action_space := _get_agent_action_space(agent)
+		var action_type := _infer_action_type(action_space)
+		var action_names := _flatten_action_names(action_space)
 		var agent_spec := {
 			"id": _agent_id(agent),
 			"obs_dim": agent.get_observation_size(),
-			"action_names": agent.get_action_names()
+			"action_names": action_names,
+			"action_type": action_type,
+			"action_space": action_space
 		}
-		var action_type := "discrete"
-		if agent.has_method("get_action_type"):
-			action_type = str(agent.get_action_type())
-		agent_spec["action_type"] = action_type
 		if action_type == "continuous":
-			agent_spec["action_size"] = int(agent.get_action_size())
-			agent_spec["action_low"] = agent.get_action_low()
-			agent_spec["action_high"] = agent.get_action_high()
-			agent_spec["num_actions"] = int(agent.get_action_size())
+			agent_spec["action_size"] = _continuous_action_size(action_space)
+			agent_spec["action_low"] = _continuous_action_bounds(action_space, "low", -1.0)
+			agent_spec["action_high"] = _continuous_action_bounds(action_space, "high", 1.0)
+			agent_spec["num_actions"] = int(agent_spec["action_size"])
+		elif action_type == "discrete":
+			agent_spec["num_actions"] = _single_discrete_action_size(action_space)
+			agent_spec["action_size"] = int(agent_spec["num_actions"])
 		else:
-			agent_spec["num_actions"] = agent.get_action_count()
+			agent_spec["action_size"] = _continuous_action_size(action_space)
+			agent_spec["num_actions"] = _total_discrete_action_size(action_space)
 		agent_specs.append(agent_spec)
 
 	return {
@@ -224,6 +232,138 @@ func get_track_progress(agent: Node3D) -> float:
 	var offset := curve.get_closest_offset(local_position)
 
 	return clampf(offset / total_length, 0.0, 1.0)
+
+
+func _get_agent_action_space(agent:Node) -> Dictionary:
+	if agent.has_method("get_action_space"):
+		var action_space: Variant = agent.get_action_space()
+		if typeof(action_space) == TYPE_DICTIONARY:
+			return _normalize_action_space(action_space)
+
+	var action_type := "discrete"
+	if agent.has_method("get_action_type"):
+		action_type = str(agent.get_action_type())
+
+	if action_type == "continuous":
+		var action_names: Array = agent.get_action_names()
+		var lows: Array = []
+		var highs: Array = []
+		if agent.has_method("get_action_low"):
+			lows = agent.get_action_low()
+		if agent.has_method("get_action_high"):
+			highs = agent.get_action_high()
+		var result := {}
+		for idx in range(int(agent.get_action_size())):
+			var action_name := str(idx)
+			if idx < action_names.size():
+				action_name = str(action_names[idx])
+			result[action_name] = {
+				"size": 1,
+				"action_type": "continuous",
+				"low": float(lows[idx]) if idx < lows.size() else -1.0,
+				"high": float(highs[idx]) if idx < highs.size() else 1.0
+			}
+		return result
+
+	return {
+		"action": {
+			"size": agent.get_action_count(),
+			"action_type": "discrete",
+			"names": agent.get_action_names()
+		}
+	}
+
+
+func _normalize_action_space(action_space:Dictionary) -> Dictionary:
+	var result := {}
+	for action_name in action_space.keys():
+		var raw_component: Variant = action_space[action_name]
+		var component := {}
+		if typeof(raw_component) == TYPE_DICTIONARY:
+			component = raw_component.duplicate(true)
+
+		var component_type := str(component.get("action_type", component.get("type", "discrete")))
+		var size := int(component.get("size", 1))
+		component["action_type"] = component_type
+		component["size"] = max(size, 1)
+		if component_type == "continuous":
+			component["low"] = component.get("low", -1.0)
+			component["high"] = component.get("high", 1.0)
+		result[str(action_name)] = component
+	return result
+
+
+func _infer_action_type(action_space:Dictionary) -> String:
+	var continuous_count := 0
+	var discrete_count := 0
+	for component in action_space.values():
+		var component_type := str(component.get("action_type", "discrete"))
+		if component_type == "continuous":
+			continuous_count += 1
+		elif component_type == "discrete":
+			discrete_count += 1
+
+	if continuous_count > 0 and discrete_count == 0:
+		return "continuous"
+	if discrete_count == 1 and continuous_count == 0 and action_space.size() == 1:
+		return "discrete"
+	return "hybrid"
+
+
+func _flatten_action_names(action_space:Dictionary) -> Array:
+	var names := []
+	for action_name in action_space.keys():
+		var component: Dictionary = action_space[action_name]
+		var component_type := str(component.get("action_type", "discrete"))
+		var size := int(component.get("size", 1))
+		if component_type == "discrete" and component.has("names"):
+			names.append_array(component["names"])
+		elif size <= 1:
+			names.append(str(action_name))
+		else:
+			for idx in range(size):
+				names.append("%s_%d" % [str(action_name), idx])
+	return names
+
+
+func _continuous_action_size(action_space:Dictionary) -> int:
+	var total := 0
+	for component in action_space.values():
+		if str(component.get("action_type", "discrete")) == "continuous":
+			total += int(component.get("size", 1))
+	return total
+
+
+func _continuous_action_bounds(action_space:Dictionary, key:String, default_value:float) -> Array:
+	var result := []
+	for component in action_space.values():
+		if str(component.get("action_type", "discrete")) != "continuous":
+			continue
+		var size := int(component.get("size", 1))
+		var value: Variant = component.get(key, default_value)
+		if typeof(value) == TYPE_ARRAY or typeof(value) == TYPE_PACKED_FLOAT32_ARRAY or typeof(value) == TYPE_PACKED_FLOAT64_ARRAY:
+			var values: Array = Array(value)
+			for idx in range(size):
+				result.append(float(values[idx]) if idx < values.size() else default_value)
+		else:
+			for idx in range(size):
+				result.append(float(value))
+	return result
+
+
+func _single_discrete_action_size(action_space:Dictionary) -> int:
+	for component in action_space.values():
+		if str(component.get("action_type", "discrete")) == "discrete":
+			return int(component.get("size", 1))
+	return 0
+
+
+func _total_discrete_action_size(action_space:Dictionary) -> int:
+	var total := 0
+	for component in action_space.values():
+		if str(component.get("action_type", "discrete")) == "discrete":
+			total += int(component.get("size", 1))
+	return total
 
 
 func _build_reset_transform(agent_id:String, original_transform:Transform3D, rng:RandomNumberGenerator) -> Transform3D:
@@ -421,6 +561,30 @@ func _all_agents_terminated(channels:Array) -> bool:
 		if not bool(channel.get("terminated", false)):
 			return false
 	return true
+
+
+func _update_current_agent_camera() -> void:
+	if not manage_agent_cameras:
+		return
+
+	var selected_agent: Node = null
+	for agent in _agents:
+		if _is_agent_terminal(agent):
+			continue
+		selected_agent = agent
+
+	for agent in _agents:
+		if agent.has_method("set_camera_current"):
+			agent.set_camera_current(agent == selected_agent)
+
+
+func _is_agent_terminal(agent:Node) -> bool:
+	var agent_id := _agent_id(agent)
+	if bool(_target_reached.get(agent_id, false)):
+		return true
+	if agent.has_method("is_terminal"):
+		return bool(agent.is_terminal())
+	return false
 
 
 
