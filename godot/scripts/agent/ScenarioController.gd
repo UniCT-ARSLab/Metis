@@ -24,6 +24,11 @@ var _previous_progress := {}
 @export var max_steps:= 500
 @export var manage_agent_cameras := true
 
+@export_category("Agents Replication")
+@export var agent_to_replicate : Node
+@export var number_of_replications:int = 0
+@export var agents_container:Node
+
 var step_count := 0
 var _agents: Array[Node] = []
 var _target_reached := {}
@@ -32,6 +37,7 @@ var _original_agent_transforms := {}
 var _last_reset_info := {}
 
 func _ready() -> void:
+	_spawn_replicated_agents()
 	_refresh_agents()
 	if target != null:
 		target.body_entered.connect(on_target_body_entered)
@@ -39,6 +45,90 @@ func _ready() -> void:
 	for agent in _agents:
 		var agent_id := _agent_id(agent)
 		_original_agent_transforms[agent_id] = agent.transform
+
+
+func _spawn_replicated_agents() -> void:
+	if agent_to_replicate == null or number_of_replications <= 0:
+		return
+
+	var parent := agents_container
+	if parent == null:
+		parent = agent_to_replicate.get_parent()
+	if parent == null:
+		push_warning("Cannot replicate agent without a parent/container")
+		return
+
+	if not controlled_agents.has(agent_to_replicate):
+		controlled_agents.append(agent_to_replicate)
+
+	var packed_scene := _agent_packed_scene(agent_to_replicate)
+	for idx in range(number_of_replications):
+		var new_agent := _create_agent_replica(agent_to_replicate, packed_scene)
+		if new_agent == null:
+			continue
+
+		new_agent.name = _unique_child_name(parent, "%s%d" % [str(agent_to_replicate.name), idx + 2])
+		_copy_stored_root_properties(agent_to_replicate, new_agent)
+		parent.add_child(new_agent, true)
+		if agent_to_replicate is Node3D and new_agent is Node3D:
+			new_agent.global_transform = agent_to_replicate.global_transform
+		controlled_agents.append(new_agent)
+
+
+func _agent_packed_scene(agent:Node) -> PackedScene:
+	var scene_path := agent.scene_file_path
+	if scene_path.is_empty():
+		return null
+
+	var resource := load(scene_path)
+	if resource is PackedScene:
+		return resource
+	return null
+
+
+func _create_agent_replica(agent:Node, packed_scene:PackedScene) -> Node:
+	if packed_scene != null:
+		var instance := packed_scene.instantiate()
+		if instance is Node:
+			return instance
+
+	var duplicate_flags := DUPLICATE_SIGNALS | DUPLICATE_GROUPS | DUPLICATE_SCRIPTS
+	var duplicated := agent.duplicate(duplicate_flags)
+	if duplicated is Node:
+		return duplicated
+	return null
+
+
+func _copy_stored_root_properties(source:Node, target_node:Node) -> void:
+	for property in source.get_property_list():
+		var property_name := str(property.get("name", ""))
+		if _should_skip_replica_property(property_name):
+			continue
+
+		var usage := int(property.get("usage", 0))
+		if (usage & PROPERTY_USAGE_STORAGE) == 0:
+			continue
+
+		target_node.set(property_name, source.get(property_name))
+
+
+func _should_skip_replica_property(property_name:String) -> bool:
+	return property_name in [
+		"name",
+		"owner",
+		"script",
+		"unique_name_in_owner",
+		"scene_file_path"
+	]
+
+
+func _unique_child_name(parent:Node, desired_name:String) -> String:
+	var candidate := desired_name
+	var suffix := 2
+	while parent.get_node_or_null(NodePath(candidate)) != null:
+		candidate = "%s_%d" % [desired_name, suffix]
+		suffix += 1
+	return candidate
 
 
 func on_target_body_entered(body):
