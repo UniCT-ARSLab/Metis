@@ -3,13 +3,19 @@ class_name Agent
 
 @export var actions : Dictionary = {}
 @export var observations : Dictionary = {}
+@export var action_space_path: NodePath = NodePath("ActionSpace")
+@export var observation_system_path: NodePath = NodePath("ObservationSystem")
 @export var reward_system_path: NodePath = NodePath("RewardSystem")
 
 var _action_names: Array[String] = []
 var _observation_names: Array[String] = []
+var _action_space: Node
+var _observation_system: Node
 var _reward_system: Node
 
 func _ready() -> void:
+	_action_space = get_node_or_null(action_space_path)
+	_observation_system = get_node_or_null(observation_system_path)
 	_reward_system = get_node_or_null(reward_system_path)
 
 # AGENT'S ACTIONS
@@ -48,10 +54,55 @@ func act(action:Variant) -> int:
 	return OK
 
 func get_action_names() -> Array:
+	var action_space := _get_action_space_node()
+	if action_space != null and action_space.has_method("get_action_names"):
+		return action_space.get_action_names()
 	return _action_names.duplicate()
 
 func get_action_count() -> int:
+	var action_space := _get_action_space_node()
+	if action_space != null and action_space.has_method("get_action_names"):
+		return action_space.get_action_names().size()
 	return _action_names.size()
+
+func get_action_space() -> Dictionary:
+	var action_space := _get_action_space_node()
+	if action_space != null and action_space.has_method("get_action_space"):
+		return action_space.get_action_space()
+
+	return {
+		"action": {
+			"size": get_action_count(),
+			"action_type": "discrete",
+			"names": get_action_names()
+		}
+	}
+
+func get_action_type() -> String:
+	var action_space := _get_action_space_node()
+	if action_space != null and action_space.has_method("get_action_type"):
+		return str(action_space.get_action_type())
+	return "discrete"
+
+func get_action_size() -> int:
+	var action_space := _get_action_space_node()
+	if action_space != null and action_space.has_method("get_continuous_action_size"):
+		var continuous_size := int(action_space.get_continuous_action_size())
+		if continuous_size > 0:
+			return continuous_size
+	return get_action_count()
+
+func get_action_low() -> Array:
+	var action_space := _get_action_space_node()
+	if action_space != null and action_space.has_method("get_continuous_bounds"):
+		return action_space.get_continuous_bounds("low", -1.0)
+	return []
+
+func get_action_high() -> Array:
+	var action_space := _get_action_space_node()
+	if action_space != null and action_space.has_method("get_continuous_bounds"):
+		return action_space.get_continuous_bounds("high", 1.0)
+	return []
 
 # ANGET'S OBSERVABLE
 func add_observation(observable:String, value:Variant = null) -> int:
@@ -64,6 +115,26 @@ func add_observation(observable:String, value:Variant = null) -> int:
 func add_observations(new_observations:Dictionary) -> void:
 	for observable in new_observations.keys():
 		self.add_observation(str(observable), new_observations[observable])
+
+func register_observation_sources(body:Node = null) -> bool:
+	var observation_system := _get_observation_system()
+	if observation_system == null or not observation_system.has_method("register_observations"):
+		return false
+
+	if body == null:
+		body = get_parent()
+	observation_system.register_observations(self, body)
+	return true
+
+func reset_observation_sources() -> void:
+	var observation_system := _get_observation_system()
+	if observation_system != null and observation_system.has_method("reset_sources"):
+		observation_system.reset_sources()
+
+func refresh_observation_sources() -> void:
+	var observation_system := _get_observation_system()
+	if observation_system != null and observation_system.has_method("refresh_sources"):
+		observation_system.refresh_sources()
 	
 func update_observation(observable:String, new_value:Variant) -> int:
 	if !observations.has(observable):
@@ -132,6 +203,16 @@ func _get_reward_system() -> Node:
 	if _reward_system == null:
 		_reward_system = get_node_or_null(reward_system_path)
 	return _reward_system
+
+func _get_action_space_node() -> Node:
+	if _action_space == null:
+		_action_space = get_node_or_null(action_space_path)
+	return _action_space
+
+func _get_observation_system() -> Node:
+	if _observation_system == null:
+		_observation_system = get_node_or_null(observation_system_path)
+	return _observation_system
 
 func _build_reward_context(context:Dictionary) -> Dictionary:
 	var result := context.duplicate(true)

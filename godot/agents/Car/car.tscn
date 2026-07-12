@@ -7,10 +7,45 @@
 [ext_resource type="Script" uid="uid://di4is147y7tvs" path="res://scripts/agent/reward_components/ForwardVelocityReward.gd" id="4_forward_velocity"]
 [ext_resource type="Script" uid="uid://dyq1fjgcu1wqu" path="res://scripts/agent/reward_components/StepPenaltyReward.gd" id="5_time"]
 [ext_resource type="Script" uid="uid://dheahoedootoj" path="res://scripts/agent/reward_components/EventReward.gd" id="6_collision"]
+[ext_resource type="Script" uid="uid://b2aqmbdf0sbiu" path="res://scripts/agent/reward_components/LowSpeedPenaltyReward.gd" id="7_low_speed"]
+[ext_resource type="Script" uid="uid://1bmlqxn6c61y" path="res://scripts/agent/reward_components/ControlInputReward.gd" id="8_throttle"]
+[ext_resource type="Script" uid="uid://c71jq6uyg03h3" path="res://scripts/agent/reward_components/ActionSmoothnessPenaltyReward.gd" id="9_smoothness"]
+[ext_resource type="Script" uid="uid://co3xfpkthmuhn" path="res://scripts/agent/reward_components/NegativeControlInputPenaltyReward.gd" id="10_reverse_input"]
+[ext_resource type="Script" uid="uid://3cg8dnyyvi2a" path="res://scripts/agent/reward_components/ClearPathAccelerationReward.gd" id="11_clear_accel"]
+[ext_resource type="Script" uid="uid://bjhxcss2ima54" path="res://scripts/agent/action_space/ActionSpace.gd" id="12_action_space"]
+[ext_resource type="Script" uid="uid://bvoj0o4atoby" path="res://scripts/agent/action_space/ContinuousAction.gd" id="13_continuous_action"]
+[ext_resource type="Script" uid="uid://clefx53jebtj3" path="res://scripts/agent/observations/ObservationSystem.gd" id="14_observation_system"]
+[ext_resource type="Script" uid="uid://cys7i0vchrdlo" path="res://scripts/agent/observations/MethodObservationSource.gd" id="15_method_observation"]
+[ext_resource type="Script" uid="uid://twqtydrv0cm4" path="res://scripts/agent/observations/RaycastObservationSource.gd" id="16_raycast_observation"]
+[ext_resource type="Script" uid="uid://b2nryvi2oj5o2" path="res://scripts/agent/reward_components/ClearPathSteeringPenaltyReward.gd" id="17_clear_steering"]
 
 [sub_resource type="CapsuleShape3D" id="CapsuleShape3D_5ftgc"]
 radius = 0.6669922
 height = 2.5665283
+
+[sub_resource type="ViewportTexture" id="ViewportTexture_1d1rw"]
+viewport_path = NodePath("Bars")
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_1d1rw"]
+bg_color = Color(0.29, 0.29, 0.29, 0.8392157)
+corner_radius_top_left = 8
+corner_radius_top_right = 8
+corner_radius_bottom_right = 8
+corner_radius_bottom_left = 8
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_ljqeh"]
+bg_color = Color(2.117753e-06, 0.65882874, 0.8508279, 1)
+corner_radius_top_left = 8
+corner_radius_top_right = 8
+corner_radius_bottom_right = 8
+corner_radius_bottom_left = 8
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_e7jsl"]
+bg_color = Color(0, 0.85, 0.48166662, 1)
+corner_radius_top_left = 8
+corner_radius_top_right = 8
+corner_radius_bottom_right = 8
+corner_radius_bottom_left = 8
 
 [node name="Car" type="CharacterBody3D" unique_id=832978756]
 collision_mask = 6
@@ -20,23 +55,116 @@ script = ExtResource("1_5ftgc")
 script = ExtResource("2_vfwxj")
 metadata/_custom_type_script = "uid://byrdvsguqdev3"
 
+[node name="ActionSpace" type="Node" parent="Agent" unique_id=697173746]
+script = ExtResource("12_action_space")
+
+[node name="MoveInput" type="Node" parent="Agent/ActionSpace" unique_id=778462866]
+script = ExtResource("13_continuous_action")
+action_name = "move_input"
+low = 0.0
+exploration_low = 0.55
+use_custom_exploration_bounds = true
+
+[node name="RotationInput" type="Node" parent="Agent/ActionSpace" unique_id=494565731]
+script = ExtResource("13_continuous_action")
+action_name = "rotation_input"
+exploration_low = -0.25
+exploration_high = 0.25
+use_custom_exploration_bounds = true
+
+[node name="ObservationSystem" type="Node" parent="Agent" unique_id=1375212808]
+script = ExtResource("14_observation_system")
+
+[node name="ForwardSpeed" type="Node" parent="Agent/ObservationSystem" unique_id=2086731996]
+script = ExtResource("15_method_observation")
+observation_name = "forward_speed"
+method_name = "get_normalized_forward_speed"
+
+[node name="Speed" type="Node" parent="Agent/ObservationSystem" unique_id=606000337]
+script = ExtResource("15_method_observation")
+observation_name = "speed"
+method_name = "get_normalized_abs_speed"
+
+[node name="ForwardClearance" type="Node" parent="Agent/ObservationSystem" unique_id=708837109]
+script = ExtResource("15_method_observation")
+observation_name = "forward_clearance"
+method_name = "get_forward_clearance"
+
+[node name="MoveInput" type="Node" parent="Agent/ObservationSystem" unique_id=1984290805]
+script = ExtResource("15_method_observation")
+observation_name = "move_input"
+method_name = "get_control_input"
+bind_string_arg = "move_input"
+
+[node name="RotationInput" type="Node" parent="Agent/ObservationSystem" unique_id=818283951]
+script = ExtResource("15_method_observation")
+observation_name = "rotation_input"
+method_name = "get_control_input"
+bind_string_arg = "rotation_input"
+
+[node name="Raycasts" type="Node" parent="Agent/ObservationSystem" unique_id=70780326]
+script = ExtResource("16_raycast_observation")
+root_path = NodePath("../../..")
+
 [node name="RewardSystem" type="Node" parent="Agent" unique_id=1749491164]
 script = ExtResource("3_vfwxj")
 metadata/_custom_type_script = "uid://d1xuba84xevcv"
 
 [node name="ForwardVelocityReward" type="Node" parent="Agent/RewardSystem" unique_id=1889551391]
 script = ExtResource("4_forward_velocity")
+reward = 0.12
 term_name = "forward_velocity"
 
 [node name="TimePenalty" type="Node" parent="Agent/RewardSystem" unique_id=1545930821]
 script = ExtResource("5_time")
-penalty = -0.0005
+penalty = -0.002
 term_name = "time"
+
+[node name="ThrottleReward" type="Node" parent="Agent/RewardSystem" unique_id=599808278]
+script = ExtResource("8_throttle")
+input_name = "move_input"
+target_min_value = 0.45
+below_target_penalty = -0.006
+value_reward_scale = 0.006
+grace_steps = 8
+term_name = "throttle"
+
+[node name="ActionSmoothnessPenalty" type="Node" parent="Agent/RewardSystem" unique_id=2016101254]
+script = ExtResource("9_smoothness")
+penalty_scale = -0.025
+term_name = "action_smoothness"
+
+[node name="ReverseInputPenalty" type="Node" parent="Agent/RewardSystem" unique_id=36578149]
+script = ExtResource("10_reverse_input")
+deadzone = 0.08
+penalty_scale = -0.2
+term_name = "reverse_input"
+
+[node name="ClearPathAccelerationReward" type="Node" parent="Agent/RewardSystem" unique_id=667417897]
+script = ExtResource("11_clear_accel")
+target_input = 0.82
+reward_scale = 0.22
+speed_reference = 16.0
+clear_speed_reward_scale = 0.12
+low_speed_clear_penalty = -0.08
+blocked_throttle_penalty_scale = -0.2
+term_name = "clear_path_acceleration"
+
+[node name="ClearPathSteeringPenalty" type="Node" parent="Agent/RewardSystem" unique_id=667083283]
+script = ExtResource("17_clear_steering")
+term_name = "clear_path_steering"
+
+[node name="LowSpeedPenalty" type="Node" parent="Agent/RewardSystem" unique_id=1193682486]
+script = ExtResource("7_low_speed")
+min_abs_speed = 1.2
+grace_steps = 25
+penalty = -0.035
+term_name = "low_speed"
 
 [node name="CollisionPenalty" type="Node" parent="Agent/RewardSystem" unique_id=497898485]
 script = ExtResource("6_collision")
 event_name = "collision"
-scale = -5.0
+scale = -25.0
 term_name = "collision"
 
 [node name="Mesh" parent="." unique_id=540980627 instance=ExtResource("2_fs0mh")]
@@ -49,55 +177,55 @@ shape = SubResource("CapsuleShape3D_5ftgc")
 
 [node name="RayCast3D" type="RayCast3D" parent="ViewSensors" unique_id=79769249]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.261369, 1.0533442)
-target_position = Vector3(0, 0, 5)
+target_position = Vector3(0, 0, 10)
 collision_mask = 2
 debug_shape_custom_color = Color(0, 1, 0, 1)
 
 [node name="RayCast3D2" type="RayCast3D" parent="ViewSensors" unique_id=365763750]
 transform = Transform3D(0.9659258, 0, 0.25881904, 0, 1, 0, -0.25881904, 0, 0.9659258, 0, 0.261369, 1.0533442)
-target_position = Vector3(0, 0, 5)
+target_position = Vector3(0, 0, 10)
 collision_mask = 2
 debug_shape_custom_color = Color(0, 1, 0, 1)
 
 [node name="RayCast3D3" type="RayCast3D" parent="ViewSensors" unique_id=1447342298]
 transform = Transform3D(0.86602545, 0, 0.50000006, 0, 1, 0, -0.50000006, 0, 0.86602545, 0, 0.261369, 1.0533442)
-target_position = Vector3(0, 0, 5)
+target_position = Vector3(0, 0, 10)
 collision_mask = 2
 debug_shape_custom_color = Color(0, 1, 0, 1)
 
 [node name="RayCast3D4" type="RayCast3D" parent="ViewSensors" unique_id=1409550767]
 transform = Transform3D(0.70710677, 0, 0.7071068, 0, 1, 0, -0.7071068, 0, 0.70710677, 0, 0.261369, 1.0533442)
-target_position = Vector3(0, 0, 5)
+target_position = Vector3(0, 0, 10)
 collision_mask = 2
 debug_shape_custom_color = Color(0, 1, 0, 1)
 
 [node name="RayCast3D5" type="RayCast3D" parent="ViewSensors" unique_id=1688696447]
 transform = Transform3D(0.49999994, 0, 0.86602545, 0, 1, 0, -0.86602545, 0, 0.49999994, 0, 0.261369, 1.0533442)
-target_position = Vector3(0, 0, 5)
+target_position = Vector3(0, 0, 10)
 collision_mask = 2
 debug_shape_custom_color = Color(0, 1, 0, 1)
 
 [node name="RayCast3D6" type="RayCast3D" parent="ViewSensors" unique_id=1307421514]
 transform = Transform3D(0.5000001, 0, -0.86602545, 0, 1, 0, 0.86602545, 0, 0.5000001, 0, 0.261369, 1.0533442)
-target_position = Vector3(0, 0, 5)
+target_position = Vector3(0, 0, 10)
 collision_mask = 2
 debug_shape_custom_color = Color(0, 1, 0, 1)
 
 [node name="RayCast3D7" type="RayCast3D" parent="ViewSensors" unique_id=1671324541]
 transform = Transform3D(0.7071069, 0, -0.70710677, 0, 1, 0, 0.70710677, 0, 0.7071069, 0, 0.261369, 1.0533442)
-target_position = Vector3(0, 0, 5)
+target_position = Vector3(0, 0, 10)
 collision_mask = 2
 debug_shape_custom_color = Color(0, 1, 0, 1)
 
 [node name="RayCast3D8" type="RayCast3D" parent="ViewSensors" unique_id=857745637]
 transform = Transform3D(0.86602545, 0, -0.49999994, 0, 1, 0, 0.49999994, 0, 0.86602545, 0, 0.261369, 1.0533442)
-target_position = Vector3(0, 0, 5)
+target_position = Vector3(0, 0, 10)
 collision_mask = 2
 debug_shape_custom_color = Color(0, 1, 0, 1)
 
 [node name="RayCast3D9" type="RayCast3D" parent="ViewSensors" unique_id=1164977168]
 transform = Transform3D(0.9659258, 0, -0.25881892, 0, 1, 0, 0.25881892, 0, 0.9659258, 0, 0.261369, 1.0533442)
-target_position = Vector3(0, 0, 5)
+target_position = Vector3(0, 0, 10)
 collision_mask = 2
 debug_shape_custom_color = Color(0, 1, 0, 1)
 
@@ -109,3 +237,67 @@ text = "TEST"
 [node name="Camera3D" type="Camera3D" parent="." unique_id=467021622]
 transform = Transform3D(-0.99932706, -0.021276413, 0.029878713, 0, 0.8145775, 0.58005476, -0.03668001, 0.57966435, -0.8140294, 0.010704011, 4.699168, -3.9074554)
 current = true
+
+[node name="DebugBars" type="Sprite3D" parent="." unique_id=1427965893]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.0152171, 0)
+billboard = 1
+texture = SubResource("ViewportTexture_1d1rw")
+
+[node name="Bars" type="SubViewport" parent="." unique_id=916267983]
+transparent_bg = true
+size = Vector2i(512, 256)
+
+[node name="SpeedBar" type="ProgressBar" parent="Bars" unique_id=1803869404]
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -100.0
+offset_top = -118.0
+offset_right = 100.0
+offset_bottom = -103.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_styles/background = SubResource("StyleBoxFlat_1d1rw")
+theme_override_styles/fill = SubResource("StyleBoxFlat_ljqeh")
+max_value = 20.0
+step = 0.001
+value = 0.5
+show_percentage = false
+
+[node name="RightSteerBar" type="ProgressBar" parent="Bars" unique_id=1019211759]
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_top = -98.0
+offset_right = 100.0
+offset_bottom = -83.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_styles/background = SubResource("StyleBoxFlat_1d1rw")
+theme_override_styles/fill = SubResource("StyleBoxFlat_e7jsl")
+max_value = 1.0
+step = 0.001
+show_percentage = false
+
+[node name="LeftSteerBar" type="ProgressBar" parent="Bars" unique_id=918018889]
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -100.0
+offset_top = -98.0
+offset_bottom = -83.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_styles/background = SubResource("StyleBoxFlat_1d1rw")
+theme_override_styles/fill = SubResource("StyleBoxFlat_e7jsl")
+max_value = 1.0
+step = 0.001
+value = 0.5
+fill_mode = 1
+show_percentage = false

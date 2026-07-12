@@ -32,7 +32,8 @@ class GodotProcessManager:
         text = log_path.read_text(errors="ignore").splitlines()
         return "\n".join(text[-lines:]) if text else "<empty log file>"
 
-    def start_many(self, ports, headless=True, debug=False):
+    def start_many(self, ports, headless=True, debug=False, user_args=None):
+        user_args = list(user_args or [])
         args_prefix = [self.godot_bin]
         if headless:
             args_prefix.append("--headless")
@@ -51,7 +52,7 @@ class GodotProcessManager:
             log_path = self.logs_dir / f"godot_{port}.log"
             log_file = open(log_path, "w", buffering=1)
 
-            cmd = args_prefix + ["--", f"--port={int(port)}"]
+            cmd = args_prefix + ["--", f"--port={int(port)}"] + user_args
             proc = subprocess.Popen(
                 cmd,
                 stdout=log_file,

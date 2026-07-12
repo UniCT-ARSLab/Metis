@@ -46,6 +46,13 @@ from godot_process_manager import GodotProcessManager
 from models import build_shared_q_network
 from replay_buffer import ReplayBuffer
 from scenario_gym_env import ScenarioGymEnv
+from training_support import (
+    add_log_format_argument,
+    print_episode_metrics,
+    resolve_resume_checkpoint,
+    restore_replay_buffer,
+    save_replay_snapshot,
+)
 
 
 def parse_args():
@@ -71,20 +78,25 @@ def parse_args():
     parser.add_argument("--log-action-every", type=int, default=1)
     parser.add_argument("--weights-path", default="generic_dqn_weights.weights.h5")
     parser.add_argument("--checkpoint-dir", default="checkpoints/generic_dqn")
+    parser.add_argument("--resume-checkpoint", default=None)
     parser.add_argument("--checkpoint-every", type=int, default=25)
     parser.add_argument("--keep-checkpoints", type=int, default=5)
     parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--save-replay-buffer", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--require-replay-buffer", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--demo-path", action="append", default=[])
     parser.add_argument("--demo-prefill", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--demo-max-transitions", type=int, default=0)
     parser.add_argument("--demo-bc-epochs", type=int, default=0)
     parser.add_argument("--demo-bc-batch-size", type=int, default=128)
     parser.add_argument("--demo-bc-learning-rate", type=float, default=None)
+    parser.add_argument("--demo-bc-on-resume", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--godot-bin", default=os.environ.get("GODOT_BIN"))
     parser.add_argument("--godot-project", default=None)
     parser.add_argument("--godot-scene", default=None)
     parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--godot-debug", action=argparse.BooleanOptionalAction, default= False)
+    add_log_format_argument(parser)
     return parser.parse_args()
 
 
@@ -146,6 +158,16 @@ def train_step(model, target_model, optimizer, buffer, batch_size, gamma):
     grads = tape.gradient(loss, model.trainable_variables)
     optimizer.apply_gradients(zip(grads, model.trainable_variables))
     return float(loss.numpy())
+
+
+def save_training_checkpoint(checkpoint, checkpoint_manager, buffer, episode, epsilon, args, final=False):
+    checkpoint.episode.assign(episode)
+    checkpoint.epsilon.assign(epsilon)
+    saved_path = checkpoint_manager.save(checkpoint_number=episode)
+    print(f"Saved {'final checkpoint' if final else 'checkpoint'}: {saved_path}", flush=True)
+    if args.save_replay_buffer and len(buffer) > 0:
+        save_replay_snapshot(saved_path, checkpoint_manager, buffer)
+    return saved_path
 
 
 def load_demonstration_arrays(paths, obs_dim, num_actions, max_transitions=0):
@@ -248,11 +270,17 @@ def main():
         project_dir=args.godot_project,
         scene_path=args.godot_scene
     )
-    manager.start_many(ports, headless=args.headless, debug = args.godot_debug)
-    print(f"Started Godot instances on ports {ports}", flush=True)
-
     envs = []
+    model = None
+    buffer = None
+    checkpoint = None
+    checkpoint_manager = None
+    start_episode = 0
+    last_completed_episode = None
+    epsilon = args.epsilon_start
     try:
+        manager.start_many(ports, headless=args.headless, debug=args.godot_debug)
+        print(f"Started Godot instances on ports {ports}", flush=True)
         envs = [
             ScenarioGymEnv(
                 port=port,
@@ -274,7 +302,7 @@ def main():
                 "Use a continuous-control trainer for Box actions."
             )
         print(
-            f"Scenario spec: agent_id={agent_id} agents={agent_ids} multi_agent={args.multi_agent} "
+            f"Scenario spec: agent_id={agent_id} {envs[0].agent_summary()} multi_agent={args.multi_agent} "
             f"obs_dim={obs_dim} num_actions={num_actions} actions={envs[0].action_names}",
             flush=True,
         )
@@ -304,15 +332,19 @@ def main():
             directory=args.checkpoint_dir,
             max_to_keep=args.keep_checkpoints,
         )
-        if args.resume and checkpoint_manager.latest_checkpoint:
-            checkpoint.restore(checkpoint_manager.latest_checkpoint).expect_partial()
+        resume_checkpoint = resolve_resume_checkpoint(args, checkpoint_manager)
+        restored_replay_count = 0
+        if resume_checkpoint:
+            checkpoint.restore(resume_checkpoint).expect_partial()
             start_episode = int(checkpoint.episode.numpy())
             epsilon = float(checkpoint.epsilon.numpy())
             restored_checkpoint = True
             print(
-                f"Resumed checkpoint {checkpoint_manager.latest_checkpoint} from episode={start_episode} epsilon={epsilon:.3f}",
+                f"Resumed checkpoint {resume_checkpoint} from episode={start_episode} epsilon={epsilon:.3f}",
                 flush=True,
             )
+            restored_replay_count = restore_replay_buffer(args, resume_checkpoint, buffer)
+        optimizer.learning_rate.assign(args.learning_rate)
 
         demo_data = None
         if args.demo_path:
@@ -328,7 +360,7 @@ def main():
                     flush=True,
                 )
 
-        if demo_data is not None and args.demo_prefill:
+        if demo_data is not None and args.demo_prefill and restored_replay_count == 0:
             added = buffer.add_many(
                 demo_data["obs"],
                 demo_data["actions"],
@@ -338,7 +370,10 @@ def main():
             )
             print(f"Prefilled replay buffer with demonstration transitions={added}", flush=True)
 
-        if demo_data is not None and args.demo_bc_epochs > 0:
+        if demo_data is not None and args.demo_prefill and restored_replay_count > 0:
+            print("Skipped demonstration prefill because the checkpoint replay was restored.", flush=True)
+
+        if demo_data is not None and args.demo_bc_epochs > 0 and (not resume_checkpoint or args.demo_bc_on_resume):
             pretrain_behavior_cloning(
                 model,
                 demo_data,
@@ -350,6 +385,7 @@ def main():
         elif not restored_checkpoint:
             target_model.set_weights(model.get_weights())
 
+        last_saved_episode = None
         for episode in range(start_episode, args.num_episodes):
             env_states = []
             for env_idx, env in enumerate(envs):
@@ -495,30 +531,45 @@ def main():
                     for env, state in zip(envs, env_states)
                 ]
             mean_loss = float(np.mean(losses)) if losses else 0.0
-            print(
-                f"episode={episode:04d} epsilon={epsilon:.3f} mean_loss={mean_loss:.5f} "
-                f"rewards={rewards_summary} reached={reached_summary} seen={seen_summary} "
-                f"success_rate={success_rate:.3f} seen_rate={seen_rate:.3f}",
-                flush=True,
-            )
+            print_episode_metrics(episode, [
+                ("mode", [("epsilon", f"{epsilon:.3f}")]),
+                ("outcome", [
+                    ("reward", rewards_summary),
+                    ("success_rate", f"{success_rate:.3f}"),
+                    ("seen_rate", f"{seen_rate:.3f}"),
+                ]),
+                ("training", [
+                    ("replay", f"{len(buffer)}/{args.replay_capacity}"),
+                    ("updates", len(losses)),
+                    ("loss", f"{mean_loss:.5f}"),
+                ]),
+            ], args.log_format)
             if args.log_action_every > 0 and episode % args.log_action_every == 0:
                 print(
-                    f"episode={episode:04d} actions={action_summary} last_actions={last_action_summary}",
+                    f"  actions   counts={action_summary}  last={last_action_summary}",
                     flush=True,
                 )
+            last_completed_episode = episode + 1
 
             if args.checkpoint_every > 0 and (episode + 1) % args.checkpoint_every == 0:
-                checkpoint.episode.assign(episode + 1)
-                checkpoint.epsilon.assign(epsilon)
-                saved_path = checkpoint_manager.save(checkpoint_number=episode + 1)
-                print(f"Saved checkpoint: {saved_path}", flush=True)
+                save_training_checkpoint(checkpoint, checkpoint_manager, buffer, episode + 1, epsilon, args)
+                last_saved_episode = episode + 1
 
-        checkpoint.episode.assign(args.num_episodes)
-        checkpoint.epsilon.assign(epsilon)
-        saved_path = checkpoint_manager.save(checkpoint_number=args.num_episodes)
-        print(f"Saved final checkpoint: {saved_path}", flush=True)
+        if last_saved_episode != args.num_episodes:
+            save_training_checkpoint(checkpoint, checkpoint_manager, buffer, args.num_episodes, epsilon, args, final=True)
         model.save_weights(args.weights_path)
         print(f"Saved weights: {args.weights_path}", flush=True)
+    except KeyboardInterrupt:
+        print("\nInterrupt received: saving the last consistent DQN state...", flush=True)
+        if checkpoint is not None and checkpoint_manager is not None and buffer is not None and model is not None:
+            interrupted_episode = last_completed_episode if last_completed_episode is not None else start_episode
+            save_training_checkpoint(
+                checkpoint, checkpoint_manager, buffer, interrupted_episode, epsilon, args
+            )
+            model.save_weights(args.weights_path)
+            print(f"Interrupted training saved at episode={interrupted_episode}", flush=True)
+        else:
+            print("Training state was not initialized; no checkpoint was written.", flush=True)
     finally:
         for env in envs:
             try:

@@ -47,6 +47,7 @@ import tensorflow as tf
 from godot_process_manager import GodotProcessManager
 from models import build_hybrid_actor_critic
 from scenario_gym_env import ScenarioGymEnv
+from training_support import add_log_format_argument, print_episode_metrics, resolve_resume_checkpoint
 
 
 LOG_2PI = np.float32(np.log(2.0 * np.pi))
@@ -74,6 +75,7 @@ def parse_args():
     parser.add_argument("--multi-agent", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--weights-path", default="generic_ppo_hybrid.weights.h5")
     parser.add_argument("--checkpoint-dir", default="checkpoints/generic_ppo_hybrid")
+    parser.add_argument("--resume-checkpoint", default=None)
     parser.add_argument("--checkpoint-every", type=int, default=25)
     parser.add_argument("--keep-checkpoints", type=int, default=5)
     parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=False)
@@ -82,7 +84,15 @@ def parse_args():
     parser.add_argument("--godot-scene", default=None)
     parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--godot-debug", action=argparse.BooleanOptionalAction, default=False)
+    add_log_format_argument(parser)
     return parser.parse_args()
+
+
+def save_training_checkpoint(checkpoint, checkpoint_manager, episode, final=False):
+    checkpoint.episode.assign(episode)
+    saved_path = checkpoint_manager.save(checkpoint_number=episode)
+    print(f"Saved {'final checkpoint' if final else 'checkpoint'}: {saved_path}", flush=True)
+    return saved_path
 
 
 def describe_tensorflow_backend():
@@ -415,11 +425,15 @@ def main():
         project_dir=args.godot_project,
         scene_path=args.godot_scene,
     )
-    manager.start_many(ports, headless=args.headless, debug=args.godot_debug)
-    print(f"Started Godot instances on ports {ports}", flush=True)
-
     envs = []
+    model = None
+    checkpoint = None
+    checkpoint_manager = None
+    start_episode = 0
+    last_completed_episode = None
     try:
+        manager.start_many(ports, headless=args.headless, debug=args.godot_debug)
+        print(f"Started Godot instances on ports {ports}", flush=True)
         envs = [
             ScenarioGymEnv(
                 port=port,
@@ -439,7 +453,7 @@ def main():
         action_meta = build_action_metadata(env0.action_space_spec)
         expected_action_space = json.dumps(env0.action_space_spec, sort_keys=True)
         print(
-            f"Scenario spec: agent_id={env0.agent_id} agents={env0.agent_ids} multi_agent={args.multi_agent} obs_dim={obs_dim} "
+            f"Scenario spec: agent_id={env0.agent_id} {env0.agent_summary()} multi_agent={args.multi_agent} obs_dim={obs_dim} "
             f"discrete={action_meta['discrete']} continuous={action_meta['continuous']}",
             flush=True,
         )
@@ -478,11 +492,14 @@ def main():
             directory=args.checkpoint_dir,
             max_to_keep=args.keep_checkpoints,
         )
-        if args.resume and checkpoint_manager.latest_checkpoint:
-            checkpoint.restore(checkpoint_manager.latest_checkpoint).expect_partial()
+        resume_checkpoint = resolve_resume_checkpoint(args, checkpoint_manager)
+        if resume_checkpoint:
+            checkpoint.restore(resume_checkpoint).expect_partial()
             start_episode = int(checkpoint.episode.numpy())
-            print(f"Resumed checkpoint {checkpoint_manager.latest_checkpoint} from episode={start_episode}", flush=True)
+            print(f"Resumed checkpoint {resume_checkpoint} from episode={start_episode}", flush=True)
+        optimizer.learning_rate.assign(args.learning_rate)
 
+        last_saved_episode = None
         for episode in range(start_episode, args.num_episodes):
             trajectories = []
             rewards_summary = []
@@ -559,28 +576,44 @@ def main():
                 args.gae_lambda,
             )
             if update_batch is None:
-                print(f"episode={episode:04d} skipped_update=no_samples rewards={rewards_summary}", flush=True)
+                print_episode_metrics(episode, [
+                    ("outcome", [("rewards", rewards_summary)]),
+                    ("training", [("skipped", "no_samples")]),
+                ], args.log_format)
+                last_completed_episode = episode + 1
                 continue
 
             metrics = ppo_update(model, log_std, optimizer, update_batch, action_meta, args)
-            print(
-                f"episode={episode:04d} rewards={rewards_summary} "
-                f"samples={len(update_batch['rewards']) if 'rewards' in update_batch else len(update_batch['obs'])} "
-                f"loss={metrics['loss']:.5f} policy_loss={metrics['policy_loss']:.5f} "
-                f"value_loss={metrics['value_loss']:.5f} entropy={metrics['entropy']:.5f}",
-                flush=True,
-            )
+            sample_count = len(update_batch["rewards"]) if "rewards" in update_batch else len(update_batch["obs"])
+            print_episode_metrics(episode, [
+                ("outcome", [("rewards", rewards_summary)]),
+                ("training", [
+                    ("samples", sample_count),
+                    ("loss", f"{metrics['loss']:.5f}"),
+                    ("policy_loss", f"{metrics['policy_loss']:.5f}"),
+                    ("value_loss", f"{metrics['value_loss']:.5f}"),
+                    ("entropy", f"{metrics['entropy']:.5f}"),
+                ]),
+            ], args.log_format)
+            last_completed_episode = episode + 1
 
             if args.checkpoint_every > 0 and (episode + 1) % args.checkpoint_every == 0:
-                checkpoint.episode.assign(episode + 1)
-                saved_path = checkpoint_manager.save(checkpoint_number=episode + 1)
-                print(f"Saved checkpoint: {saved_path}", flush=True)
+                save_training_checkpoint(checkpoint, checkpoint_manager, episode + 1)
+                last_saved_episode = episode + 1
 
-        checkpoint.episode.assign(args.num_episodes)
-        saved_path = checkpoint_manager.save(checkpoint_number=args.num_episodes)
-        print(f"Saved final checkpoint: {saved_path}", flush=True)
+        if last_saved_episode != args.num_episodes:
+            save_training_checkpoint(checkpoint, checkpoint_manager, args.num_episodes, final=True)
         model.save_weights(args.weights_path)
         print(f"Saved weights: {args.weights_path}", flush=True)
+    except KeyboardInterrupt:
+        print("\nInterrupt received: saving the last consistent PPO state...", flush=True)
+        if checkpoint is not None and checkpoint_manager is not None and model is not None:
+            interrupted_episode = last_completed_episode if last_completed_episode is not None else start_episode
+            save_training_checkpoint(checkpoint, checkpoint_manager, interrupted_episode)
+            model.save_weights(args.weights_path)
+            print(f"Interrupted training saved at episode={interrupted_episode}", flush=True)
+        else:
+            print("Training state was not initialized; no checkpoint was written.", flush=True)
     finally:
         for env in envs:
             try:

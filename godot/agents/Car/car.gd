@@ -3,23 +3,38 @@ class_name Car
 
 
 @export var acceleration = 100.0
-@export var steering_speed = 60
+@export var backward_acceleration_ratio := 0.45
+@export var brake_strength := 9.0
+@export_range(0.0, 1.0, 0.01) var forward_clearance_dot_threshold := 0.86
+@export var steering_speed_degrees = 115.0
+@export var low_speed_steering_reference := 28.0
+@export_range(0.0, 1.0, 0.01) var min_steering_authority := 0.16
+@export var min_forward_speed_for_steering := 2.0
 @export var friction = 4.0
 @export var max_speed = 800.0
+@export var observation_speed_scale := 20.0
 @export var manual_control:bool = true
 @export var crash_floor_normal_threshold := 0.5
 @export var update_raycast_debug_colors := true
 @export var raycast_clear_debug_color := Color(0.0, 1.0, 0.0, 1.0)
 @export var raycast_hit_debug_color := Color(1.0, 0.0, 0.0, 1.0)
 @export var auto_manage_camera := false
+@export_category("Training Optimization")
+@export var auto_optimize_in_headless := true
+@export var update_status_text := true
 
 @onready var camera: Camera3D = $Camera3D
+@onready var speed_bar: ProgressBar = $Bars/SpeedBar
+@onready var right_steer_bar: ProgressBar = $Bars/RightSteerBar
+@onready var left_steer_bar: ProgressBar = $Bars/LeftSteerBar
 
 
 var _rotate_input = 0.0
 var _move_input = 0.0
 var _raycasts: Array[RayCast3D] = []
 var _crashed := false
+var _training_active := true
+var _last_reward_value := 0.0
 @onready var status_text: Label3D = $StatusText
 
 @onready var agent: Agent = $Agent
@@ -28,37 +43,61 @@ var _total_distance = 0.0
 var _total_time = 0.0
 
 func _ready() -> void:
-	_register_observations()
+	if auto_optimize_in_headless and _is_headless():
+		set_training_optimized(true)
+	_find_raycasts(self, _raycasts)
+	if not agent.register_observation_sources(self):
+		_register_observations()
 
 func _physics_process(delta):
+	if not _training_active:
+		return
 	
 	if not _crashed:
 	
 		if manual_control:
-			_move_input = Input.get_axis("move_back", "move_forward") 
+			var move_axis := Input.get_axis("move_back", "move_forward")
+			_move_input = move_axis
 			_rotate_input = Input.get_axis("turn_left", "turn_right")
 			
 		if not is_on_floor():
 			velocity += get_gravity() * delta
 
-		var steer_direction = -_rotate_input * min(velocity.length() / max_speed, 1.0)
-		rotate_y(steer_direction * steering_speed * delta)
-		
-		var forward_dir = transform.basis.z.normalized() 
-		velocity += forward_dir * _move_input * acceleration * delta
+		var acceleration_input := clampf(_move_input, -1.0, 1.0)
+		var forward_dir = transform.basis.z.normalized()
+
+		var forward_speed := absf(get_signed_forward_speed())
+		var steering_authority := 0.0
+		if acceleration_input > 0.1 and forward_speed >= min_forward_speed_for_steering:
+			steering_authority = minf(
+				(forward_speed - min_forward_speed_for_steering) / maxf(low_speed_steering_reference, 0.000001),
+				1.0
+			)
+			steering_authority = maxf(steering_authority, min_steering_authority)
+		var steer_direction = -_rotate_input * steering_authority
+		rotate_y(steer_direction * deg_to_rad(steering_speed_degrees) * delta)
+
+		if acceleration_input >= 0.0:
+			velocity += forward_dir * acceleration_input * acceleration * delta
+		else:
+			velocity = velocity.lerp(Vector3.ZERO, minf(absf(acceleration_input) * brake_strength * delta, 1.0))
 		velocity = velocity.lerp(Vector3.ZERO, friction * delta)
 		velocity = velocity.limit_length(max_speed)
 		_total_distance += velocity.length() * delta
 		_total_time+= delta
 		move_and_slide()
 	_update_crash_state()
-	status_text.text = "CRASHED %s | Reward %f" % [_crashed, get_reward()]
+	if not DisplayServer.get_name() == "headless":
+		_update_status_text("CRASHED %s | Reward %f | Speed %f | Rotate %f" % [_crashed, _last_reward_value, velocity.length(), _rotate_input])
+		_update_bars(velocity.length(),_rotate_input )
 
 func reset_all(original_position:Transform3D, reset_rewards := true):
+	set_training_active(true)
 	_total_distance = 0.0
 	_total_time = 0.0
 	_crashed = false
-	status_text.text = "OK"
+	_last_reward_value = 0.0
+	_update_status_text("OK")
 	set_camera_current(false)
 	
 	if original_position!= null:
@@ -163,38 +202,28 @@ func clear_inputs() -> void:
 	_rotate_input = 0.0
 
 func get_action_type() -> String:
-	return "continuous"
+	return agent.get_action_type()
 
 func get_action_space() -> Dictionary:
-	return {
-		"move_input": {
-			"size": 1,
-			"action_type": "continuous",
-			"low": -1.0,
-			"high": 1.0
-		},
-		"rotation_input": {
-			"size": 1,
-			"action_type": "continuous",
-			"low": -1.0,
-			"high": 1.0
-		}
-	}
+	var action_space := agent.get_action_space()
+	if not action_space.is_empty():
+		return action_space
+	return {}
 
 func get_action_size() -> int:
-	return 2
+	return agent.get_action_size()
 
 func get_action_low() -> Array:
-	return [-1.0, -1.0]
+	return agent.get_action_low()
 
 func get_action_high() -> Array:
-	return [1.0, 1.0]
+	return agent.get_action_high()
 
 func get_action_count() -> int:
 	return get_action_size()
 
 func get_action_names() -> Array:
-	return ["move_input", "rotation_input"]
+	return agent.get_action_names()
 
 func get_observation_vector() -> Array:
 	return agent.get_observation_vector()
@@ -206,10 +235,18 @@ func get_observations() -> Dictionary:
 	return agent.get_observations()
 
 func get_reward() -> float:
-	return agent.get_reward(_build_reward_context())
+	_last_reward_value = agent.get_reward(_build_reward_context())
+	return _last_reward_value
 
 func get_reward_terms() -> Dictionary:
 	return agent.get_reward_terms()
+
+func get_control_input(input_name:String) -> float:
+	if input_name == "throttle_input" or input_name == "move_input" or input_name == "drive_input":
+		return _move_input
+	if input_name == "rotation_input" or input_name == "steering_input":
+		return _rotate_input
+	return 0.0
 
 func is_terminal() -> bool:
 	return _crashed
@@ -239,7 +276,42 @@ func get_signed_forward_speed() -> float:
 	flat_velocity.y = 0.0
 	return flat_velocity.dot(forward)
 
+func get_normalized_forward_speed() -> float:
+	return clampf(get_signed_forward_speed() / maxf(observation_speed_scale, 0.000001), -1.0, 1.0)
+
+func get_normalized_abs_speed() -> float:
+	var flat_velocity := velocity
+	flat_velocity.y = 0.0
+	return clampf(flat_velocity.length() / maxf(observation_speed_scale, 0.000001), 0.0, 1.0)
+
+func get_forward_clearance() -> float:
+	var forward := get_forward_direction()
+	if forward == Vector3.ZERO:
+		return 1.0
+
+	var best_clearance := 1.0
+	var found_forward_sensor := false
+	for raycast in _raycasts:
+		if not is_instance_valid(raycast):
+			continue
+
+		var ray_direction: Vector3 = raycast.global_transform.basis * raycast.target_position
+		ray_direction.y = 0.0
+		if ray_direction.length() <= 0.000001:
+			continue
+		ray_direction = ray_direction.normalized()
+		if forward.dot(ray_direction) < forward_clearance_dot_threshold:
+			continue
+
+		found_forward_sensor = true
+		best_clearance = minf(best_clearance, _get_raycast_distance_observation(raycast))
+
+	if not found_forward_sensor:
+		return 1.0
+	return best_clearance
+
 func reset_raycast_state() -> void:
+	agent.reset_observation_sources()
 	for raycast in _raycasts:
 		if is_instance_valid(raycast):
 			raycast.clear_exceptions()
@@ -247,6 +319,7 @@ func reset_raycast_state() -> void:
 			raycast.enabled = false
 			
 func refresh_sensors() -> void:
+	agent.refresh_observation_sources()
 	for raycast in _raycasts:
 		if is_instance_valid(raycast):
 			raycast.clear_exceptions()
@@ -307,7 +380,14 @@ func _update_raycast_debug_color(raycast:RayCast3D, is_hit:bool) -> void:
 	raycast.debug_shape_custom_color = raycast_hit_debug_color if is_hit else raycast_clear_debug_color
 
 func _register_observations() -> void:
-	_find_raycasts(self, _raycasts)
+	if _raycasts.is_empty():
+		_find_raycasts(self, _raycasts)
+
+	agent.add_observation("forward_speed", Callable(self, "get_normalized_forward_speed"))
+	agent.add_observation("speed", Callable(self, "get_normalized_abs_speed"))
+	agent.add_observation("forward_clearance", Callable(self, "get_forward_clearance"))
+	agent.add_observation("move_input", Callable(self, "get_control_input").bind("move_input"))
+	agent.add_observation("rotation_input", Callable(self, "get_control_input").bind("rotation_input"))
 
 	var used_names := {}
 	for raycast in _raycasts:
@@ -341,16 +421,80 @@ func set_camera_current(enabled:bool) -> void:
 	else:
 		camera.current = false
 
+func set_training_active(enabled:bool) -> void:
+	_training_active = enabled
+	set_physics_process(enabled)
+	for raycast in _raycasts:
+		if is_instance_valid(raycast):
+			raycast.enabled = enabled
+	if not enabled:
+		clear_inputs()
+		velocity = Vector3.ZERO
+		set_camera_current(false)
+
+
+func set_training_optimized(enabled:bool) -> void:
+	if not enabled:
+		return
+	update_raycast_debug_colors = false
+	update_status_text = false
+	auto_manage_camera = false
+	if status_text != null:
+		status_text.visible = false
+	if camera != null:
+		camera.current = false
+		camera.process_mode = Node.PROCESS_MODE_DISABLED
+
+
+func _update_status_text(text:String) -> void:
+	if not update_status_text:
+		return
+	if status_text == null:
+		return
+	status_text.text = text
+
+
+func _update_bars(speed, steering):
+	speed_bar.value = speed
+	if steering > 0:
+		right_steer_bar.value = steering
+		left_steer_bar.value = 0.0
+	elif steering < 0 :
+		right_steer_bar.value = 0.0
+		left_steer_bar.value = steering*-1
+	else:
+		right_steer_bar.value = 0.0
+		left_steer_bar.value = 0.0
+
+func _is_headless() -> bool:
+	return DisplayServer.get_name().to_lower() == "headless" or OS.has_feature("headless")
+
 func _is_continuous_action(action:Variant) -> bool:
 	if typeof(action) == TYPE_ARRAY or typeof(action) == TYPE_PACKED_FLOAT32_ARRAY or typeof(action) == TYPE_PACKED_FLOAT64_ARRAY:
 		return true
 	if typeof(action) == TYPE_DICTIONARY:
-		return action.has("move_input") or action.has("rotation_input")
+		return action.has("drive_input") or action.has("throttle_input") or action.has("brake_input") or action.has("move_input") or action.has("rotation_input")
 	return false
 
 func _continuous_action_values(action:Variant) -> Array:
 	if typeof(action) == TYPE_DICTIONARY:
 		var action_map: Dictionary = action
+		if action_map.has("throttle_input"):
+			return [
+				_action_component_float(action_map.get("throttle_input", 0.0)),
+				_action_component_float(action_map.get("rotation_input", 0.0))
+			]
+		if action_map.has("drive_input"):
+			return [
+				_action_component_float(action_map.get("drive_input", 0.0)),
+				_action_component_float(action_map.get("rotation_input", 0.0))
+			]
+		if action_map.has("brake_input"):
+			var throttle := _action_component_float(action_map.get("throttle_input", 0.0))
+			return [
+				throttle,
+				_action_component_float(action_map.get("rotation_input", 0.0))
+			]
 		return [
 			_action_component_float(action_map.get("move_input", 0.0)),
 			_action_component_float(action_map.get("rotation_input", 0.0))
@@ -358,13 +502,17 @@ func _continuous_action_values(action:Variant) -> Array:
 
 	if typeof(action) == TYPE_ARRAY or typeof(action) == TYPE_PACKED_FLOAT32_ARRAY or typeof(action) == TYPE_PACKED_FLOAT64_ARRAY:
 		var values: Array = Array(action)
-		var move_value := 0.0
+		var drive_value := 0.0
 		var rotation_value := 0.0
 		if values.size() > 0:
-			move_value = float(values[0])
+			drive_value = float(values[0])
 		if values.size() > 1:
-			rotation_value = float(values[1])
-		return [move_value, rotation_value]
+			if values.size() > 2:
+				drive_value = float(values[0])
+				rotation_value = float(values[2])
+			else:
+				rotation_value = float(values[1])
+		return [drive_value, rotation_value]
 
 	return [0.0, 0.0]
 

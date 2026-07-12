@@ -62,12 +62,18 @@ def main():
             reward_terms = ""
             if args.print_reward_terms:
                 if env.multi_agent:
-                    reward_terms = f" terms={[item.get('local_term_rewards', {}) for item in info.get('per_agent_infos', [])]}"
+                    agent_infos = info.get("per_agent_infos", [])
+                    reward_terms = (
+                        f" local_terms={[item.get('local_term_rewards', {}) for item in agent_infos]} "
+                        f"scenario_rewards={[item.get('scenario_reward', 0.0) for item in agent_infos]} "
+                        f"scenario_terms={[item.get('scenario_terms', {}) for item in agent_infos]}"
+                    )
                 else:
                     agent_info = info.get("agent_info", {})
                     reward_terms = (
                         f" terms={agent_info.get('local_term_rewards', {})} "
-                        f"scenario_reward={agent_info.get('scenario_reward', 0.0)}"
+                        f"scenario_reward={agent_info.get('scenario_reward', 0.0)} "
+                        f"scenario_terms={agent_info.get('scenario_terms', {})}"
                     )
             print(
                 f"step={step:04d} action={action_value} reward={reward:.4f} "

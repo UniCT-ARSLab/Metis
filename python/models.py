@@ -30,6 +30,16 @@ def build_continuous_critic(obs_dim, action_size):
     return keras.Model([obs_input, action_input], outputs)
 
 
+def build_sac_actor(obs_dim, action_size):
+    inputs = keras.Input(shape=(obs_dim,))
+    x = keras.layers.Dense(256, activation="relu")(inputs)
+    x = keras.layers.Dense(256, activation="relu")(x)
+    x = keras.layers.Dense(128, activation="relu")(x)
+    mean = keras.layers.Dense(action_size, name="mean")(x)
+    log_std = keras.layers.Dense(action_size, name="log_std")(x)
+    return keras.Model(inputs, [mean, log_std])
+
+
 def build_hybrid_actor_critic(obs_dim, discrete_sizes, continuous_size):
     inputs = keras.Input(shape=(obs_dim,))
     x = keras.layers.Dense(256, activation="relu")(inputs)

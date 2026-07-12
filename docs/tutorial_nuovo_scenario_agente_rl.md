@@ -119,21 +119,21 @@ godot/scripts/capture_point_controller.gd
 godot/scripts/capture_point_sensor_system.gd
 godot/scripts/capture_point_reward_system.gd
 godot/scripts/capture_point_unit.gd
-python/train_capture_point_dqn.py
-python/run_capture_point_policy.py        # opzionale
 ```
 
 Puoi riusare:
 
 ```text
 godot/scripts/bridge_server.gd
-python/team_battle_gym_env.py
+python/scenario_gym_env.py
+python/train_generic.py
+python/run_generic_policy.py
 python/godot_process_manager.py
 python/replay_buffer.py
 python/models.py
 ```
 
-Il nome `team_battle_gym_env.py` e' storico, ma ormai il wrapper e' abbastanza generico se gli passi `agent_ids`, `teams` e `controlled_teams`.
+I vecchi script TeamBattle sono in `python/legacy/team_battle/` e `godot/legacy/team_battle/`, e vanno usati solo come riferimento storico.
 
 ---
 
@@ -619,47 +619,123 @@ reward_system_path = ../RewardSystem
 
 ---
 
-## 9. Creare il trainer Python
+## 9. Avviare il trainer Python
 
-Copia `train_self_play_dqn.py`:
+Per nuovi scenari non creare un trainer specifico. Fai esporre agli agenti Godot `get_observations()` e `get_action_space()`, poi usa `train_generic.py`.
+
+Esempio per azioni discrete:
 
 ```bash
-cp python/train_self_play_dqn.py python/train_capture_point_dqn.py
+python/.venv/bin/python python/train_generic.py \
+  --algorithm dqn \
+  --godot-bin /percorso/a/Godot \
+  --godot-project godot \
+  --godot-scene res://scenarios/capture_point/capture_point.tscn \
+  --num-envs 4 \
+  --multi-agent \
+  --headless
 ```
 
-Poi modifica i default principali:
+Esempio per azioni continue:
 
-```python
-AGENT_IDS = ["A0", "A1", "B0", "B1"]
-TEAMS = [0, 1]
-BASE_PORT = 6500
-OBS_DIM = 18
-NUM_ACTIONS = 9
-CHECKPOINT_DIR = "checkpoints/capture_point_dqn"
-WEIGHTS_PATH = "capture_point_dqn_weights.weights.h5"
+```bash
+python/.venv/bin/python python/train_generic.py \
+  --algorithm sac \
+  --godot-bin /percorso/a/Godot \
+  --godot-project godot \
+  --godot-scene res://scenarios/cars/cars_scenario.tscn \
+  --num-envs 4 \
+  --multi-agent \
+  --headless
 ```
 
-Se lo scenario e' solo Team A contro agenti scripted:
+Con `--algorithm auto`, Python legge lo scenario e sceglie DQN per azioni discrete, DDPG per azioni continue e PPO per azioni ibride. SAC va selezionato esplicitamente.
 
-```python
-AGENT_IDS = ["A0", "A1"]
-TEAMS = [0]
+Per azioni continue puoi guidare l'esplorazione casuale iniziale direttamente da Godot:
+
+```gdscript
+func get_action_space() -> Dictionary:
+	return {
+		"move_input": {
+			"size": 1,
+			"action_type": "continuous",
+			"low": 0.0,
+			"high": 1.0,
+			"exploration_low": 0.55,
+			"exploration_high": 1.0
+		},
+		"rotation_input": {
+			"size": 1,
+			"action_type": "continuous",
+			"low": -1.0,
+			"high": 1.0,
+			"exploration_low": -0.25,
+			"exploration_high": 0.25
+		}
+	}
 ```
 
-E quando crei l'env:
+Se `exploration_low` e `exploration_high` non sono presenti, Python campiona casualmente tra `low` e `high`.
 
-```python
-TeamBattleGymEnv(
-	port=p,
-	seed=args.env_seed_base + i,
-	obs_dim=args.obs_dim,
-	num_actions=args.num_actions,
-	timeout=args.env_timeout,
-	agent_ids=AGENT_IDS,
-	teams=TEAMS,
-	controlled_teams=TEAMS,
-)
+Nelle scene nuove, preferisci dichiarare questo sotto l'agente:
+
+```text
+Agent
+  ActionSpace
+    ContinuousAction move_input
+    ContinuousAction rotation_input
+  ObservationSystem
+    MethodObservationSource
+    RaycastObservationSource
+    TargetRaycastObservationSource
+  RewardSystem
+    RewardComponent...
 ```
+
+Il corpo concreto, ad esempio `Car` o `Tank`, dovrebbe restare responsabile soprattutto di fisica, input applicati e metodi domain-specific come `get_signed_forward_speed()` o `get_control_input()`.
+
+---
+
+## 9.1 Reward locali e reward di scenario
+
+Usa due livelli:
+
+- `Agent/RewardSystem`: reward che riguardano il singolo corpo o i suoi sensori, ad esempio collisione, velocita', input troppo bruschi, raycast vicini.
+- `ScenarioController/ScenarioRewardSystem`: reward che richiedono conoscenza dello scenario, ad esempio progresso, target raggiunto, regole di episodio, stall o pace penalty.
+
+I componenti di scenario gia' disponibili sono:
+
+- `ProgressDeltaScenarioReward`: premia l'aumento del progresso e penalizza la sua diminuzione, senza conoscere come viene misurato.
+- `EventScenarioReward`: assegna un bonus quando un evento configurabile diventa vero.
+- `ProgressStallScenarioReward`: rileva agenti che non migliorano il proprio progresso.
+- `ProgressPaceScenarioReward`: penalizza chi non copre una soglia minima di progresso entro una finestra di step.
+
+Il controller invia a Python:
+
+```text
+reward = local_reward + scenario_reward
+info.local_term_rewards
+info.scenario_reward
+info.scenario_terms
+```
+
+Quindi durante il debug puoi capire se l'agente sta guadagnando per comportamento locale o per avanzamento nello scenario.
+
+Il progresso viene fornito dal nodo `ScenarioController/ProgressProvider`. Il controller e le reward vedono soltanto un valore numerico; la sorgente puo' essere sostituita dall'Inspector:
+
+- `Path3DProgressProvider`: percentuale lungo una curva e, facoltativamente, spawn del curriculum sulla curva.
+- `MethodProgressProvider`: chiama un metodo dell'agente o di un nodo dello scenario.
+- uno script personalizzato derivato da `ProgressProvider`: puo' misurare distanza da un obiettivo, percentuale di oggetti raccolti, punteggio, fasi completate o qualsiasi altra metrica.
+
+Per Cars viene usato `Path3DProgressProvider`, ma la progressione non entra nelle observations: serve soltanto a reward, diagnostica e curriculum. La policy continua quindi a guidare usando sensori e dinamica del veicolo, senza conoscere la posizione sulla pista.
+
+Gli eventi dello scenario sono configurati nello stesso modo sotto `ScenarioEventSystem`:
+
+- `AreaReachedEventSource`: attiva un evento quando un agente entra in una `Area3D` e puo' terminare l'episodio dell'agente.
+- `ObservationThresholdEventSource`: attiva un evento quando una observation supera una soglia, con latch facoltativo.
+- uno script derivato da `ScenarioEventSource`: puo' rappresentare raccolta oggetti, timer, punteggi, fasi o condizioni personalizzate.
+
+Cars usa gli eventi `finish_reached` e `target_first_seen`. `EventScenarioReward` legge `finish_reached` dal contesto senza conoscere l'`Area3D` che lo ha generato.
 
 ---
 
@@ -726,19 +802,14 @@ Avvia la scena e controlla log:
 
 ### Test 2: reset e step random
 
-Crea uno script tipo:
+Crea uno script tipo o usa `random_scenario_rollout.py`:
 
 ```python
-import numpy as np
-from team_battle_gym_env import TeamBattleGymEnv
+from scenario_gym_env import ScenarioGymEnv
 
-env = TeamBattleGymEnv(
+env = ScenarioGymEnv(
 	port=5555,
-	agent_ids=["A0", "A1", "B0", "B1"],
-	teams=[0, 1],
-	controlled_teams=[0, 1],
-	obs_dim=18,
-	num_actions=9,
+	multi_agent=True,
 )
 
 obs, info = env.reset()
@@ -915,7 +986,7 @@ Prima di lanciare un training lungo:
 - [ ] `terminated` e `truncated` funzionano.
 - [ ] Il curriculum non crea configurazioni impossibili.
 - [ ] Il checkpoint viene salvato.
-- [ ] `run_trained_policy.py` o uno script equivalente riesce a caricare il modello.
+- [ ] `run_generic_policy.py` riesce a caricare il modello.
 
 ---
 
@@ -936,4 +1007,3 @@ curriculum completo
 ```
 
 Ogni passaggio deve essere osservabile e debuggabile. Se un agente non impara una versione semplice, quasi mai impara quella complessa.
-

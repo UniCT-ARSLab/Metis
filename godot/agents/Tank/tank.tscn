@@ -8,6 +8,12 @@
 [ext_resource type="Script" uid="uid://cmxl6ko0bmgpr" path="res://scripts/agent/reward_components/MovementReward.gd" id="6_g2rcs"]
 [ext_resource type="Script" uid="uid://bhw2062f0e3vg" path="res://scripts/agent/reward_components/StuckPenaltyReward.gd" id="7_5ne7s"]
 [ext_resource type="Script" uid="uid://b1oe6cauwxkrf" path="res://scripts/agent/reward_components/ObservationThresholdReward.gd" id="8_e2dfk"]
+[ext_resource type="Script" path="res://scripts/agent/action_space/ActionSpace.gd" id="9_action_space"]
+[ext_resource type="Script" path="res://scripts/agent/action_space/DiscreteActionSet.gd" id="10_discrete_action"]
+[ext_resource type="Script" path="res://scripts/agent/observations/ObservationSystem.gd" id="11_observation_system"]
+[ext_resource type="Script" path="res://scripts/agent/observations/MethodObservationSource.gd" id="12_method_observation"]
+[ext_resource type="Script" path="res://scripts/agent/observations/TargetRaycastObservationSource.gd" id="13_target_observation"]
+[ext_resource type="Script" path="res://scripts/agent/observations/RaycastObservationSource.gd" id="14_raycast_observation"]
 
 [sub_resource type="SphereShape3D" id="SphereShape3D_f2qhv"]
 radius = 0.057358228
@@ -18,6 +24,54 @@ script = ExtResource("1_jgq1b")
 [node name="Agent" type="Node" parent="." unique_id=905330640]
 script = ExtResource("2_k1kma")
 metadata/_custom_type_script = "uid://byrdvsguqdev3"
+
+[node name="ActionSpace" type="Node" parent="Agent"]
+script = ExtResource("9_action_space")
+
+[node name="DiscreteActions" type="Node" parent="Agent/ActionSpace"]
+script = ExtResource("10_discrete_action")
+names = PackedStringArray("idle", "move_forward", "move_backward", "turn_right", "turn_left", "forward_right", "forward_left", "backward_right", "backward_left")
+
+[node name="ObservationSystem" type="Node" parent="Agent"]
+script = ExtResource("11_observation_system")
+
+[node name="Position" type="Node" parent="Agent/ObservationSystem"]
+script = ExtResource("12_method_observation")
+observation_name = "position"
+method_name = "_get_position_observation"
+
+[node name="Forward" type="Node" parent="Agent/ObservationSystem"]
+script = ExtResource("12_method_observation")
+observation_name = "forward"
+method_name = "_get_forward_observation"
+
+[node name="LocalVelocity" type="Node" parent="Agent/ObservationSystem"]
+script = ExtResource("12_method_observation")
+observation_name = "local_velocity"
+method_name = "_get_local_velocity_observation"
+
+[node name="MoveInput" type="Node" parent="Agent/ObservationSystem"]
+script = ExtResource("12_method_observation")
+observation_name = "move_input"
+method_name = "_get_move_input"
+
+[node name="TurnInput" type="Node" parent="Agent/ObservationSystem"]
+script = ExtResource("12_method_observation")
+observation_name = "turn_input"
+method_name = "_get_turn_input"
+
+[node name="TargetSensors" type="Node" parent="Agent/ObservationSystem"]
+script = ExtResource("13_target_observation")
+signal_observations = {
+"target_signal_left": "ViewSensor/LineOfViewSensorLeft",
+"target_signal_center": "ViewSensor/LineOfViewSensor",
+"target_signal_right": "ViewSensor/LineOfViewSensorRight"
+}
+
+[node name="Raycasts" type="Node" parent="Agent/ObservationSystem"]
+script = ExtResource("14_raycast_observation")
+root_path = NodePath("../../..")
+update_debug_colors = false
 
 [node name="RewardSystem" type="Node" parent="Agent" unique_id=625923553]
 script = ExtResource("4_7dpgw")

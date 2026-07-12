@@ -1,6 +1,6 @@
 # Dimostrazioni Manuali per gli Agenti
 
-Questa funzione permette di guidare manualmente un agente in Godot e salvare le transizioni in un dataset `.npz` riusabile dal trainer. Con azioni discrete viene usato dal DQN; con azioni continue viene usato dal DDPG.
+Questa funzione permette di guidare manualmente un agente in Godot e salvare le transizioni in un dataset `.npz` riusabile dal trainer. Con azioni discrete viene usato dal DQN; con azioni continue può essere usato da DDPG o SAC.
 
 Il formato salvato contiene:
 
@@ -117,10 +117,11 @@ python/.venv/bin/python python/train_generic_dqn.py \
   --weights-path generic_dqn_demo_bc.weights.h5
 ```
 
-Per Cars/DDPG, puoi usare lo stesso entrypoint generico:
+Per Cars/SAC, puoi usare lo stesso entrypoint generico:
 
 ```bash
 python/.venv/bin/python python/train_generic.py \
+  --algorithm sac \
   --godot-bin /home/fedyfausto/Godot/Godot_v4.6.2-stable_linux.x86_64 \
   --godot-project godot \
   --godot-scene res://scenarios/cars/cars_scenario.tscn \
@@ -131,8 +132,9 @@ python/.venv/bin/python python/train_generic.py \
   --demo-path demos/cars_track_demo.npz \
   --demo-bc-epochs 5 \
   --checkpoint-dir checkpoints/cars_track_demo \
-  --actor-weights-path cars_actor_track_demo.weights.h5 \
-  --critic-weights-path cars_critic_track_demo.weights.h5 \
+  --actor-weights-path cars_sac_track_demo_actor.weights.h5 \
+  --critic1-weights-path cars_sac_track_demo_critic1.weights.h5 \
+  --critic2-weights-path cars_sac_track_demo_critic2.weights.h5 \
   --headless
 ```
 

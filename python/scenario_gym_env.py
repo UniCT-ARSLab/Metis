@@ -328,3 +328,10 @@ class ScenarioGymEnv(gym.Env):
             self.file.close()
         finally:
             self.sock.close()
+
+    def agent_summary(self, sample_size=4):
+        count = len(self.agent_ids)
+        if count <= sample_size * 2:
+            return f"agent_count={count} agents={self.agent_ids}"
+        sample = self.agent_ids[:sample_size] + ["..."] + self.agent_ids[-sample_size:]
+        return f"agent_count={count} agents_sample={sample}"

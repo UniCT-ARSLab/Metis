@@ -3,6 +3,8 @@ class_name BridgeServer
 
 @export var port := 5555
 @export var controller_path: NodePath
+@export var verbose := false
+@export var auto_silence_in_headless := true
 
 var server := TCPServer.new()
 var client: StreamPeerTCP = null
@@ -11,6 +13,8 @@ var _rx_buffer := ""
 
 func _ready() -> void:
 	controller = get_node(controller_path)
+	if auto_silence_in_headless and _is_headless():
+		verbose = false
 
 	for arg in OS.get_cmdline_user_args():
 		if arg.begins_with("--port="):
@@ -22,6 +26,10 @@ func _ready() -> void:
 		return
 
 	print("[BridgeServer] Listening on port %d" % port)
+
+
+func _is_headless() -> bool:
+	return DisplayServer.get_name().to_lower() == "headless" or OS.has_feature("headless")
 
 func _process(_delta: float) -> void:
 	if client == null:
@@ -60,7 +68,8 @@ func _handle_line(line: String) -> void:
 		return
 
 	var cmd := str(request.get("cmd", ""))
-	print("[BridgeServer] cmd=%s port=%d" % [cmd, port])
+	if verbose:
+		print("[BridgeServer] cmd=%s port=%d" % [cmd, port])
 	match cmd:
 		"hello":
 			_send({
@@ -72,7 +81,8 @@ func _handle_line(line: String) -> void:
 		"reset":
 			var reset_reply: Dictionary = await _call_reset(request)
 			var reset_agents: Variant = reset_reply.get("agents", [])
-			print("[BridgeServer] reset ok port=%d agents=%d" % [port, reset_agents.size()])
+			if verbose:
+				print("[BridgeServer] reset ok port=%d agents=%d" % [port, reset_agents.size()])
 			_send(reset_reply)
 		"config":
 			var config: Variant = request.get("config", {})
@@ -88,10 +98,11 @@ func _handle_line(line: String) -> void:
 			var info: Dictionary = step_reply.get("info", {})
 			var terminated: Variant = step_reply.get("terminated", false)
 			var truncated: Variant = step_reply.get("truncated", false)
-			print(
-				"[BridgeServer] step ok port=%d step=%s terminated=%s truncated=%s" %
-				[port, str(info.get("step", info.get("episode_step", "?"))), str(terminated), str(truncated)]
-			)
+			if verbose:
+				print(
+					"[BridgeServer] step ok port=%d step=%s terminated=%s truncated=%s" %
+					[port, str(info.get("step", info.get("episode_step", "?"))), str(terminated), str(truncated)]
+				)
 			
 			_send(step_reply)
 		"close":

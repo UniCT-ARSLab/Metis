@@ -22,6 +22,8 @@ def parse_args():
     parser.add_argument("--multi-agent", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--manual-agent-id", default=None)
     parser.add_argument("--record-all-agents", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--recording-mode", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--disable-replication", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--episodes", type=int, default=5)
     parser.add_argument("--max-steps", type=int, default=500)
     parser.add_argument("--step-delay", type=float, default=0.08)
@@ -31,6 +33,19 @@ def parse_args():
     parser.add_argument("--debug-godot", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--print-every", type=int, default=20)
     return parser.parse_args()
+
+
+def godot_recording_args(args):
+    user_args = []
+    if args.recording_mode:
+        user_args.append("--recording-mode")
+    if args.disable_replication:
+        user_args.append("--disable-agent-replication")
+    if args.manual_agent_id:
+        user_args.append(f"--recording-agent-id={args.manual_agent_id}")
+    elif args.agent_id:
+        user_args.append(f"--recording-agent-id={args.agent_id}")
+    return user_args
 
 
 def _append_or_create(existing, key, values):
@@ -121,7 +136,12 @@ def main():
             project_dir=args.godot_project,
             scene_path=args.godot_scene,
         )
-        manager.start_many([args.port], headless=args.headless, debug=args.debug_godot)
+        manager.start_many(
+            [args.port],
+            headless=args.headless,
+            debug=args.debug_godot,
+            user_args=godot_recording_args(args),
+        )
         print(f"Started Godot on port {args.port}", flush=True)
 
     env = None
@@ -136,6 +156,8 @@ def main():
         manual_agent_id = args.manual_agent_id or env.agent_id
         if manual_agent_id not in env.agent_ids:
             raise RuntimeError(f"manual_agent_id={manual_agent_id!r} not in scenario agents: {env.agent_ids}")
+        if args.recording_mode:
+            env.configure(recording_mode=True, recording_agent_id=manual_agent_id, manage_agent_cameras=True)
 
         print(
             f"Recording demos output={args.output} agent={manual_agent_id} multi_agent={args.multi_agent} "

@@ -26,7 +26,9 @@ func _ready() -> void:
 	agent.add_action("backward_right", Callable(self, "backward_right"))
 	agent.add_action("backward_left", Callable(self, "backward_left"))
 	
-	_register_observations()
+	_find_raycasts(self, _raycasts)
+	if not agent.register_observation_sources(self):
+		_register_observations()
 
 func _physics_process(delta):
 	if not is_on_floor():
@@ -127,6 +129,18 @@ func get_action_names() -> Array:
 	return agent.get_action_names()
 
 
+func get_action_space() -> Dictionary:
+	return agent.get_action_space()
+
+
+func get_action_type() -> String:
+	return agent.get_action_type()
+
+
+func get_action_size() -> int:
+	return agent.get_action_size()
+
+
 func reset_reward() -> void:
 	agent.reset_reward(_build_reward_context())
 
@@ -202,12 +216,14 @@ func reset_all(original_position:Transform3D, reset_rewards := true):
 		reset_reward()
 
 func reset_raycast_state() -> void:
+	agent.reset_observation_sources()
 	for raycast in _raycasts:
 		if is_instance_valid(raycast):
 			raycast.clear_exceptions()
 			raycast.enabled = false
 
 func refresh_sensors() -> void:
+	agent.refresh_observation_sources()
 	for raycast in _raycasts:
 		if is_instance_valid(raycast):
 			raycast.clear_exceptions()
@@ -215,7 +231,8 @@ func refresh_sensors() -> void:
 			raycast.force_raycast_update()
 
 func _register_observations() -> void:
-	_find_raycasts(self, _raycasts)
+	if _raycasts.is_empty():
+		_find_raycasts(self, _raycasts)
 
 	agent.add_observation("position", Callable(self, "_get_position_observation"))
 	agent.add_observation("forward", Callable(self, "_get_forward_observation"))
