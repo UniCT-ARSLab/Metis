@@ -5,16 +5,29 @@ class_name BridgeServer
 @export var controller_path: NodePath
 @export var verbose := false
 @export var auto_silence_in_headless := true
+@export_category("Simulation Clock")
+@export var lockstep_enabled := true
+@export_range(0, 10000, 100) var lockstep_idle_sleep_usec := 500
+@export_range(0, 10000, 100) var lockstep_headless_idle_sleep_usec := 2000
 
 var server := TCPServer.new()
 var client: StreamPeerTCP = null
 var controller
 var _rx_buffer := ""
+var _lockstep_active := false
+var _tree_was_paused := false
+var _realtime_frame_cap_active := false
+var _max_fps_before_realtime := 0
+var _realtime_simulation_fps := 60
+var _realtime_next_frame_usec := 0
 
 func _ready() -> void:
+	process_mode = Node.PROCESS_MODE_ALWAYS
 	controller = get_node(controller_path)
 	if auto_silence_in_headless and _is_headless():
 		verbose = false
+	if _is_headless():
+		lockstep_idle_sleep_usec = maxi(lockstep_idle_sleep_usec, lockstep_headless_idle_sleep_usec)
 
 	for arg in OS.get_cmdline_user_args():
 		if arg.begins_with("--port="):
@@ -32,13 +45,22 @@ func _is_headless() -> bool:
 	return DisplayServer.get_name().to_lower() == "headless" or OS.has_feature("headless")
 
 func _process(_delta: float) -> void:
+	if not lockstep_enabled and client != null:
+		_pace_realtime_loop()
 	if client == null:
 		if server.is_connection_available():
 			client = server.take_connection()
 			_rx_buffer = ""
+			_activate_lockstep()
 			print("[BridgeServer] Client connected on port %d" % port)
+		elif lockstep_enabled and lockstep_idle_sleep_usec > 0:
+			OS.delay_usec(lockstep_idle_sleep_usec)
 		return
 
+	# A step reply is sent before _process. Give Python a brief chance to return the
+	# next action so it can still be consumed in this render frame.
+	if _lockstep_active and lockstep_idle_sleep_usec > 0:
+		OS.delay_usec(lockstep_idle_sleep_usec)
 	client.poll()
 	var status := client.get_status()
 	if status == StreamPeerTCP.STATUS_NONE or status == StreamPeerTCP.STATUS_ERROR:
@@ -74,12 +96,32 @@ func _handle_line(line: String) -> void:
 		"hello":
 			_send({
 				"ok": true,
-				"version": 1
+				"version": 1,
+				"lockstep": _lockstep_active,
+				"execution_mode": "lockstep" if _lockstep_active else "realtime"
 			})
 		"spec":
 			_send(_call_spec())
+		"execution_mode":
+			var mode := str(request.get("mode", "lockstep")).to_lower()
+			var simulation_fps := maxi(1, int(request.get("simulation_fps", 60)))
+			if mode != "lockstep" and mode != "realtime":
+				_send({
+					"ok": false,
+					"error": "execution_mode must be 'lockstep' or 'realtime'"
+				})
+				return
+			_set_execution_mode(mode, simulation_fps)
+			_send({
+				"ok": true,
+				"mode": mode,
+				"lockstep": _lockstep_active,
+				"simulation_fps": Engine.max_fps if mode == "realtime" else 0
+			})
 		"reset":
+			_begin_simulation_request()
 			var reset_reply: Dictionary = await _call_reset(request)
+			_end_simulation_request()
 			var reset_agents: Variant = reset_reply.get("agents", [])
 			if verbose:
 				print("[BridgeServer] reset ok port=%d agents=%d" % [port, reset_agents.size()])
@@ -94,7 +136,9 @@ func _handle_line(line: String) -> void:
 				return
 			_send(_call_config(config as Dictionary))
 		"step":
+			_begin_simulation_request()
 			var step_reply: Dictionary = await _call_step(request)
+			_end_simulation_request()
 			var info: Dictionary = step_reply.get("info", {})
 			var terminated: Variant = step_reply.get("terminated", false)
 			var truncated: Variant = step_reply.get("truncated", false)
@@ -187,7 +231,76 @@ func _send(payload: Dictionary) -> void:
 		_disconnect_client()
 
 func _disconnect_client() -> void:
+	_restore_realtime_frame_cap()
+	_deactivate_lockstep()
 	if client != null:
 		client.disconnect_from_host()
 	client = null
 	_rx_buffer = ""
+
+
+func _activate_lockstep() -> void:
+	if not lockstep_enabled or _lockstep_active:
+		return
+	_tree_was_paused = get_tree().paused
+	_lockstep_active = true
+	get_tree().paused = true
+
+
+func _set_execution_mode(mode:String, simulation_fps:int = 60) -> void:
+	if mode == "realtime":
+		if not _realtime_frame_cap_active:
+			_max_fps_before_realtime = Engine.max_fps
+			_realtime_frame_cap_active = true
+		Engine.max_fps = maxi(1, simulation_fps)
+		_realtime_simulation_fps = maxi(1, simulation_fps)
+		_realtime_next_frame_usec = Time.get_ticks_usec()
+		lockstep_enabled = false
+		_deactivate_lockstep()
+		return
+	_restore_realtime_frame_cap()
+	lockstep_enabled = true
+	_activate_lockstep()
+
+
+func _restore_realtime_frame_cap() -> void:
+	if not _realtime_frame_cap_active:
+		return
+	Engine.max_fps = _max_fps_before_realtime
+	_realtime_frame_cap_active = false
+	_realtime_next_frame_usec = 0
+
+
+func _pace_realtime_loop() -> void:
+	var frame_interval_usec := maxi(1, int(1_000_000.0 / float(_realtime_simulation_fps)))
+	var now := Time.get_ticks_usec()
+	if _realtime_next_frame_usec <= 0:
+		_realtime_next_frame_usec = now
+	_realtime_next_frame_usec += frame_interval_usec
+	var remaining := _realtime_next_frame_usec - now
+	if remaining > 0:
+		OS.delay_usec(remaining)
+		now = Time.get_ticks_usec()
+	if now - _realtime_next_frame_usec > frame_interval_usec:
+		_realtime_next_frame_usec = now
+
+
+func _deactivate_lockstep() -> void:
+	if not _lockstep_active:
+		return
+	get_tree().paused = _tree_was_paused
+	_lockstep_active = false
+
+
+func _begin_simulation_request() -> void:
+	if _lockstep_active:
+		get_tree().paused = false
+
+
+func _end_simulation_request() -> void:
+	if _lockstep_active:
+		get_tree().paused = true
+
+
+func _exit_tree() -> void:
+	_deactivate_lockstep()

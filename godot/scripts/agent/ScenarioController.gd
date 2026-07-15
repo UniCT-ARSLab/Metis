@@ -1,4 +1,9 @@
 extends Node
+class_name ScenarioController
+signal episode_reset_started(seed:int)
+signal episode_reset_completed(seed:int)
+signal episode_step_completed(step:int)
+signal scenario_configured(config:Dictionary)
 
 @export var controlled_agents: Array[Node] = []
 @export var scenario_reward_system_path: NodePath = NodePath("ScenarioRewardSystem")
@@ -17,7 +22,8 @@ extends Node
 @export var use_agent_specific_reset_seed := true
 
 @export_category("RL Info")
-@export var max_steps:= 500
+@export var max_steps:= 500 # Zero disables step-based truncation.
+@export_range(1, 16, 1) var physics_frames_per_step := 1
 @export var manage_agent_cameras := true
 
 @export_category("Training Optimization")
@@ -48,6 +54,7 @@ var _is_headless_runtime := false
 var _scenario_reward_system: Node
 var _progress_provider: Node
 var _event_system: Node
+var _training_episode := 0
 
 func _ready() -> void:
 	_is_headless_runtime = _is_headless()
@@ -67,7 +74,8 @@ func _ready() -> void:
 	
 	for agent in _agents:
 		var agent_id := _agent_id(agent)
-		_original_agent_transforms[agent_id] = agent.transform
+		if agent is Node3D or agent is Node2D:
+			_original_agent_transforms[agent_id] = agent.transform
 
 
 func _spawn_replicated_agents() -> void:
@@ -194,9 +202,9 @@ func step(actions:Variant):
 		var applied_action: Variant = agent.apply_action(agent_action)
 		applied_actions[_agent_id(agent)] = applied_action
 
-	await get_tree().physics_frame
+	await _advance_physics_frames(physics_frames_per_step)
 
-	var truncated := step_count >= max_steps
+	var truncated := max_steps > 0 and step_count >= max_steps
 	var channels := []
 	for agent in _agents:
 		if deactivate_done_agents and _is_agent_done(agent):
@@ -208,6 +216,7 @@ func step(actions:Variant):
 		if bool(channel.get("done", false)):
 			_mark_agent_done(agent, channel)
 	_update_current_agent_camera()
+	episode_step_completed.emit(step_count)
 
 	if _should_return_single_agent_response(actions):
 		if channels.is_empty():
@@ -249,7 +258,11 @@ func configure(config:Dictionary) -> Dictionary:
 	_progress_provider = get_node_or_null(progress_provider_path)
 	_event_system = get_node_or_null(event_system_path)
 	if config.has("max_steps"):
-		max_steps = int(config["max_steps"])
+		max_steps = maxi(0, int(config["max_steps"]))
+	if config.has("physics_frames_per_step"):
+		physics_frames_per_step = maxi(1, int(config["physics_frames_per_step"]))
+	if config.has("training_episode"):
+		_training_episode = max(0, int(config["training_episode"]))
 	if config.has("reset_progress_min"):
 		reset_progress_min = clampf(float(config["reset_progress_min"]), 0.0, 1.0)
 	elif config.has("reset_track_progress_min"):
@@ -273,10 +286,13 @@ func configure(config:Dictionary) -> Dictionary:
 	if _scenario_reward_system != null:
 		_apply_config_to_node_tree(_scenario_reward_system, config)
 	_update_current_agent_camera()
+	scenario_configured.emit(config.duplicate(true))
 
 	return {
 		"ok": true,
+		"training_episode": _training_episode,
 		"max_steps": max_steps,
+		"physics_frames_per_step": physics_frames_per_step,
 		"reset_progress_min": reset_progress_min,
 		"reset_progress_max": reset_progress_max,
 		"reset_track_progress_min": reset_progress_min,
@@ -299,6 +315,7 @@ func reset_episode(seed := 0):
 	_last_reset_info.clear()
 	_done_agents.clear()
 	_cached_done_step_results.clear()
+	episode_reset_started.emit(seed)
 	if _scenario_reward_system != null and _scenario_reward_system.has_method("reset_rewards"):
 		_scenario_reward_system.reset_rewards()
 	if _progress_provider != null and _progress_provider.has_method("reset_provider"):
@@ -316,10 +333,12 @@ func reset_episode(seed := 0):
 		
 		_done_agents[agent_id] = false
 
-		var original_transform: Transform3D = agent.transform
+		var original_transform: Variant = null
+		if agent is Node3D or agent is Node2D:
+			original_transform = agent.transform
 		if _original_agent_transforms.has(agent_id):
 			original_transform = _original_agent_transforms[agent_id]
-		var reset_transform := _build_reset_transform(agent_id, original_transform, rng)
+		var reset_transform: Variant = _build_reset_transform(agent_id, original_transform, rng)
 		_set_agent_training_active(agent, true)
 		agent.reset_all(reset_transform, false)
 		var reset_context := {"agent_id": agent_id, "step": step_count}
@@ -331,18 +350,19 @@ func reset_episode(seed := 0):
 		if _scenario_reward_system != null and _scenario_reward_system.has_method("reset_agent"):
 			_scenario_reward_system.reset_agent(agent_id, reset_context)
 
-	await get_tree().physics_frame
+	await _advance_physics_frames(1)
 	for agent in _agents:
-		agent.refresh_sensors()
+		_refresh_agent_sensors(agent)
 
-	await get_tree().physics_frame
+	await _advance_physics_frames(1)
 	for agent in _agents:
-		agent.refresh_sensors()
-		agent.reset_reward()
+		_refresh_agent_sensors(agent)
+		_reset_agent_reward(agent)
 
 	for agent in _agents:
 		channels.append(_build_agent_reset_result(agent))
 	_update_current_agent_camera()
+	episode_reset_completed.emit(seed)
 	
 	if channels.size() == 1:
 		var single: Dictionary = channels[0].duplicate(true)
@@ -368,7 +388,8 @@ func get_spec() -> Dictionary:
 		var action_names := _flatten_action_names(action_space)
 		var agent_spec := {
 			"id": _agent_id(agent),
-			"obs_dim": agent.get_observation_size(),
+			"team_id": _agent_team_id(agent),
+			"obs_dim": _agent_observation_size(agent),
 			"action_names": action_names,
 			"action_type": action_type,
 			"action_space": action_space
@@ -389,8 +410,15 @@ func get_spec() -> Dictionary:
 	return {
 		"ok": true,
 		"agents": agent_specs,
-		"multi_agent": agent_specs.size() > 1
+		"multi_agent": agent_specs.size() > 1,
+		"physics_frames_per_step": physics_frames_per_step
 	}
+
+
+func _advance_physics_frames(frame_count:int) -> void:
+	# Requests arrive during _process; the next process_frame follows the next physics tick.
+	for _frame in range(maxi(frame_count, 1)):
+		await get_tree().process_frame
 
 
 func get_progress(agent:Node, context:Dictionary = {}) -> float:
@@ -402,25 +430,29 @@ func get_progress(agent:Node, context:Dictionary = {}) -> float:
 
 
 func _get_agent_action_space(agent:Node) -> Dictionary:
-	if agent.has_method("get_action_space"):
-		var action_space: Variant = agent.get_action_space()
+	var interface := _agent_interface(agent)
+	if interface == null:
+		push_warning("Agent body %s has no Agent child or RL interface" % agent.name)
+		return {}
+	if interface != null and interface.has_method("get_action_space"):
+		var action_space: Variant = interface.get_action_space()
 		if typeof(action_space) == TYPE_DICTIONARY:
 			return _normalize_action_space(action_space)
 
 	var action_type := "discrete"
-	if agent.has_method("get_action_type"):
-		action_type = str(agent.get_action_type())
+	if interface != null and interface.has_method("get_action_type"):
+		action_type = str(interface.get_action_type())
 
 	if action_type == "continuous":
-		var action_names: Array = agent.get_action_names()
+		var action_names: Array = interface.get_action_names()
 		var lows: Array = []
 		var highs: Array = []
-		if agent.has_method("get_action_low"):
-			lows = agent.get_action_low()
-		if agent.has_method("get_action_high"):
-			highs = agent.get_action_high()
+		if interface.has_method("get_action_low"):
+			lows = interface.get_action_low()
+		if interface.has_method("get_action_high"):
+			highs = interface.get_action_high()
 		var result := {}
-		for idx in range(int(agent.get_action_size())):
+		for idx in range(int(interface.get_action_size())):
 			var action_name := str(idx)
 			if idx < action_names.size():
 				action_name = str(action_names[idx])
@@ -434,9 +466,9 @@ func _get_agent_action_space(agent:Node) -> Dictionary:
 
 	return {
 		"action": {
-			"size": agent.get_action_count(),
+			"size": interface.get_action_count(),
 			"action_type": "discrete",
-			"names": agent.get_action_names()
+			"names": interface.get_action_names()
 		}
 	}
 
@@ -533,8 +565,8 @@ func _total_discrete_action_size(action_space:Dictionary) -> int:
 	return total
 
 
-func _build_reset_transform(agent_id:String, original_transform:Transform3D, rng:RandomNumberGenerator) -> Transform3D:
-	var reset_transform := original_transform
+func _build_reset_transform(agent_id:String, original_transform:Variant, rng:RandomNumberGenerator) -> Variant:
+	var reset_transform: Variant = original_transform
 	var reset_info := {
 		"randomized": false,
 		"mode": "original"
@@ -564,8 +596,11 @@ func _build_reset_transform(agent_id:String, original_transform:Transform3D, rng
 	else:
 		reset_info["mode"] = "jitter"
 
-	reset_transform = _apply_position_jitter(reset_transform, rng, reset_info)
-	reset_transform = _apply_yaw_jitter(reset_transform, rng, reset_info)
+	if typeof(reset_transform) == TYPE_TRANSFORM3D:
+		reset_transform = _apply_position_jitter(reset_transform, rng, reset_info)
+		reset_transform = _apply_yaw_jitter(reset_transform, rng, reset_info)
+	elif typeof(reset_transform) == TYPE_TRANSFORM2D:
+		reset_transform = _apply_2d_jitter(reset_transform, rng, reset_info)
 	_last_reset_info[agent_id] = reset_info
 	return reset_transform
 
@@ -598,6 +633,22 @@ func _apply_yaw_jitter(reset_transform:Transform3D, rng:RandomNumberGenerator, r
 	var yaw_jitter := deg_to_rad(rng.randf_range(-reset_yaw_jitter_degrees, reset_yaw_jitter_degrees))
 	reset_transform.basis = Basis().rotated(Vector3.UP, yaw_jitter) * reset_transform.basis
 	reset_info["yaw_jitter_degrees"] = rad_to_deg(yaw_jitter)
+	return reset_transform
+
+
+func _apply_2d_jitter(reset_transform:Transform2D, rng:RandomNumberGenerator, reset_info:Dictionary) -> Transform2D:
+	var jitter := Vector2(
+		rng.randf_range(-reset_position_jitter.x, reset_position_jitter.x),
+		rng.randf_range(-reset_position_jitter.y, reset_position_jitter.y)
+	)
+	reset_transform.origin += reset_transform.basis_xform(jitter)
+	if jitter != Vector2.ZERO:
+		reset_info["position_jitter"] = jitter
+
+	if reset_yaw_jitter_degrees > 0.0:
+		var rotation_jitter := deg_to_rad(rng.randf_range(-reset_yaw_jitter_degrees, reset_yaw_jitter_degrees))
+		reset_transform = reset_transform.rotated_local(rotation_jitter)
+		reset_info["rotation_jitter_degrees"] = rad_to_deg(rotation_jitter)
 	return reset_transform
 
 func _refresh_agents() -> void:
@@ -649,7 +700,7 @@ func _build_agent_reset_result(agent:Node) -> Dictionary:
 	var progress := get_progress(agent)
 	return {
 		"id": agent_id,
-		"obs": agent.get_observation_vector(),
+		"obs": _agent_observation_vector(agent),
 		"info": {
 			"step": step_count,
 			"reset": _last_reset_info.get(agent_id, {}),
@@ -662,32 +713,40 @@ func _build_agent_reset_result(agent:Node) -> Dictionary:
 func _build_agent_step_result(agent:Node, truncated:bool, applied_action:Variant = 0) -> Dictionary:
 	var agent_id := _agent_id(agent)
 	_update_agent_events(agent)
-	var context := _build_scenario_context(agent)
-	var local_reward := float(agent.get_reward())
+	var context := _build_scenario_context(agent, truncated)
 	var scenario_reward := compute_reward_scenario(agent, context)
+	var scenario_terminal_reason := _get_scenario_terminal_reason(agent_id)
+	var scenario_terminal := not scenario_terminal_reason.is_empty()
+	if scenario_terminal:
+		context["scenario_terminal"] = true
+		context["scenario_terminal_reason"] = scenario_terminal_reason
+		context["terminated"] = true
+		context["done"] = true
+		context["episode_done"] = true
+	var local_reward := _agent_reward(agent, context)
 	var target_reached := bool(context.get("target_reached", false))
 	var finish_reached := bool(context.get("finish_reached", target_reached))
 	var agent_terminal := bool(context.get("agent_terminal", false))
 	var event_terminal_reason := _get_event_terminal_reason(agent_id)
-	var scenario_terminal_reason := _get_scenario_terminal_reason(agent_id)
-	var scenario_terminal := not scenario_terminal_reason.is_empty()
 	var progress_stalled := _is_progress_stalled(agent_id)
+	var events := _get_agent_events(agent_id)
 	var terminated := not event_terminal_reason.is_empty() or agent_terminal or scenario_terminal
 	var done := terminated or truncated
 	var progress := float(context.get("progress", 0.0))
 
 	return {
 		"id": agent_id,
-		"obs": agent.get_observation_vector(),
+		"obs": _agent_observation_vector(agent),
 		"reward": local_reward + scenario_reward,
 		"done": done,
 		"terminated": terminated,
 		"truncated": truncated,
 		"info": {
 			"step": step_count,
-			"local_term_rewards": agent.get_reward_terms(),
+			"local_term_rewards": _agent_reward_terms(agent),
 			"scenario_reward": scenario_reward,
 			"scenario_terms": _get_scenario_terms(agent_id),
+			"events": events,
 			"target_reached": target_reached,
 			"finish_reached": finish_reached,
 			"agent_terminal": agent_terminal,
@@ -710,13 +769,23 @@ func _update_agent_events(agent:Node) -> void:
 		})
 
 
-func _build_scenario_context(agent:Node) -> Dictionary:
+func _build_scenario_context(agent:Node, truncated := false) -> Dictionary:
 	var agent_id := _agent_id(agent)
 	var agent_terminal := bool(agent.is_terminal()) if agent.has_method("is_terminal") else false
+	var event_terminal_reason := _get_event_terminal_reason(agent_id)
+	var event_terminal := not event_terminal_reason.is_empty()
+	var terminated := agent_terminal or event_terminal
+	var episode_done := terminated or truncated
 	var context := {
 		"agent_id": agent_id,
 		"step": step_count,
-		"agent_terminal": agent_terminal
+		"agent_terminal": agent_terminal,
+		"event_terminal": event_terminal,
+		"event_terminal_reason": event_terminal_reason,
+		"terminated": terminated,
+		"truncated": truncated,
+		"done": episode_done,
+		"episode_done": episode_done
 	}
 	if _event_system != null and _event_system.has_method("get_agent_context"):
 		var event_context:Variant = _event_system.get_agent_context(agent_id)
@@ -742,7 +811,7 @@ func _cached_done_step_result(agent:Node, truncated:bool) -> Dictionary:
 	if channel.is_empty():
 		channel = {
 			"id": agent_id,
-			"obs": agent.get_observation_vector(),
+			"obs": _agent_observation_vector(agent),
 			"reward": 0.0,
 			"done": true,
 			"terminated": true,
@@ -810,6 +879,14 @@ func _get_scenario_terms(agent_id:String) -> Dictionary:
 	return {}
 
 
+func _get_agent_events(agent_id:String) -> Dictionary:
+	if _event_system != null and _event_system.has_method("get_agent_context"):
+		var events:Variant = _event_system.get_agent_context(agent_id)
+		if typeof(events) == TYPE_DICTIONARY:
+			return events
+	return {}
+
+
 func _apply_config_to_node_tree(node:Node, config:Dictionary) -> void:
 	_apply_config_to_node(node, config)
 	for child in node.get_children():
@@ -830,6 +907,59 @@ func _node_has_property(node:Node, property_name:String) -> bool:
 	return false
 
 
+func _agent_interface(agent_body:Node) -> Node:
+	var child := agent_body.get_node_or_null(NodePath("Agent"))
+	if child != null and child.has_method("get_observation_vector"):
+		return child
+	if agent_body.has_method("get_observation_vector"):
+		return agent_body
+	return null
+
+
+func _agent_observation_vector(agent_body:Node) -> Array:
+	var interface := _agent_interface(agent_body)
+	if interface != null:
+		return interface.get_observation_vector()
+	return []
+
+
+func _agent_observation_size(agent_body:Node) -> int:
+	var interface := _agent_interface(agent_body)
+	if interface != null:
+		return int(interface.get_observation_size())
+	return 0
+
+
+func _agent_reward(agent_body:Node, context:Dictionary = {}) -> float:
+	var interface := _agent_interface(agent_body)
+	if interface != null and interface.has_method("get_reward"):
+		var reward_context := context.duplicate(true)
+		reward_context["body"] = agent_body
+		return float(interface.get_reward(reward_context))
+	return 0.0
+
+
+func _agent_reward_terms(agent_body:Node) -> Dictionary:
+	var interface := _agent_interface(agent_body)
+	if interface != null and interface.has_method("get_reward_terms"):
+		return interface.get_reward_terms()
+	return {}
+
+
+func _reset_agent_reward(agent_body:Node) -> void:
+	var interface := _agent_interface(agent_body)
+	if interface != null and interface.has_method("reset_reward"):
+		interface.reset_reward({"body": agent_body})
+
+
+func _refresh_agent_sensors(agent_body:Node) -> void:
+	var interface := _agent_interface(agent_body)
+	if interface != null and interface.has_method("refresh_observation_sources"):
+		interface.refresh_observation_sources()
+	elif agent_body.has_method("refresh_sensors"):
+		agent_body.refresh_sensors()
+
+
 func _get_action_for_agent(actions:Variant, agent:Node) -> Variant:
 	if typeof(actions) == TYPE_DICTIONARY:
 		var action_map: Dictionary = actions
@@ -844,6 +974,21 @@ func _should_return_single_agent_response(actions:Variant) -> bool:
 
 func _agent_id(agent:Node) -> String:
 	return str(agent.name)
+
+
+func _agent_team_id(agent:Node) -> Variant:
+	if agent.has_method("get_team_id"):
+		return agent.get_team_id()
+
+	var interface := _agent_interface(agent)
+	if interface != null and interface.has_method("get_team_id"):
+		return interface.get_team_id()
+
+	if _node_has_property(agent, "team_id"):
+		return agent.get("team_id")
+	if interface != null and _node_has_property(interface, "team_id"):
+		return interface.get("team_id")
+	return null
 
 
 func _all_agents_done(channels:Array) -> bool:

@@ -22,9 +22,9 @@ func compute_reward(context:Dictionary) -> float:
 	if body.has_method("is_crashed") and bool(body.is_crashed()):
 		return 0.0
 
-	var clearance := _read_forward_clearance(body)
-	var input_value := _read_input_value(body)
-	var forward_speed_norm := _read_forward_speed_norm(body)
+	var clearance := _read_forward_clearance(context, body)
+	var input_value := _read_input_value(context, body)
+	var forward_speed_norm := _read_forward_speed_norm(context, body)
 
 	if input_value < 0.0:
 		return absf(input_value) * reverse_penalty_scale * weight
@@ -49,26 +49,33 @@ func compute_reward(context:Dictionary) -> float:
 	return reward_value * weight
 
 
-func _read_forward_clearance(body) -> float:
+func _read_forward_clearance(context:Dictionary, body) -> float:
+	var observations: Dictionary = context.get("observations", {})
+	if observations.has("forward_clearance"):
+		return clampf(float(observations["forward_clearance"]), 0.0, 1.0)
 	if body.has_method("get_forward_clearance"):
 		return clampf(float(body.get_forward_clearance()), 0.0, 1.0)
 	return 1.0
 
 
-func _read_input_value(body) -> float:
+func _read_input_value(context:Dictionary, body) -> float:
+	var observations: Dictionary = context.get("observations", {})
+	if observations.has(input_name):
+		return clampf(float(observations[input_name]), -1.0, 1.0)
 	if body.has_method("get_control_input"):
 		return clampf(float(body.get_control_input(input_name)), -1.0, 1.0)
-
-	var observations: Dictionary = {}
 	if body.has_method("get_observations"):
 		observations = body.get_observations()
 
 	return clampf(float(observations.get(input_name, 0.0)), -1.0, 1.0)
 
 
-func _read_forward_speed_norm(body) -> float:
+func _read_forward_speed_norm(context:Dictionary, body) -> float:
 	if body.has_method("get_signed_forward_speed"):
 		return clampf(maxf(float(body.get_signed_forward_speed()), 0.0) / maxf(speed_reference, 0.000001), 0.0, 1.0)
+	var observations: Dictionary = context.get("observations", {})
+	if observations.has("forward_speed"):
+		return clampf(maxf(float(observations["forward_speed"]), 0.0), 0.0, 1.0)
 	if body.has_method("get_normalized_forward_speed"):
 		return clampf(maxf(float(body.get_normalized_forward_speed()), 0.0), 0.0, 1.0)
 	return 0.0

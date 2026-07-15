@@ -6,6 +6,7 @@ class_name Agent
 @export var action_space_path: NodePath = NodePath("ActionSpace")
 @export var observation_system_path: NodePath = NodePath("ObservationSystem")
 @export var reward_system_path: NodePath = NodePath("RewardSystem")
+@export var auto_register_observations := true
 
 var _action_names: Array[String] = []
 var _observation_names: Array[String] = []
@@ -17,6 +18,8 @@ func _ready() -> void:
 	_action_space = get_node_or_null(action_space_path)
 	_observation_system = get_node_or_null(observation_system_path)
 	_reward_system = get_node_or_null(reward_system_path)
+	if auto_register_observations:
+		register_observation_sources(get_parent())
 
 # AGENT'S ACTIONS
 func add_action(action:String, callable:Callable) -> int:
@@ -31,6 +34,10 @@ func add_actions(new_actions:Dictionary) -> void:
 		self.add_action(str(action), new_actions[action])
 
 func act(action:Variant) -> int:
+	var configured_result := act_discrete(action)
+	if configured_result != ERR_UNAVAILABLE:
+		return configured_result
+
 	var action_name := ""
 
 	if typeof(action) == TYPE_INT:
@@ -52,6 +59,13 @@ func act(action:Variant) -> int:
 
 	callable.call()
 	return OK
+
+
+func act_discrete(action:Variant, component_name:String = "") -> int:
+	var action_space := _get_action_space_node()
+	if action_space == null or not action_space.has_method("execute_discrete_action"):
+		return ERR_UNAVAILABLE
+	return int(action_space.execute_discrete_action(action, get_parent(), component_name))
 
 func get_action_names() -> Array:
 	var action_space := _get_action_space_node()
@@ -104,7 +118,28 @@ func get_action_high() -> Array:
 		return action_space.get_continuous_bounds("high", 1.0)
 	return []
 
-# ANGET'S OBSERVABLE
+
+func decode_continuous_action(action:Variant) -> Array:
+	var expected_size := get_action_size()
+	var result: Array = []
+
+	if typeof(action) == TYPE_DICTIONARY:
+		var action_map: Dictionary = action
+		for action_name in get_action_space().keys():
+			var component: Dictionary = get_action_space()[action_name]
+			if str(component.get("action_type", "discrete")) != "continuous":
+				continue
+			_append_action_values(result, action_map.get(action_name, 0.0), int(component.get("size", 1)))
+	else:
+		_append_action_values(result, action, expected_size)
+
+	while result.size() < expected_size:
+		result.append(0.0)
+	if result.size() > expected_size:
+		result.resize(expected_size)
+	return result
+
+# ANGET'S OBSERVABLE_action_space
 func add_observation(observable:String, value:Variant = null) -> int:
 	if observations.has(observable):
 		return ERR_ALREADY_EXISTS
@@ -246,3 +281,14 @@ func _append_observation_value(result:Array, value:Variant) -> void:
 	else:
 		push_warning("Observation value cannot be flattened: %s" % [str(value)])
 		result.append(0.0)
+
+
+func _append_action_values(result:Array, value:Variant, size:int) -> void:
+	var values: Array = []
+	if typeof(value) == TYPE_ARRAY or typeof(value) == TYPE_PACKED_FLOAT32_ARRAY or typeof(value) == TYPE_PACKED_FLOAT64_ARRAY:
+		values = Array(value)
+	else:
+		values = [value]
+
+	for idx in range(max(size, 1)):
+		result.append(float(values[idx]) if idx < values.size() else 0.0)

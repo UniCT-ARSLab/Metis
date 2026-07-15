@@ -1,6 +1,755 @@
+import argparse
+import copy
 import json
+import os
 import re
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from collections import deque
+from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from itertools import count
 from pathlib import Path
+from queue import Empty, Full, Queue
+
+import numpy as np
+
+
+def episode_step_indices(max_steps):
+    """Iterate episode step indices; zero means no Python-side time limit."""
+    max_steps = int(max_steps)
+    if max_steps < 0:
+        raise ValueError("Episode max steps cannot be negative")
+    return count() if max_steps == 0 else range(max_steps)
+
+
+def add_tensorflow_runtime_arguments(parser, *, include_compile_learner=False):
+    parser.add_argument(
+        "--gpu-memory-growth",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Let TensorFlow grow CUDA GPU memory usage on demand instead of reserving most "
+            "available VRAM at startup. This setting is ignored by non-CUDA backends."
+        ),
+    )
+    if include_compile_learner:
+        parser.add_argument(
+            "--tf-compile-learner",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Compile learner updates into a TensorFlow graph and batch consecutive updates.",
+        )
+
+
+def add_best_checkpoint_arguments(parser):
+    parser.add_argument(
+        "--best-checkpoint",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Periodically evaluate a frozen policy and retain independently selected best checkpoints.",
+    )
+    parser.add_argument(
+        "--best-checkpoint-dir",
+        default=None,
+        help="Best-checkpoint destination; defaults to CHECKPOINT_DIR/best.",
+    )
+    parser.add_argument("--keep-best-checkpoints", type=int, default=3)
+    parser.add_argument(
+        "--best-evaluation-every",
+        type=int,
+        default=100,
+        help="Completed training episodes between deterministic best-policy evaluations.",
+    )
+    parser.add_argument("--best-evaluation-episodes", type=int, default=20)
+    parser.add_argument("--best-evaluation-seed", type=int, default=10_000)
+    parser.add_argument(
+        "--best-evaluation-training-episode",
+        type=int,
+        default=None,
+        help="Fixed scenario curriculum episode used for evaluation; defaults to --num-episodes.",
+    )
+    parser.add_argument(
+        "--best-evaluation-max-steps",
+        type=int,
+        default=None,
+        help=(
+            "Evaluation time limit; defaults to --max-steps-per-episode, or 10000 when training "
+            "episodes are unlimited. Use 0 explicitly for an unlimited evaluation."
+        ),
+    )
+    parser.add_argument(
+        "--best-evaluation-port",
+        type=int,
+        default=None,
+        help="Port for the isolated evaluation environment; defaults after the training environment ports.",
+    )
+    parser.add_argument("--best-evaluation-timeout", type=float, default=1800.0)
+    parser.add_argument(
+        "--best-evaluation-device",
+        choices=["cpu", "auto"],
+        default="cpu",
+        help="Device exposed to the isolated policy evaluator.",
+    )
+    parser.add_argument(
+        "--best-metric",
+        choices=["auto", "success_rate", "reward_mean"],
+        default="auto",
+        help="Primary metric used to select the best frozen policy.",
+    )
+
+
+@dataclass(frozen=True)
+class PolicyEvaluationResult:
+    episode: int
+    summary: dict
+
+
+class BestCheckpointTracker:
+    """Evaluate exact checkpoints in an isolated Godot process and rank them consistently."""
+
+    def __init__(self, args, algorithm):
+        self.args = args
+        self.algorithm = str(algorithm)
+        self.enabled = bool(getattr(args, "best_checkpoint", False))
+        configured_dir = getattr(args, "best_checkpoint_dir", None)
+        self.directory = Path(configured_dir or (Path(args.checkpoint_dir) / "best"))
+        self.metadata_path = self.directory / "best_metrics.json"
+        self.best_key = None
+        self.best_summary = None
+        if self.enabled:
+            self._validate_arguments()
+            self.directory.mkdir(parents=True, exist_ok=True)
+            self._load_metadata()
+
+    def _validate_arguments(self):
+        if int(self.args.best_evaluation_every) < 1:
+            raise ValueError("--best-evaluation-every must be at least 1 when best checkpoints are enabled")
+        if int(self.args.best_evaluation_episodes) < 1:
+            raise ValueError("--best-evaluation-episodes must be at least 1")
+        if int(self.args.keep_best_checkpoints) < 1:
+            raise ValueError("--keep-best-checkpoints must be at least 1")
+        if float(self.args.best_evaluation_timeout) <= 0.0:
+            raise ValueError("--best-evaluation-timeout must be greater than zero")
+        if self.args.best_evaluation_training_episode is not None and int(
+            self.args.best_evaluation_training_episode
+        ) < 0:
+            raise ValueError("--best-evaluation-training-episode cannot be negative")
+        if self.args.best_evaluation_max_steps is not None and int(
+            self.args.best_evaluation_max_steps
+        ) < 0:
+            raise ValueError("--best-evaluation-max-steps cannot be negative")
+
+    def _load_metadata(self):
+        if not self.metadata_path.is_file():
+            return
+        try:
+            metadata = json.loads(self.metadata_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            print(f"WARNING: could not read best-checkpoint metadata: {exc}", flush=True)
+            return
+        if metadata.get("metric") != self.args.best_metric:
+            print(
+                f"Best-checkpoint metric changed from {metadata.get('metric')!r} "
+                f"to {self.args.best_metric!r}; starting a new comparison baseline.",
+                flush=True,
+            )
+            return
+        comparison_key = metadata.get("comparison_key")
+        if isinstance(comparison_key, list) and len(comparison_key) == 2:
+            self.best_key = tuple(float(value) for value in comparison_key)
+            self.best_summary = metadata
+
+    def should_evaluate(self, episode):
+        every = int(getattr(self.args, "best_evaluation_every", 0))
+        return self.enabled and every > 0 and int(episode) > 0 and int(episode) % every == 0
+
+    def comparison_key(self, summary):
+        success_rate = float(summary.get("success_rate", 0.0))
+        reward_mean = float(summary.get("reward_mean", -np.inf))
+        if self.args.best_metric == "reward_mean":
+            return reward_mean, success_rate
+        return success_rate, reward_mean
+
+    def is_improvement(self, result):
+        candidate_key = self.comparison_key(result.summary)
+        return self.best_key is None or candidate_key > self.best_key
+
+    def _evaluation_command(self, checkpoint_path, summary_path):
+        evaluation_port = self.args.best_evaluation_port
+        if evaluation_port is None:
+            evaluation_port = int(self.args.base_port) + max(int(self.args.num_envs), 1)
+        training_episode = self.args.best_evaluation_training_episode
+        if training_episode is None:
+            training_episode = int(self.args.num_episodes)
+        max_steps = self.args.best_evaluation_max_steps
+        if max_steps is None:
+            max_steps = int(self.args.max_steps_per_episode)
+            if max_steps == 0:
+                max_steps = 10_000
+
+        runner = Path(__file__).resolve().with_name("run_generic_policy.py")
+        command = [
+            sys.executable,
+            str(runner),
+            "--algorithm", self.algorithm,
+            "--load-from", "checkpoint",
+            "--checkpoint-path", str(checkpoint_path),
+            "--episodes", str(self.args.best_evaluation_episodes),
+            "--epsilon", "0.0",
+            "--training-episode", str(training_episode),
+            "--seed", str(self.args.best_evaluation_seed),
+            "--max-steps", str(max_steps),
+            "--port", str(evaluation_port),
+            "--print-every", "0",
+            "--summary-json", str(summary_path),
+            "--headless",
+            "--multi-agent" if self.args.multi_agent else "--no-multi-agent",
+        ]
+        optional_values = (
+            ("--godot-bin", self.args.godot_bin),
+            ("--godot-project", self.args.godot_project),
+            ("--godot-scene", self.args.godot_scene),
+            ("--agent-id", self.args.agent_id),
+        )
+        for option, value in optional_values:
+            if value is not None:
+                command.extend((option, str(value)))
+        return command
+
+    def evaluate(self, checkpoint_path, episode):
+        with tempfile.TemporaryDirectory(prefix="godot-policy-eval-") as temp_dir:
+            summary_path = Path(temp_dir) / "summary.json"
+            command = self._evaluation_command(checkpoint_path, summary_path)
+            child_env = os.environ.copy()
+            if self.args.best_evaluation_device == "cpu":
+                child_env["CUDA_VISIBLE_DEVICES"] = ""
+            print(
+                f"Evaluating frozen checkpoint episode={episode} "
+                f"episodes={self.args.best_evaluation_episodes} metric={self.args.best_metric}...",
+                flush=True,
+            )
+            try:
+                completed = subprocess.run(
+                    command,
+                    env=child_env,
+                    capture_output=True,
+                    text=True,
+                    timeout=float(self.args.best_evaluation_timeout),
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                print(
+                    f"WARNING: best-policy evaluation exceeded {self.args.best_evaluation_timeout:.0f}s; "
+                    "training will continue without updating best.",
+                    flush=True,
+                )
+                return None
+            if completed.returncode != 0 or not summary_path.is_file():
+                details = (completed.stderr or completed.stdout or "no evaluator output").strip()
+                print(
+                    f"WARNING: best-policy evaluation failed with exit={completed.returncode}:\n{details}",
+                    flush=True,
+                )
+                return None
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            print(
+                f"Frozen evaluation episode={episode}: success={summary['successes']}/{summary['trials']} "
+                f"({summary['success_rate']:.2%}) reward_mean={summary['reward_mean']:.4f} "
+                f"steps_mean={summary['steps_mean']:.1f}",
+                flush=True,
+            )
+            return PolicyEvaluationResult(int(episode), summary)
+
+    def record_best(self, result, checkpoint_path):
+        self.best_key = self.comparison_key(result.summary)
+        metadata = {
+            "algorithm": self.algorithm,
+            "metric": self.args.best_metric,
+            "episode": int(result.episode),
+            "checkpoint": str(checkpoint_path),
+            "comparison_key": list(self.best_key),
+            **result.summary,
+        }
+        temporary_path = self.metadata_path.with_suffix(".json.tmp")
+        temporary_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        temporary_path.replace(self.metadata_path)
+        self.best_summary = metadata
+        print(
+            f"New best checkpoint: {checkpoint_path} metric={self.args.best_metric} "
+            f"success={result.summary['success_rate']:.2%} "
+            f"reward_mean={result.summary['reward_mean']:.4f}",
+            flush=True,
+        )
+
+
+def configure_tensorflow_devices(tf_module, *, memory_growth=True, system_name=None):
+    """Configure CUDA devices before TensorFlow creates its runtime context."""
+    system_name = system_name or __import__("platform").system()
+    devices = list(tf_module.config.list_physical_devices("GPU"))
+    memory_growth_enabled = False
+    if memory_growth and system_name == "Linux":
+        try:
+            for device in devices:
+                tf_module.config.experimental.set_memory_growth(device, True)
+            memory_growth_enabled = bool(devices)
+        except (RuntimeError, ValueError) as exc:
+            print(f"Warning: could not enable TensorFlow GPU memory growth: {exc}", flush=True)
+    return devices, memory_growth_enabled
+
+
+def add_parallel_env_arguments(parser):
+    parser.add_argument(
+        "--parallel-env-steps",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Dispatch Godot env.step calls concurrently across environment instances.",
+    )
+    parser.add_argument(
+        "--render-env-count",
+        type=int,
+        default=None,
+        help=(
+            "When training without --headless, render only this many envs and run the rest "
+            "headless. When omitted, render all --num-envs instances."
+        ),
+    )
+
+
+def add_collector_arguments(parser):
+    parser.add_argument(
+        "--collector-mode",
+        choices=["sync", "async"],
+        default="async",
+        help=(
+            "sync advances all environments in batches; async runs one independent collector "
+            "per Godot instance while the learner trains concurrently."
+        ),
+    )
+    parser.add_argument(
+        "--async-queue-capacity",
+        type=int,
+        default=256,
+        help="Maximum pending collector events before collectors apply backpressure.",
+    )
+    parser.add_argument(
+        "--async-policy-sync-steps",
+        type=int,
+        default=100,
+        help="Collector control steps between checks for a newer learner policy.",
+    )
+    parser.add_argument(
+        "--async-policy-publish-updates",
+        type=int,
+        default=100,
+        help="Learner updates between policy snapshots published to collectors.",
+    )
+    parser.add_argument(
+        "--async-updates-per-step",
+        type=int,
+        default=1,
+        help="Gradient updates performed whenever the configured collection interval is reached.",
+    )
+    parser.add_argument(
+        "--async-update-basis",
+        choices=["transitions", "env_steps"],
+        default="transitions",
+        help=(
+            "Schedule updates from individual agent transitions (multi-agent adaptive) or "
+            "from Godot environment step events (legacy behavior)."
+        ),
+    )
+    parser.add_argument(
+        "--async-update-every",
+        "--async-update-every-steps",
+        dest="async_update_every",
+        type=int,
+        default=4,
+        help=(
+            "Collected units required before scheduling learner updates. The unit is selected "
+            "by --async-update-basis; --async-update-every-steps is retained as a legacy alias."
+        ),
+    )
+    parser.add_argument(
+        "--async-max-updates-per-env-step",
+        type=int,
+        default=1,
+        help=(
+            "Safety cap for scheduled updates per collected Godot step. Zero disables the cap; "
+            "the default lets multi-agent collection increase learning without unbounded bursts."
+        ),
+    )
+    parser.add_argument(
+        "--async-drain-max-events",
+        type=int,
+        default=64,
+        help="Maximum queued step events ingested into replay before running scheduled updates.",
+    )
+    parser.add_argument(
+        "--async-replay-save",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Compress replay snapshots in a background thread during async training.",
+    )
+
+
+class ParallelEnvStepper:
+    def __init__(self, max_workers, enabled=True):
+        self.enabled = bool(enabled) and int(max_workers) > 1
+        self._executor = (
+            ThreadPoolExecutor(max_workers=int(max_workers), thread_name_prefix="godot-env")
+            if self.enabled
+            else None
+        )
+
+    def step(self, requests):
+        """Return (env, state, action, step_result) tuples in request order."""
+        requests = list(requests)
+        if not requests:
+            return []
+        if self._executor is None or len(requests) == 1:
+            return [(env, state, action, env.step(action)) for env, state, action in requests]
+
+        futures = [self._executor.submit(env.step, action) for env, _state, action in requests]
+        return [
+            (env, state, action, future.result())
+            for (env, state, action), future in zip(requests, futures)
+        ]
+
+    def close(self):
+        if self._executor is not None:
+            self._executor.shutdown(wait=True, cancel_futures=True)
+            self._executor = None
+
+
+@dataclass(frozen=True)
+class AsyncStepEvent:
+    worker_id: int
+    transitions: tuple
+
+
+@dataclass(frozen=True)
+class AsyncEpisodeEvent:
+    worker_id: int
+    episode: int
+    payload: object
+
+
+@dataclass(frozen=True)
+class AsyncWorkerDoneEvent:
+    worker_id: int
+
+
+@dataclass(frozen=True)
+class AsyncWorkerErrorEvent:
+    worker_id: int
+    error: BaseException
+
+
+class PolicySnapshot:
+    """Thread-safe immutable weight snapshots for collector-local inference models."""
+
+    def __init__(self, weights, state=None):
+        self._condition = threading.Condition()
+        self._version = 0
+        self._weights = self._copy_weights(weights)
+        self._state = copy.deepcopy(state)
+
+    @staticmethod
+    def _copy_weights(weights):
+        return tuple(np.array(weight, copy=True) for weight in weights)
+
+    @property
+    def version(self):
+        with self._condition:
+            return self._version
+
+    def publish(self, weights, state=None):
+        copied = self._copy_weights(weights)
+        copied_state = copy.deepcopy(state)
+        with self._condition:
+            self._weights = copied
+            self._state = copied_state
+            self._version += 1
+            self._condition.notify_all()
+            return self._version
+
+    def sync_model(self, model, current_version=-1):
+        with self._condition:
+            if current_version == self._version:
+                return current_version
+            version = self._version
+            weights = self._copy_weights(self._weights)
+        model.set_weights(weights)
+        return version
+
+    def sync_model_with_state(self, model, current_version=-1):
+        with self._condition:
+            if current_version == self._version:
+                return current_version, copy.deepcopy(self._state)
+            version = self._version
+            weights = self._copy_weights(self._weights)
+            state = copy.deepcopy(self._state)
+        model.set_weights(weights)
+        return version, state
+
+    def wait_for_newer(self, current_version, stop_event, timeout=0.2):
+        with self._condition:
+            while self._version <= current_version and not stop_event.is_set():
+                self._condition.wait(timeout=timeout)
+            return self._version > current_version
+
+
+class EpisodeAllocator:
+    def __init__(self, start_episode, end_episode):
+        self._next_episode = int(start_episode)
+        self._end_episode = int(end_episode)
+        self._lock = threading.Lock()
+
+    def claim(self):
+        with self._lock:
+            if self._next_episode >= self._end_episode:
+                return None
+            episode = self._next_episode
+            self._next_episode += 1
+            return episode
+
+class AsyncCollectorPool:
+    """Runs one user-supplied collector loop per environment."""
+
+    def __init__(self, envs, worker_fn, start_episode, end_episode, queue_capacity=256):
+        if int(queue_capacity) <= 0:
+            raise ValueError("--async-queue-capacity must be greater than zero")
+        self.events = Queue(maxsize=int(queue_capacity))
+        self.stop_event = threading.Event()
+        self.allocator = EpisodeAllocator(start_episode, end_episode)
+        self._threads = []
+        for worker_id, env in enumerate(envs):
+            thread = threading.Thread(
+                target=self._run_worker,
+                args=(worker_id, env, worker_fn),
+                name=f"godot-collector-{worker_id}",
+                daemon=True,
+            )
+            self._threads.append(thread)
+
+    def _put(self, event):
+        while not self.stop_event.is_set():
+            try:
+                self.events.put(event, timeout=0.2)
+                return True
+            except Full:
+                continue
+        return False
+
+    def _run_worker(self, worker_id, env, worker_fn):
+        try:
+            worker_fn(worker_id, env, self.allocator, self._put, self.stop_event)
+        except BaseException as exc:
+            self._put(AsyncWorkerErrorEvent(worker_id, exc))
+        finally:
+            self._put(AsyncWorkerDoneEvent(worker_id))
+
+    def start(self):
+        for thread in self._threads:
+            thread.start()
+
+    def get(self, timeout=0.2):
+        return self.events.get(timeout=timeout)
+
+    def stop(self):
+        self.stop_event.set()
+
+    def close(self, timeout=5.0):
+        self.stop()
+        for thread in self._threads:
+            thread.join(timeout=timeout)
+
+    @property
+    def alive_count(self):
+        return sum(thread.is_alive() for thread in self._threads)
+
+
+class AsyncEventScheduler:
+    """Drains collector bursts and converts collected experience into learner updates."""
+
+    def __init__(self, args):
+        self.update_basis = str(getattr(args, "async_update_basis", "transitions"))
+        self.update_every = int(
+            getattr(args, "async_update_every", getattr(args, "async_update_every_steps", 4))
+        )
+        self.updates_per_interval = int(args.async_updates_per_step)
+        self.max_updates_per_env_step = int(
+            getattr(args, "async_max_updates_per_env_step", 1)
+        )
+        self.drain_max_events = int(args.async_drain_max_events)
+        self._collection_credit = 0
+        self._deferred = deque()
+        self._interval_started = time.monotonic()
+        self._interval_steps = 0
+        self._interval_transitions = 0
+        self._interval_updates = 0
+        self._interval_requested_updates = 0
+        self._interval_throttled_updates = 0
+        self._last_throughput = None
+
+    def next_event(self, pool, timeout=0.2):
+        if self._deferred:
+            return self._deferred.popleft()
+        return pool.get(timeout=timeout)
+
+    def drain_step_events(self, pool, first_event):
+        events = [first_event]
+        while len(events) < self.drain_max_events:
+            try:
+                event = pool.events.get_nowait()
+            except Empty:
+                break
+            if isinstance(event, AsyncStepEvent):
+                events.append(event)
+            else:
+                self._deferred.append(event)
+        return events
+
+    def ingest(self, events):
+        step_count = len(events)
+        transition_count = sum(len(event.transitions) for event in events)
+        self._interval_steps += step_count
+        self._interval_transitions += transition_count
+        collected_units = transition_count if self.update_basis == "transitions" else step_count
+        self._collection_credit += collected_units
+        intervals, self._collection_credit = divmod(self._collection_credit, self.update_every)
+        requested_updates = intervals * self.updates_per_interval
+
+        updates_due = requested_updates
+        if self.max_updates_per_env_step > 0:
+            max_updates = step_count * self.max_updates_per_env_step
+            updates_due = min(requested_updates, max_updates)
+
+        self._interval_requested_updates += requested_updates
+        self._interval_throttled_updates += requested_updates - updates_due
+        return updates_due
+
+    def record_updates(self, count):
+        self._interval_updates += int(count)
+
+    def throughput(self, pool):
+        queue_size = pool.events.qsize()
+        queue_capacity = pool.events.maxsize
+        if self._interval_steps == 0 and self._last_throughput is not None:
+            metrics = dict(self._last_throughput)
+            metrics.update(
+                queue_size=queue_size,
+                queue_capacity=queue_capacity,
+                queue_saturation=queue_size / max(queue_capacity, 1),
+            )
+            return metrics
+
+        elapsed = max(time.monotonic() - self._interval_started, 1e-6)
+        metrics = {
+            "env_steps_s": self._interval_steps / elapsed,
+            "transitions_s": self._interval_transitions / elapsed,
+            "transitions_per_env_step": (
+                self._interval_transitions / max(self._interval_steps, 1)
+            ),
+            "updates_s": self._interval_updates / elapsed,
+            "requested_updates": self._interval_requested_updates,
+            "throttled_updates": self._interval_throttled_updates,
+            "queue_size": queue_size,
+            "queue_capacity": queue_capacity,
+            "queue_saturation": queue_size / max(queue_capacity, 1),
+        }
+        self._interval_started = time.monotonic()
+        self._interval_steps = 0
+        self._interval_transitions = 0
+        self._interval_updates = 0
+        self._interval_requested_updates = 0
+        self._interval_throttled_updates = 0
+        self._last_throughput = dict(metrics)
+        return metrics
+
+
+def validate_async_arguments(args):
+    if int(getattr(args, "max_steps_per_episode", 500)) < 0:
+        raise ValueError("--max-steps-per-episode cannot be negative; use 0 for no limit")
+    if args.collector_mode != "async":
+        return
+    if args.async_policy_sync_steps <= 0:
+        raise ValueError("--async-policy-sync-steps must be greater than zero")
+    if args.async_policy_publish_updates <= 0:
+        raise ValueError("--async-policy-publish-updates must be greater than zero")
+    if args.async_updates_per_step < 0:
+        raise ValueError("--async-updates-per-step cannot be negative")
+    update_every = int(
+        getattr(args, "async_update_every", getattr(args, "async_update_every_steps", 4))
+    )
+    if update_every <= 0:
+        raise ValueError("--async-update-every must be greater than zero")
+    update_basis = str(getattr(args, "async_update_basis", "transitions"))
+    if update_basis not in {"transitions", "env_steps"}:
+        raise ValueError("--async-update-basis must be 'transitions' or 'env_steps'")
+    if int(getattr(args, "async_max_updates_per_env_step", 1)) < 0:
+        raise ValueError("--async-max-updates-per-env-step cannot be negative")
+    if args.async_drain_max_events <= 0:
+        raise ValueError("--async-drain-max-events must be greater than zero")
+    if getattr(args, "opponent_pool", False):
+        raise ValueError(
+            "--collector-mode async currently supports shared-policy self-play but not "
+            "historical --opponent-pool sampling; use --collector-mode sync for that mode."
+        )
+
+
+def build_async_worker(
+    local_models,
+    policy_snapshot,
+    max_steps_per_episode,
+    policy_sync_steps,
+    begin_episode,
+    select_action,
+    process_step,
+    finish_episode,
+):
+    """Compose an algorithm-specific collector from small lifecycle callbacks."""
+
+    max_steps = int(max_steps_per_episode)
+    sync_steps = int(policy_sync_steps)
+
+    def worker(worker_id, env, allocator, put, stop_event):
+        local_model = local_models[worker_id]
+        policy_version = policy_snapshot.sync_model(local_model)
+        control_steps = 0
+        while not stop_event.is_set():
+            episode = allocator.claim()
+            if episode is None:
+                return
+            state = begin_episode(worker_id, env, episode)
+            for step_idx in episode_step_indices(max_steps):
+                if stop_event.is_set() or state.get("done", False):
+                    break
+                if control_steps % sync_steps == 0:
+                    policy_version = policy_snapshot.sync_model(local_model, policy_version)
+                action = select_action(worker_id, env, episode, step_idx, local_model, state)
+                step_result = env.step(action)
+                transitions = process_step(
+                    worker_id,
+                    env,
+                    episode,
+                    step_idx,
+                    state,
+                    action,
+                    step_result,
+                )
+                control_steps += 1
+                if transitions and not put(AsyncStepEvent(worker_id, tuple(transitions))):
+                    return
+            payload = finish_episode(worker_id, env, episode, state)
+            if not put(AsyncEpisodeEvent(worker_id, episode, payload)):
+                return
+
+    return worker
 
 
 def add_log_format_argument(parser):
@@ -76,8 +825,29 @@ def replay_path_for_checkpoint(checkpoint_path):
     return checkpoint_path.parent / filename
 
 
-def save_replay_snapshot(checkpoint_path, checkpoint_manager, buffer):
+def save_replay_snapshot(checkpoint_path, checkpoint_manager, buffer, asynchronous=False):
     replay_path = replay_path_for_checkpoint(checkpoint_path)
+    if asynchronous:
+        transitions, future = buffer.save_async(replay_path)
+        print(
+            f"Scheduled replay buffer save: {replay_path} transitions={transitions}",
+            flush=True,
+        )
+
+        def on_complete(completed):
+            try:
+                saved_transitions = completed.result()
+                print(
+                    f"Saved replay buffer: {replay_path} transitions={saved_transitions}",
+                    flush=True,
+                )
+                cleanup_stale_replay_buffers(checkpoint_manager)
+            except Exception as exc:
+                print(f"ERROR saving replay buffer {replay_path}: {exc}", flush=True)
+
+        future.add_done_callback(on_complete)
+        return replay_path
+
     transitions = buffer.save(replay_path)
     print(f"Saved replay buffer: {replay_path} transitions={transitions}", flush=True)
     cleanup_stale_replay_buffers(checkpoint_manager)

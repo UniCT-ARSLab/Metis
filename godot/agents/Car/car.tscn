@@ -18,6 +18,8 @@
 [ext_resource type="Script" uid="uid://cys7i0vchrdlo" path="res://scripts/agent/observations/MethodObservationSource.gd" id="15_method_observation"]
 [ext_resource type="Script" uid="uid://twqtydrv0cm4" path="res://scripts/agent/observations/RaycastObservationSource.gd" id="16_raycast_observation"]
 [ext_resource type="Script" uid="uid://b2nryvi2oj5o2" path="res://scripts/agent/reward_components/ClearPathSteeringPenaltyReward.gd" id="17_clear_steering"]
+[ext_resource type="Script" path="res://scripts/agent/observations/BodySpeedObservationSource.gd" id="18_body_speed"]
+[ext_resource type="Script" path="res://scripts/agent/observations/RaycastClearanceObservationSource.gd" id="19_raycast_clearance"]
 
 [sub_resource type="CapsuleShape3D" id="CapsuleShape3D_5ftgc"]
 radius = 0.6669922
@@ -75,20 +77,12 @@ use_custom_exploration_bounds = true
 [node name="ObservationSystem" type="Node" parent="Agent" unique_id=1375212808]
 script = ExtResource("14_observation_system")
 
-[node name="ForwardSpeed" type="Node" parent="Agent/ObservationSystem" unique_id=2086731996]
-script = ExtResource("15_method_observation")
-observation_name = "forward_speed"
-method_name = "get_normalized_forward_speed"
-
-[node name="Speed" type="Node" parent="Agent/ObservationSystem" unique_id=606000337]
-script = ExtResource("15_method_observation")
-observation_name = "speed"
-method_name = "get_normalized_abs_speed"
+[node name="BodySpeed" type="Node" parent="Agent/ObservationSystem" unique_id=2086731996]
+script = ExtResource("18_body_speed")
+speed_scale = 20.0
 
 [node name="ForwardClearance" type="Node" parent="Agent/ObservationSystem" unique_id=708837109]
-script = ExtResource("15_method_observation")
-observation_name = "forward_clearance"
-method_name = "get_forward_clearance"
+script = ExtResource("19_raycast_clearance")
 
 [node name="MoveInput" type="Node" parent="Agent/ObservationSystem" unique_id=1984290805]
 script = ExtResource("15_method_observation")

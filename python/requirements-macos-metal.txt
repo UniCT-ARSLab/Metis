@@ -1,2 +1,4 @@
 -r requirements.txt
-tensorflow-metal
+# tensorflow-metal 1.2.0 is not ABI-compatible with newer TensorFlow releases.
+tensorflow==2.18.1
+tensorflow-metal==1.2.0

@@ -32,23 +32,36 @@ class GodotProcessManager:
         text = log_path.read_text(errors="ignore").splitlines()
         return "\n".join(text[-lines:]) if text else "<empty log file>"
 
-    def start_many(self, ports, headless=True, debug=False, user_args=None):
+    def start_many(
+        self,
+        ports,
+        headless=True,
+        debug=False,
+        user_args=None,
+        fixed_fps=60,
+        render_env_count=None,
+    ):
         user_args = list(user_args or [])
-        args_prefix = [self.godot_bin]
-        if headless:
-            args_prefix.append("--headless")
-        if debug:
-            args_prefix.append("--debug")
-            args_prefix.append("--debug-collisions")
-            args_prefix.append("--debug-paths")
-            args_prefix.append("--debug-navigation")
-            args_prefix.append("--debug-avoidance")
+        rendered_count = len(ports) if render_env_count is None else max(0, int(render_env_count))
 
-        args_prefix += ["--path", str(self.project_dir)]
-        if self.scene_path:
-            args_prefix.append(str(self.scene_path))
+        for env_index, port in enumerate(ports):
+            instance_headless = bool(headless) or env_index >= rendered_count
+            args_prefix = [self.godot_bin]
+            if instance_headless:
+                args_prefix.append("--headless")
+                if fixed_fps is not None and int(fixed_fps) > 0:
+                    args_prefix += ["--fixed-fps", str(int(fixed_fps))]
+            if debug:
+                args_prefix.append("--debug")
+                args_prefix.append("--debug-collisions")
+                args_prefix.append("--debug-paths")
+                args_prefix.append("--debug-navigation")
+                args_prefix.append("--debug-avoidance")
 
-        for port in ports:
+            args_prefix += ["--path", str(self.project_dir)]
+            if self.scene_path:
+                args_prefix.append(str(self.scene_path))
+
             log_path = self.logs_dir / f"godot_{port}.log"
             log_file = open(log_path, "w", buffering=1)
 

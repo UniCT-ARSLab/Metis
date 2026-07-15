@@ -71,3 +71,20 @@ func get_continuous_bounds(key:String, default_value:float) -> Array:
 			for idx in range(size):
 				result.append(float(value))
 	return result
+
+
+func execute_discrete_action(action:Variant, default_target:Node, component_name:String = "") -> int:
+	var candidates := []
+	for child in get_children():
+		if not child.has_method("get_action_spec") or not child.has_method("execute_action"):
+			continue
+		var spec: Variant = child.get_action_spec()
+		if typeof(spec) != TYPE_DICTIONARY or str(spec.get("action_type", "")) != "discrete":
+			continue
+		if not component_name.is_empty() and str(spec.get("name", child.name)) != component_name:
+			continue
+		candidates.append(child)
+
+	if candidates.size() != 1:
+		return ERR_UNAVAILABLE
+	return int(candidates[0].execute_action(action, default_target))

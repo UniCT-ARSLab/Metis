@@ -38,6 +38,29 @@ def parse_args(argv):
     parser.add_argument("--godot-scene", default=None)
     parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--godot-debug", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--collector-mode", choices=["sync", "async"], default="async")
+    parser.add_argument("--async-queue-capacity", type=int, default=256)
+    parser.add_argument("--async-policy-sync-steps", type=int, default=100)
+    parser.add_argument("--async-policy-publish-updates", type=int, default=100)
+    parser.add_argument("--async-updates-per-step", type=int, default=1)
+    parser.add_argument(
+        "--async-update-basis",
+        choices=["transitions", "env_steps"],
+        default="transitions",
+    )
+    parser.add_argument(
+        "--async-update-every",
+        "--async-update-every-steps",
+        dest="async_update_every",
+        type=int,
+        default=4,
+    )
+    parser.add_argument("--async-max-updates-per-env-step", type=int, default=1)
+    parser.add_argument("--async-drain-max-events", type=int, default=64)
+    parser.add_argument("--async-replay-save", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--parallel-env-steps", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--render-env-count", type=int, default=None)
+    parser.add_argument("--gpu-memory-growth", action=argparse.BooleanOptionalAction, default=True)
     args, _ = parser.parse_known_args(argv)
     return args
 
@@ -124,8 +147,8 @@ def main():
         return
     backend_script = Path(__file__).resolve().parent / BACKENDS[backend]
     backend_args = strip_frontend_args(sys.argv[1:])
-    if not has_bool_option(backend_args, "--headless"):
-        backend_args.append("--headless" if args.headless else "--no-headless")
+    if not has_bool_option(backend_args, "--headless") and args.headless:
+        backend_args.append("--headless")
     if not has_bool_option(backend_args, "--godot-debug") and args.godot_debug:
         backend_args.append("--godot-debug")
 

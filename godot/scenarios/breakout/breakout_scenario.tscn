@@ -1,0 +1,419 @@
+[gd_scene format=3 uid="uid://gw6gryl6h07c"]
+
+[ext_resource type="Script" uid="uid://d38lybllmy6tq" path="res://scripts/bridge_server.gd" id="1_14ifj"]
+[ext_resource type="Script" uid="uid://bhhvlb80uwq5y" path="res://scenarios/breakout/breakout_scenario.gd" id="1_xxy6r"]
+[ext_resource type="Script" uid="uid://cun4ha1fidr8n" path="res://scripts/agent/ScenarioController.gd" id="2_hlvlh"]
+[ext_resource type="Script" uid="uid://b47ph323gt6gl" path="res://scripts/agent/events/ScenarioEventSystem.gd" id="3_ll3gd"]
+[ext_resource type="Script" uid="uid://botsx3bwjduj2" path="res://scripts/agent/events/ManualScenarioEventSource.gd" id="4_ve1qt"]
+[ext_resource type="Script" uid="uid://tn1jug3aq4ll" path="res://scripts/agent/ScenarioRewardSystem.gd" id="5_k7uni"]
+[ext_resource type="Script" uid="uid://b0mpnu83er6il" path="res://scripts/agent/scenario_reward_components/EventScenarioReward.gd" id="6_xxy6r"]
+[ext_resource type="PackedScene" uid="uid://h3xfrrw0mt1k" path="res://agents/BreakoutPaddle/breakout_paddle.tscn" id="7_6rg13"]
+[ext_resource type="Texture2D" uid="uid://uu0diejptb1s" path="res://assets/sprites/breakout/ballBlue.png" id="8_ve1qt"]
+[ext_resource type="Texture2D" uid="uid://bodw2n7qw5wix" path="res://assets/sprites/breakout/element_red_rectangle.png" id="9_k7uni"]
+[ext_resource type="Script" uid="uid://bn1w5m8c6ta3q" path="res://scenarios/breakout/breakout_ball.gd" id="10_ball_script"]
+[ext_resource type="Script" uid="uid://dwsnfjalr8jc7" path="res://scripts/agent/progress/MethodProgressProvider.gd" id="11_progress_provider"]
+[ext_resource type="Script" uid="uid://5rg0xs5vr24r" path="res://scripts/agent/scenario_reward_components/ProgressStallScenarioReward.gd" id="12_progress_stall"]
+
+[sub_resource type="PhysicsMaterial" id="PhysicsMaterial_k7uni"]
+friction = 0.0
+bounce = 1.0
+
+[sub_resource type="CircleShape2D" id="CircleShape2D_xxy6r"]
+radius = 22.090721
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_xxy6r"]
+size = Vector2(126, 64)
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_6rg13"]
+size = Vector2(20, 729)
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_ce28y"]
+size = Vector2(1284, 24)
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_4ptaq"]
+size = Vector2(1306, 20)
+
+[node name="BreakoutScenario" type="Node2D" unique_id=109178240]
+script = ExtResource("1_xxy6r")
+paddle_half_width = 112.0
+auto_start_manual = false
+
+[node name="BridgeServer" type="Node" parent="." unique_id=696486136]
+script = ExtResource("1_14ifj")
+controller_path = NodePath("../ScenarioController")
+metadata/_custom_type_script = "uid://d38lybllmy6tq"
+
+[node name="ScenarioController" type="Node" parent="." unique_id=686207213 node_paths=PackedStringArray("controlled_agents")]
+script = ExtResource("2_hlvlh")
+controlled_agents = [NodePath("../BreakoutPaddle")]
+reset_yaw_jitter_degrees = 0.0
+max_steps = 0
+metadata/_custom_type_script = "uid://cun4ha1fidr8n"
+
+[node name="ProgressProvider" type="Node" parent="ScenarioController" node_paths=PackedStringArray("source_path")]
+script = ExtResource("11_progress_provider")
+source_path = NodePath("../..")
+method_name = &"get_brick_progress"
+pass_agent_to_source = false
+metadata/_custom_type_script = "uid://dwsnfjalr8jc7"
+
+[node name="ScenarioEventSystem" type="Node" parent="ScenarioController" unique_id=550538431]
+script = ExtResource("3_ll3gd")
+metadata/_custom_type_script = "uid://b47ph323gt6gl"
+
+[node name="BrickDestroyed" type="Node" parent="ScenarioController/ScenarioEventSystem" unique_id=1502603356]
+script = ExtResource("4_ve1qt")
+event_name = "brick_destroyed"
+metadata/_custom_type_script = "uid://botsx3bwjduj2"
+
+[node name="LifeLost" type="Node" parent="ScenarioController/ScenarioEventSystem" unique_id=2082960143]
+script = ExtResource("4_ve1qt")
+event_name = "life_lost"
+terminal_reason = "life_lost"
+metadata/_custom_type_script = "uid://botsx3bwjduj2"
+
+[node name="LevelCleared" type="Node" parent="ScenarioController/ScenarioEventSystem" unique_id=353011569]
+script = ExtResource("4_ve1qt")
+event_name = "level_cleared"
+terminal_reason = "level_cleared"
+metadata/_custom_type_script = "uid://botsx3bwjduj2"
+
+[node name="BallHitEvent" type="Node" parent="ScenarioController/ScenarioEventSystem" unique_id=1780571381]
+script = ExtResource("4_ve1qt")
+event_name = "ball_hit"
+metadata/_custom_type_script = "uid://botsx3bwjduj2"
+
+[node name="ScenarioRewardSystem" type="Node" parent="ScenarioController" unique_id=662209148]
+script = ExtResource("5_k7uni")
+metadata/_custom_type_script = "uid://tn1jug3aq4ll"
+
+[node name="BrickReward" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=2029564453]
+script = ExtResource("6_xxy6r")
+event_name = "brick_destroyed"
+reward = 1.0
+only_once = false
+metadata/_custom_type_script = "uid://b0mpnu83er6il"
+
+[node name="LifeLostPenalty" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=573120190]
+script = ExtResource("6_xxy6r")
+event_name = "life_lost"
+reward = -10.0
+metadata/_custom_type_script = "uid://b0mpnu83er6il"
+
+[node name="LevelReward" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=71465067]
+script = ExtResource("6_xxy6r")
+event_name = "level_cleared"
+reward = 20.0
+metadata/_custom_type_script = "uid://b0mpnu83er6il"
+
+[node name="HitBall" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=1587061412]
+script = ExtResource("6_xxy6r")
+event_name = "ball_hit"
+reward = 0.02
+metadata/_custom_type_script = "uid://b0mpnu83er6il"
+
+[node name="NoBrickProgress" type="Node" parent="ScenarioController/ScenarioRewardSystem"]
+script = ExtResource("12_progress_stall")
+term_name = "no_brick_progress"
+terminate_on_stalled_progress = true
+stalled_progress_window_steps = 2500
+stalled_progress_min_delta = 0.01
+stalled_progress_penalty = -5.0
+metadata/_custom_type_script = "uid://5rg0xs5vr24r"
+
+[node name="BreakoutPaddle" parent="." unique_id=100166131 node_paths=PackedStringArray("ball") instance=ExtResource("7_6rg13")]
+position = Vector2(638, 674)
+horizontal_center = 640.0
+ball = NodePath("../Ball")
+
+[node name="Ball" type="RigidBody2D" parent="." unique_id=593013977]
+position = Vector2(638, 275)
+physics_material_override = SubResource("PhysicsMaterial_k7uni")
+gravity_scale = 0.0
+can_sleep = false
+lock_rotation = true
+continuous_cd = 2
+contact_monitor = true
+max_contacts_reported = 8
+linear_damp_mode = 1
+script = ExtResource("10_ball_script")
+
+[node name="Sprite2D" type="Sprite2D" parent="Ball" unique_id=131325329]
+texture = ExtResource("8_ve1qt")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Ball" unique_id=742752387]
+shape = SubResource("CircleShape2D_xxy6r")
+
+[node name="Bricks" type="Node2D" parent="." unique_id=604427330]
+
+[node name="Brick01" type="StaticBody2D" parent="Bricks" unique_id=791294936 groups=["brick"]]
+position = Vector2(116, 53)
+
+[node name="Sprite2D" type="Sprite2D" parent="Bricks/Brick01" unique_id=1762525097]
+texture = ExtResource("9_k7uni")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Bricks/Brick01" unique_id=1158759702]
+shape = SubResource("RectangleShape2D_xxy6r")
+
+[node name="Brick02" type="StaticBody2D" parent="Bricks" unique_id=1592834465 groups=["brick"]]
+position = Vector2(247, 53)
+
+[node name="Sprite2D" type="Sprite2D" parent="Bricks/Brick02" unique_id=1732559333]
+texture = ExtResource("9_k7uni")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Bricks/Brick02" unique_id=1510431597]
+shape = SubResource("RectangleShape2D_xxy6r")
+
+[node name="Brick03" type="StaticBody2D" parent="Bricks" unique_id=1985636819 groups=["brick"]]
+position = Vector2(376, 53)
+
+[node name="Sprite2D" type="Sprite2D" parent="Bricks/Brick03" unique_id=266109976]
+texture = ExtResource("9_k7uni")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Bricks/Brick03" unique_id=1407768547]
+shape = SubResource("RectangleShape2D_xxy6r")
+
+[node name="Brick04" type="StaticBody2D" parent="Bricks" unique_id=1876077856 groups=["brick"]]
+position = Vector2(507, 53)
+
+[node name="Sprite2D" type="Sprite2D" parent="Bricks/Brick04" unique_id=1793639838]
+texture = ExtResource("9_k7uni")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Bricks/Brick04" unique_id=1740229567]
+shape = SubResource("RectangleShape2D_xxy6r")
+
+[node name="Brick05" type="StaticBody2D" parent="Bricks" unique_id=544410484 groups=["brick"]]
+position = Vector2(637, 53)
+
+[node name="Sprite2D" type="Sprite2D" parent="Bricks/Brick05" unique_id=180270745]
+texture = ExtResource("9_k7uni")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Bricks/Brick05" unique_id=829948339]
+shape = SubResource("RectangleShape2D_xxy6r")
+
+[node name="Brick06" type="StaticBody2D" parent="Bricks" unique_id=1088230064 groups=["brick"]]
+position = Vector2(766, 53)
+
+[node name="Sprite2D" type="Sprite2D" parent="Bricks/Brick06" unique_id=508686610]
+texture = ExtResource("9_k7uni")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Bricks/Brick06" unique_id=1735199023]
+shape = SubResource("RectangleShape2D_xxy6r")
+
+[node name="Brick07" type="StaticBody2D" parent="Bricks" unique_id=1854485844 groups=["brick"]]
+position = Vector2(896, 53)
+
+[node name="Sprite2D" type="Sprite2D" parent="Bricks/Brick07" unique_id=177191332]
+texture = ExtResource("9_k7uni")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Bricks/Brick07" unique_id=1368881271]
+shape = SubResource("RectangleShape2D_xxy6r")
+
+[node name="Brick08" type="StaticBody2D" parent="Bricks" unique_id=1896127718 groups=["brick"]]
+position = Vector2(1026, 53)
+
+[node name="Sprite2D" type="Sprite2D" parent="Bricks/Brick08" unique_id=1692158761]
+texture = ExtResource("9_k7uni")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Bricks/Brick08" unique_id=210285607]
+shape = SubResource("RectangleShape2D_xxy6r")
+
+[node name="Brick09" type="StaticBody2D" parent="Bricks" unique_id=1069414893 groups=["brick"]]
+position = Vector2(1157, 53)
+
+[node name="Sprite2D" type="Sprite2D" parent="Bricks/Brick09" unique_id=1475654596]
+texture = ExtResource("9_k7uni")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Bricks/Brick09" unique_id=663217065]
+shape = SubResource("RectangleShape2D_xxy6r")
+
+[node name="Brick10" type="StaticBody2D" parent="Bricks" unique_id=1380775130 groups=["brick"]]
+position = Vector2(116, 117)
+
+[node name="Sprite2D" type="Sprite2D" parent="Bricks/Brick10" unique_id=183524603]
+texture = ExtResource("9_k7uni")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Bricks/Brick10" unique_id=225335623]
+shape = SubResource("RectangleShape2D_xxy6r")
+
+[node name="Brick11" type="StaticBody2D" parent="Bricks" unique_id=1586585318 groups=["brick"]]
+position = Vector2(247, 117)
+
+[node name="Sprite2D" type="Sprite2D" parent="Bricks/Brick11" unique_id=1333337159]
+texture = ExtResource("9_k7uni")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Bricks/Brick11" unique_id=191365198]
+shape = SubResource("RectangleShape2D_xxy6r")
+
+[node name="Brick12" type="StaticBody2D" parent="Bricks" unique_id=970748343 groups=["brick"]]
+position = Vector2(376, 117)
+
+[node name="Sprite2D" type="Sprite2D" parent="Bricks/Brick12" unique_id=35008708]
+texture = ExtResource("9_k7uni")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Bricks/Brick12" unique_id=2056717434]
+shape = SubResource("RectangleShape2D_xxy6r")
+
+[node name="Brick13" type="StaticBody2D" parent="Bricks" unique_id=1464966820 groups=["brick"]]
+position = Vector2(507, 117)
+
+[node name="Sprite2D" type="Sprite2D" parent="Bricks/Brick13" unique_id=69655739]
+texture = ExtResource("9_k7uni")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Bricks/Brick13" unique_id=1501564864]
+shape = SubResource("RectangleShape2D_xxy6r")
+
+[node name="Brick14" type="StaticBody2D" parent="Bricks" unique_id=1673139181 groups=["brick"]]
+position = Vector2(637, 117)
+
+[node name="Sprite2D" type="Sprite2D" parent="Bricks/Brick14" unique_id=840294877]
+texture = ExtResource("9_k7uni")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Bricks/Brick14" unique_id=1208201171]
+shape = SubResource("RectangleShape2D_xxy6r")
+
+[node name="Brick15" type="StaticBody2D" parent="Bricks" unique_id=1054265622 groups=["brick"]]
+position = Vector2(766, 117)
+
+[node name="Sprite2D" type="Sprite2D" parent="Bricks/Brick15" unique_id=1116457851]
+texture = ExtResource("9_k7uni")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Bricks/Brick15" unique_id=771410935]
+shape = SubResource("RectangleShape2D_xxy6r")
+
+[node name="Brick16" type="StaticBody2D" parent="Bricks" unique_id=769362692 groups=["brick"]]
+position = Vector2(896, 117)
+
+[node name="Sprite2D" type="Sprite2D" parent="Bricks/Brick16" unique_id=218702120]
+texture = ExtResource("9_k7uni")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Bricks/Brick16" unique_id=269502296]
+shape = SubResource("RectangleShape2D_xxy6r")
+
+[node name="Brick17" type="StaticBody2D" parent="Bricks" unique_id=1025165066 groups=["brick"]]
+position = Vector2(1026, 117)
+
+[node name="Sprite2D" type="Sprite2D" parent="Bricks/Brick17" unique_id=1439438546]
+texture = ExtResource("9_k7uni")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Bricks/Brick17" unique_id=643664061]
+shape = SubResource("RectangleShape2D_xxy6r")
+
+[node name="Brick18" type="StaticBody2D" parent="Bricks" unique_id=1961444703 groups=["brick"]]
+position = Vector2(1157, 117)
+
+[node name="Sprite2D" type="Sprite2D" parent="Bricks/Brick18" unique_id=1414405232]
+texture = ExtResource("9_k7uni")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Bricks/Brick18" unique_id=1556953104]
+shape = SubResource("RectangleShape2D_xxy6r")
+
+[node name="Brick19" type="StaticBody2D" parent="Bricks" unique_id=479198467 groups=["brick"]]
+position = Vector2(116, 181)
+
+[node name="Sprite2D" type="Sprite2D" parent="Bricks/Brick19" unique_id=577543737]
+texture = ExtResource("9_k7uni")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Bricks/Brick19" unique_id=1934388043]
+shape = SubResource("RectangleShape2D_xxy6r")
+
+[node name="Brick20" type="StaticBody2D" parent="Bricks" unique_id=311112494 groups=["brick"]]
+position = Vector2(247, 181)
+
+[node name="Sprite2D" type="Sprite2D" parent="Bricks/Brick20" unique_id=2045360638]
+texture = ExtResource("9_k7uni")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Bricks/Brick20" unique_id=1974175132]
+shape = SubResource("RectangleShape2D_xxy6r")
+
+[node name="Brick21" type="StaticBody2D" parent="Bricks" unique_id=516890461 groups=["brick"]]
+position = Vector2(376, 181)
+
+[node name="Sprite2D" type="Sprite2D" parent="Bricks/Brick21" unique_id=1258787333]
+texture = ExtResource("9_k7uni")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Bricks/Brick21" unique_id=1022058580]
+shape = SubResource("RectangleShape2D_xxy6r")
+
+[node name="Brick22" type="StaticBody2D" parent="Bricks" unique_id=323537412 groups=["brick"]]
+position = Vector2(507, 181)
+
+[node name="Sprite2D" type="Sprite2D" parent="Bricks/Brick22" unique_id=2098255083]
+texture = ExtResource("9_k7uni")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Bricks/Brick22" unique_id=224083749]
+shape = SubResource("RectangleShape2D_xxy6r")
+
+[node name="Brick23" type="StaticBody2D" parent="Bricks" unique_id=137202260 groups=["brick"]]
+position = Vector2(637, 181)
+
+[node name="Sprite2D" type="Sprite2D" parent="Bricks/Brick23" unique_id=768639267]
+texture = ExtResource("9_k7uni")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Bricks/Brick23" unique_id=41175721]
+shape = SubResource("RectangleShape2D_xxy6r")
+
+[node name="Brick24" type="StaticBody2D" parent="Bricks" unique_id=1615604205 groups=["brick"]]
+position = Vector2(766, 181)
+
+[node name="Sprite2D" type="Sprite2D" parent="Bricks/Brick24" unique_id=1498657821]
+texture = ExtResource("9_k7uni")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Bricks/Brick24" unique_id=290265291]
+shape = SubResource("RectangleShape2D_xxy6r")
+
+[node name="Brick25" type="StaticBody2D" parent="Bricks" unique_id=1421108417 groups=["brick"]]
+position = Vector2(896, 181)
+
+[node name="Sprite2D" type="Sprite2D" parent="Bricks/Brick25" unique_id=1626353819]
+texture = ExtResource("9_k7uni")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Bricks/Brick25" unique_id=2126815965]
+shape = SubResource("RectangleShape2D_xxy6r")
+
+[node name="Brick26" type="StaticBody2D" parent="Bricks" unique_id=1412308135 groups=["brick"]]
+position = Vector2(1026, 181)
+
+[node name="Sprite2D" type="Sprite2D" parent="Bricks/Brick26" unique_id=1394154331]
+texture = ExtResource("9_k7uni")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Bricks/Brick26" unique_id=656093163]
+shape = SubResource("RectangleShape2D_xxy6r")
+
+[node name="Brick27" type="StaticBody2D" parent="Bricks" unique_id=548143440 groups=["brick"]]
+position = Vector2(1157, 181)
+
+[node name="Sprite2D" type="Sprite2D" parent="Bricks/Brick27" unique_id=308035648]
+texture = ExtResource("9_k7uni")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Bricks/Brick27" unique_id=927794718]
+shape = SubResource("RectangleShape2D_xxy6r")
+
+[node name="Walls" type="Node2D" parent="." unique_id=1174152192]
+
+[node name="LeftWall" type="StaticBody2D" parent="Walls" unique_id=919474624]
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Walls/LeftWall" unique_id=796382566]
+position = Vector2(0, 354.5)
+shape = SubResource("RectangleShape2D_6rg13")
+
+[node name="Ceiling" type="StaticBody2D" parent="Walls" unique_id=29725994]
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Walls/Ceiling" unique_id=1386895425]
+position = Vector2(632, 2)
+shape = SubResource("RectangleShape2D_ce28y")
+
+[node name="RightWall" type="StaticBody2D" parent="Walls" unique_id=1276267169]
+position = Vector2(1280, 0)
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Walls/RightWall" unique_id=1071055020]
+position = Vector2(0, 354.5)
+shape = SubResource("RectangleShape2D_6rg13")
+
+[node name="LossZone" type="Area2D" parent="." unique_id=1092939400]
+collision_layer = 2
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="LossZone" unique_id=1950739805]
+position = Vector2(643, 731)
+shape = SubResource("RectangleShape2D_4ptaq")
+debug_color = Color(0.99467343, 0, 0.22570384, 0.41960785)

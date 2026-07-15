@@ -21,7 +21,7 @@ func compute_reward(context:Dictionary) -> float:
 	if body.has_method("is_crashed") and bool(body.is_crashed()):
 		return 0.0
 
-	var value := _read_input_value(body)
+	var value := _read_input_value(context, body)
 	var reward_value := value * value_reward_scale
 
 	if value >= target_min_value:
@@ -35,11 +35,12 @@ func compute_reward(context:Dictionary) -> float:
 	return (reward_value + below_target_penalty) * weight
 
 
-func _read_input_value(body) -> float:
+func _read_input_value(context:Dictionary, body) -> float:
+	var observations: Dictionary = context.get("observations", {})
+	if observations.has(input_name):
+		return clampf(float(observations[input_name]), 0.0, 1.0)
 	if body.has_method("get_control_input"):
 		return clampf(float(body.get_control_input(input_name)), 0.0, 1.0)
-
-	var observations: Dictionary = {}
 	if body.has_method("get_observations"):
 		observations = body.get_observations()
 

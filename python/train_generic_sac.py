@@ -1,11 +1,13 @@
 import argparse
 import os
 import random
+from queue import Empty
 
 import numpy as np
 
 from train_generic_ddpg import (
     continuous_exploration_bounds,
+    create_continuous_async_worker,
     curriculum_reset_progress_max,
     describe_tensorflow_backend,
     format_float_list,
@@ -23,14 +25,30 @@ import tensorflow as tf
 
 from godot_process_manager import GodotProcessManager
 from models import build_continuous_critic, build_sac_actor
+from opponent_pool import OpponentPool, add_opponent_pool_arguments, validate_team_layout
 from replay_buffer import ReplayBuffer
 from scenario_gym_env import ScenarioGymEnv
 from training_support import (
+    AsyncCollectorPool,
+    AsyncEventScheduler,
+    AsyncEpisodeEvent,
+    AsyncStepEvent,
+    AsyncWorkerDoneEvent,
+    AsyncWorkerErrorEvent,
+    ParallelEnvStepper,
+    PolicySnapshot,
+    BestCheckpointTracker,
+    add_best_checkpoint_arguments,
+    add_collector_arguments,
+    add_parallel_env_arguments,
     add_log_format_argument,
+    add_tensorflow_runtime_arguments,
+    episode_step_indices,
     print_episode_metrics,
     resolve_resume_checkpoint,
     restore_replay_buffer,
     save_replay_snapshot,
+    validate_async_arguments,
 )
 
 
@@ -45,13 +63,30 @@ def parse_args():
     parser.add_argument("--num-envs", type=int, default=1)
     parser.add_argument("--base-port", type=int, default=6200)
     parser.add_argument("--num-episodes", type=int, default=500)
-    parser.add_argument("--max-steps-per-episode", type=int, default=500)
+    parser.add_argument(
+        "--max-steps-per-episode",
+        type=int,
+        default=500,
+        help="Maximum episode steps shared with Godot; use 0 to rely only on terminal conditions.",
+    )
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--tau", type=float, default=0.005)
     parser.add_argument("--actor-learning-rate", type=float, default=3e-4)
     parser.add_argument("--critic-learning-rate", type=float, default=3e-4)
     parser.add_argument("--alpha-learning-rate", type=float, default=3e-4)
+    parser.add_argument(
+        "--resume-actor-learning-rate",
+        type=float,
+        default=1e-5,
+        help="Actor learning rate used after restoring a checkpoint; keeps a valid policy from drifting quickly.",
+    )
+    parser.add_argument(
+        "--resume-alpha-learning-rate",
+        type=float,
+        default=1e-5,
+        help="Entropy-temperature learning rate used after restoring a checkpoint.",
+    )
     parser.add_argument("--initial-alpha", type=float, default=0.2)
     parser.add_argument("--target-entropy", type=float, default=None)
     parser.add_argument("--log-std-min", type=float, default=-20.0)
@@ -76,6 +111,12 @@ def parse_args():
         ),
     )
     parser.add_argument("--target-update-every", type=int, default=1)
+    parser.add_argument(
+        "--policy-update-every",
+        type=int,
+        default=2,
+        help="Update actor and entropy temperature once every N critic updates.",
+    )
     parser.add_argument("--env-seed-base", type=int, default=100)
     parser.add_argument("--episode-seed-multiplier", type=int, default=1000)
     parser.add_argument("--env-timeout", type=float, default=30.0)
@@ -97,6 +138,7 @@ def parse_args():
     )
     parser.add_argument("--checkpoint-every", type=int, default=25)
     parser.add_argument("--keep-checkpoints", type=int, default=5)
+    parser.add_argument("--best-checkpoint-window", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--save-replay-buffer", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
@@ -123,7 +165,12 @@ def parse_args():
     parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--godot-debug", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--log-details", action=argparse.BooleanOptionalAction, default=False)
+    add_collector_arguments(parser)
+    add_opponent_pool_arguments(parser)
+    add_best_checkpoint_arguments(parser)
+    add_parallel_env_arguments(parser)
     add_log_format_argument(parser)
+    add_tensorflow_runtime_arguments(parser)
 
     # Accepted for command compatibility with DDPG runs; SAC exploration is entropy-based.
     parser.add_argument("--exploration-noise", type=float, default=None, help=argparse.SUPPRESS)
@@ -167,7 +214,16 @@ def sample_actor(actor, obs, action_low, action_high, log_std_min, log_std_max, 
     return action, log_prob, raw_action
 
 
-def select_actions(actor, obs_batch, done_mask, action_low, action_high, log_std_min, log_std_max):
+def select_actions(
+    actor,
+    obs_batch,
+    done_mask,
+    action_low,
+    action_high,
+    log_std_min,
+    log_std_max,
+    deterministic=False,
+):
     obs_batch = np.asarray(obs_batch, dtype=np.float32)
     action_low_tensor = tf.convert_to_tensor(action_low.reshape(1, -1), dtype=tf.float32)
     action_high_tensor = tf.convert_to_tensor(action_high.reshape(1, -1), dtype=tf.float32)
@@ -178,7 +234,7 @@ def select_actions(actor, obs_batch, done_mask, action_low, action_high, log_std
         action_high_tensor,
         log_std_min,
         log_std_max,
-        deterministic=False,
+        deterministic=deterministic,
     )
     actions = actions.numpy().astype(np.float32)
     if done_mask is not None:
@@ -340,32 +396,365 @@ def save_critic_weights(critic1, critic2, args):
     print(f"Saved critic2 weights: {args.critic2_weights_path}", flush=True)
 
 
-def save_training_checkpoint(checkpoint, checkpoint_manager, buffer, checkpoint_number_value, args, final=False):
+def save_training_checkpoint(
+    checkpoint,
+    checkpoint_manager,
+    buffer,
+    checkpoint_number_value,
+    args,
+    final=False,
+    save_replay=True,
+):
     checkpoint.episode.assign(checkpoint_number_value)
     saved_path = checkpoint_manager.save(checkpoint_number=checkpoint_number_value)
     label = "final checkpoint" if final else "checkpoint"
     print(f"Saved {label}: {saved_path}", flush=True)
-    if args.save_replay_buffer and len(buffer) > 0:
-        save_replay_snapshot(saved_path, checkpoint_manager, buffer)
+    if save_replay and args.save_replay_buffer and len(buffer) > 0:
+        save_replay_snapshot(
+            saved_path,
+            checkpoint_manager,
+            buffer,
+            asynchronous=args.collector_mode == "async" and args.async_replay_save,
+        )
     return saved_path
 
 
-def apply_optimizer_learning_rates(actor_optimizer, critic1_optimizer, critic2_optimizer, alpha_optimizer, args):
-    actor_optimizer.learning_rate.assign(args.actor_learning_rate)
+def maybe_update_best_checkpoint(
+    tracker,
+    best_checkpoint_manager,
+    checkpoint,
+    buffer,
+    candidate_path,
+    episode,
+    args,
+):
+    result = tracker.evaluate(candidate_path, episode)
+    if result is None or not tracker.is_improvement(result):
+        return None
+    best_path = save_training_checkpoint(
+        checkpoint,
+        best_checkpoint_manager,
+        buffer,
+        episode,
+        args,
+        save_replay=False,
+    )
+    tracker.record_best(result, best_path)
+    return best_path
+
+
+def apply_optimizer_learning_rates(
+    actor_optimizer,
+    critic1_optimizer,
+    critic2_optimizer,
+    alpha_optimizer,
+    args,
+    resumed=False,
+):
+    actor_learning_rate = args.resume_actor_learning_rate if resumed else args.actor_learning_rate
+    alpha_learning_rate = args.resume_alpha_learning_rate if resumed else args.alpha_learning_rate
+    actor_optimizer.learning_rate.assign(actor_learning_rate)
     critic1_optimizer.learning_rate.assign(args.critic_learning_rate)
     critic2_optimizer.learning_rate.assign(args.critic_learning_rate)
-    alpha_optimizer.learning_rate.assign(args.alpha_learning_rate)
+    alpha_optimizer.learning_rate.assign(alpha_learning_rate)
     print(
         "Optimizer learning rates: "
-        f"actor={args.actor_learning_rate:g} critic={args.critic_learning_rate:g} "
-        f"alpha={args.alpha_learning_rate:g}",
+        f"actor={actor_learning_rate:g} critic={args.critic_learning_rate:g} "
+        f"alpha={alpha_learning_rate:g} policy_update_every={args.policy_update_every}",
         flush=True,
     )
 
 
+def run_async_sac(
+    args,
+    envs,
+    actor,
+    critic1,
+    critic2,
+    target_critic1,
+    target_critic2,
+    actor_optimizer,
+    critic1_optimizer,
+    critic2_optimizer,
+    alpha_optimizer,
+    log_alpha,
+    target_entropy,
+    buffer,
+    checkpoint,
+    checkpoint_manager,
+    best_checkpoint_manager,
+    best_tracker,
+    start_episode,
+    action_low,
+    action_high,
+    random_action_low,
+    random_action_high,
+    critic_warmup_target,
+):
+    validate_async_arguments(args)
+    obs_dim = envs[0].obs_dim
+    action_size = envs[0].action_size
+    with tf.device("/CPU:0"):
+        local_models = [
+            build_sac_actor(obs_dim=obs_dim, action_size=action_size)
+            for _env in envs
+        ]
+    snapshot = PolicySnapshot(actor.get_weights())
+    rngs = [np.random.default_rng(args.env_seed_base + 100_003 * idx) for idx in range(len(envs))]
+
+    def action_selector(worker_id, env, _episode, _step_idx, local_actor, state):
+        if state["use_random_exploration"]:
+            action = sample_exploratory_action(
+                action_low,
+                action_high,
+                env.action_names,
+                rng=rngs[worker_id],
+                num_agents=len(env.agent_ids) if args.multi_agent else None,
+                drive_min=args.random_drive_min,
+                steering_abs_max=args.random_steering_abs_max,
+                exploration_low=random_action_low,
+                exploration_high=random_action_high,
+            )
+            if args.multi_agent:
+                action[state["done_mask"]] = action_low
+        elif args.multi_agent:
+            action = select_actions(
+                local_actor,
+                state["obs"],
+                state["done_mask"],
+                action_low,
+                action_high,
+                args.log_std_min,
+                args.log_std_max,
+            )
+        else:
+            action = select_action(
+                local_actor,
+                state["obs"],
+                action_low,
+                action_high,
+                args.log_std_min,
+                args.log_std_max,
+            )
+        return smooth_actions(
+            action,
+            state["previous_action"],
+            action_low,
+            action_high,
+            args.action_smoothing,
+        )
+
+    worker = create_continuous_async_worker(
+        args,
+        envs,
+        local_models,
+        snapshot,
+        action_size,
+        action_selector,
+    )
+    pool = AsyncCollectorPool(
+        envs,
+        worker,
+        start_episode,
+        args.num_episodes,
+        queue_capacity=args.async_queue_capacity,
+    )
+    scheduler = AsyncEventScheduler(args)
+    print(
+        f"Collector mode: async workers={len(envs)} queue={args.async_queue_capacity} "
+        f"policy_sync_steps={args.async_policy_sync_steps} "
+        f"update_basis={scheduler.update_basis} update_every={scheduler.update_every} "
+        f"updates_per_interval={scheduler.updates_per_interval} "
+        f"max_updates_per_env_step={scheduler.max_updates_per_env_step}",
+        flush=True,
+    )
+    completed = int(start_episode)
+    done_workers = 0
+    learner_updates = 0
+    policy_updates_total = 0
+    critic_updates_since_resume = 0
+    policy_update_candidates = 0
+    actor_losses = []
+    critic1_losses = []
+    critic2_losses = []
+    alpha_losses = []
+    last_saved_episode = None
+    interrupted = False
+    pool.start()
+    try:
+        while done_workers < len(envs):
+            try:
+                event = scheduler.next_event(pool, timeout=0.2)
+            except Empty:
+                continue
+            if isinstance(event, AsyncWorkerErrorEvent):
+                raise RuntimeError(f"Async collector {event.worker_id} failed") from event.error
+            if isinstance(event, AsyncWorkerDoneEvent):
+                done_workers += 1
+                continue
+            if isinstance(event, AsyncStepEvent):
+                step_events = scheduler.drain_step_events(pool, event)
+                for step_event in step_events:
+                    for transition in step_event.transitions:
+                        buffer.add(*transition)
+                updates_due = scheduler.ingest(step_events)
+                updates_performed = 0
+                if len(buffer) >= max(args.replay_warmup, args.batch_size):
+                    for _update in range(updates_due):
+                        warmup_complete = critic_updates_since_resume >= critic_warmup_target
+                        update_policy = warmup_complete and policy_update_candidates % args.policy_update_every == 0
+                        if warmup_complete:
+                            policy_update_candidates += 1
+                        losses = train_step(
+                            actor,
+                            critic1,
+                            critic2,
+                            target_critic1,
+                            target_critic2,
+                            actor_optimizer,
+                            critic1_optimizer,
+                            critic2_optimizer,
+                            alpha_optimizer,
+                            log_alpha,
+                            target_entropy,
+                            buffer,
+                            args.batch_size,
+                            args.gamma,
+                            action_low,
+                            action_high,
+                            args.log_std_min,
+                            args.log_std_max,
+                            update_policy=update_policy,
+                        )
+                        critic1_losses.append(losses[1])
+                        critic2_losses.append(losses[2])
+                        critic_updates_since_resume += 1
+                        learner_updates += 1
+                        updates_performed += 1
+                        if losses[0] is not None:
+                            actor_losses.append(losses[0])
+                            alpha_losses.append(losses[3])
+                            policy_updates_total += 1
+                        if learner_updates % args.target_update_every == 0:
+                            soft_update(target_critic1, critic1, args.tau)
+                            soft_update(target_critic2, critic2, args.tau)
+                        if (
+                            update_policy
+                            and policy_updates_total % args.async_policy_publish_updates == 0
+                        ):
+                            snapshot.publish(actor.get_weights())
+                scheduler.record_updates(updates_performed)
+                continue
+
+            if not isinstance(event, AsyncEpisodeEvent):
+                continue
+            completed += 1
+            state = event.payload
+            reward_stats = summarize_rewards([state])
+            diagnostics = summarize_episode_diagnostics([state], args.multi_agent)
+            if args.multi_agent:
+                mean_actions = [(state["action_sum"] / np.maximum(state["action_count"], 1.0)).tolist()]
+                controlled_agents = len(state["ep_reward"])
+            else:
+                mean_actions = [(state["action_sum"] / max(float(state["action_count"]), 1.0)).tolist()]
+                controlled_agents = 1
+            mean_action = summarize_actions(mean_actions)
+            mean_delta = summarize_action_deltas([state], args.multi_agent)
+            finish_rate = diagnostics["finishes"] / max(controlled_agents, 1)
+            collision_rate = diagnostics["collisions"] / max(controlled_agents, 1)
+            stall_rate = diagnostics["stalls"] / max(controlled_agents, 1)
+            warmup_left = max(0, critic_warmup_target - critic_updates_since_resume)
+            throughput = scheduler.throughput(pool)
+            print_episode_metrics(event.episode, [
+                ("mode", [
+                    ("collector", "async"),
+                    ("worker", event.worker_id),
+                    ("exploration", "random" if state["use_random_exploration"] else "policy"),
+                    ("alpha", f"{float(tf.exp(log_alpha).numpy()):.4f}"),
+                    *(([("reset_progress_max", f"{state['reset_progress_max']:.3f}")]) if state["reset_progress_max"] is not None else []),
+                ]),
+                ("outcome", [
+                    ("reward", f"{reward_stats['mean']:.3f} [{reward_stats['min']:.3f}, {reward_stats['max']:.3f}]"),
+                    ("progress", f"mean:{diagnostics['progress_mean']:.3f} max:{diagnostics['progress_max']:.3f}"),
+                ]),
+                ("agents", [
+                    ("finish", f"{diagnostics['finishes']}/{controlled_agents} ({finish_rate:.2%})"),
+                    ("collision", f"{diagnostics['collisions']}/{controlled_agents} ({collision_rate:.2%})"),
+                    ("stall", f"{diagnostics['stalls']}/{controlled_agents} ({stall_rate:.2%})"),
+                ]),
+                ("actions", [("mean", format_float_list(mean_action)), ("delta", format_float_list(mean_delta))]),
+                ("training", [
+                    ("completed", f"{completed}/{args.num_episodes}"),
+                    ("queue", f"{throughput['queue_size']}/{throughput['queue_capacity']} ({throughput['queue_saturation']:.0%})"),
+                    ("replay", f"{len(buffer)}/{args.replay_capacity}"),
+                    ("critic_updates", len(critic1_losses)),
+                    ("policy_updates", len(actor_losses)),
+                    ("warmup_left", warmup_left),
+                    ("actor_loss", f"{float(np.mean(actor_losses)) if actor_losses else 0.0:.5f}"),
+                    ("critic_loss", f"{float(np.mean(critic1_losses)) if critic1_losses else 0.0:.5f}/{float(np.mean(critic2_losses)) if critic2_losses else 0.0:.5f}"),
+                    ("alpha_loss", f"{float(np.mean(alpha_losses)) if alpha_losses else 0.0:.5f}"),
+                    ("policy_version", snapshot.version),
+                ]),
+                ("throughput", [
+                    ("env_steps_s", f"{throughput['env_steps_s']:.1f}"),
+                    ("transitions_s", f"{throughput['transitions_s']:.1f}"),
+                    ("transitions_step", f"{throughput['transitions_per_env_step']:.1f}"),
+                    ("updates_s", f"{throughput['updates_s']:.1f}"),
+                    ("updates_throttled", throughput["throttled_updates"]),
+                ]),
+            ], args.log_format)
+            actor_losses.clear()
+            critic1_losses.clear()
+            critic2_losses.clear()
+            alpha_losses.clear()
+
+            if args.checkpoint_every > 0 and completed % args.checkpoint_every == 0:
+                saved_path = save_training_checkpoint(
+                    checkpoint, checkpoint_manager, buffer, completed, args
+                )
+                last_saved_episode = completed
+            else:
+                saved_path = None
+            if best_tracker.should_evaluate(completed):
+                if saved_path is None:
+                    saved_path = save_training_checkpoint(
+                        checkpoint, checkpoint_manager, buffer, completed, args
+                    )
+                    last_saved_episode = completed
+                maybe_update_best_checkpoint(
+                    best_tracker,
+                    best_checkpoint_manager,
+                    checkpoint,
+                    buffer,
+                    saved_path,
+                    completed,
+                    args,
+                )
+    except KeyboardInterrupt:
+        interrupted = True
+        print("\nInterrupt received: stopping async SAC collectors...", flush=True)
+    finally:
+        pool.close()
+
+    if last_saved_episode != completed:
+        save_training_checkpoint(
+            checkpoint, checkpoint_manager, buffer, completed, args, final=True
+        )
+    if interrupted:
+        print(
+            f"Interrupted async training saved at completed_episodes={completed}",
+            flush=True,
+        )
+    return completed
+
+
 def main():
     args = parse_args()
-    describe_tensorflow_backend()
+    validate_async_arguments(args)
+    if args.policy_update_every < 1:
+        raise ValueError("--policy-update-every must be at least 1")
+    best_tracker = BestCheckpointTracker(args, "sac")
+    describe_tensorflow_backend(args)
     random.seed(args.env_seed_base)
     np.random.seed(args.env_seed_base)
     tf.random.set_seed(args.env_seed_base)
@@ -383,10 +772,17 @@ def main():
     buffer = None
     checkpoint = None
     checkpoint_manager = None
+    best_checkpoint_manager = None
+    stepper = None
     start_episode = 0
     last_completed_episode = None
     try:
-        manager.start_many(ports, headless=args.headless, debug=args.godot_debug)
+        manager.start_many(
+            ports,
+            headless=args.headless,
+            debug=args.godot_debug,
+            render_env_count=args.render_env_count,
+        )
         print(f"Started Godot instances on ports {ports}", flush=True)
         envs = [
             ScenarioGymEnv(
@@ -398,6 +794,9 @@ def main():
             )
             for idx, port in enumerate(ports)
         ]
+        if args.collector_mode == "sync":
+            stepper = ParallelEnvStepper(len(envs), args.parallel_env_steps)
+            print(f"Environment stepping: {'parallel' if stepper.enabled else 'sequential'}", flush=True)
 
         env0 = envs[0]
         if env0.action_type != "continuous":
@@ -415,7 +814,7 @@ def main():
         target_entropy = args.target_entropy if args.target_entropy is not None else -float(action_size)
         print(
             f"Scenario spec: agent_id={env0.agent_id} {env0.agent_summary()} multi_agent={args.multi_agent} "
-            f"obs_dim={obs_dim} action_size={action_size} action_names={env0.action_names} "
+            f"{env0.team_summary()} obs_dim={obs_dim} action_size={action_size} action_names={env0.action_names} "
             f"target_entropy={target_entropy:.3f}",
             flush=True,
         )
@@ -462,6 +861,12 @@ def main():
             directory=args.checkpoint_dir,
             max_to_keep=args.keep_checkpoints,
         )
+        if best_tracker.enabled:
+            best_checkpoint_manager = tf.train.CheckpointManager(
+                checkpoint,
+                directory=str(best_tracker.directory),
+                max_to_keep=args.keep_best_checkpoints,
+            )
         resume_checkpoint = resolve_resume_checkpoint(args, checkpoint_manager)
         restored_replay_count = 0
         if resume_checkpoint:
@@ -480,6 +885,7 @@ def main():
             critic2_optimizer,
             alpha_optimizer,
             args,
+            resumed=resume_checkpoint is not None,
         )
 
         demo_data = None
@@ -535,20 +941,73 @@ def main():
 
         critic_warmup_target = max(0, int(args.critic_warmup_updates)) if resume_checkpoint else 0
         critic_updates_since_resume = 0
+        policy_update_candidates = 0
         if critic_warmup_target > 0:
             print(
                 f"Resume critic warmup: updates={critic_warmup_target} actor=frozen alpha=frozen",
                 flush=True,
             )
 
+        opponent_teams = validate_team_layout(envs, args.opponent_pool)
+        opponent_pool = OpponentPool(
+            args,
+            algorithm="sac",
+            model_factory=lambda: build_sac_actor(obs_dim=obs_dim, action_size=action_size),
+            metadata={"obs_dim": obs_dim, "action_size": action_size},
+        )
+        if opponent_pool.enabled:
+            print(
+                f"Opponent pool: dir={opponent_pool.directory} teams={opponent_teams} "
+                f"snapshots={len(opponent_pool.entries)} sampling={opponent_pool.sampling}",
+                flush=True,
+            )
+
+        if args.collector_mode == "async":
+            last_completed_episode = run_async_sac(
+                args,
+                envs,
+                actor,
+                critic1,
+                critic2,
+                target_critic1,
+                target_critic2,
+                actor_optimizer,
+                critic1_optimizer,
+                critic2_optimizer,
+                alpha_optimizer,
+                log_alpha,
+                target_entropy,
+                buffer,
+                checkpoint,
+                checkpoint_manager,
+                best_checkpoint_manager,
+                best_tracker,
+                start_episode,
+                action_low,
+                action_high,
+                random_action_low,
+                random_action_high,
+                critic_warmup_target,
+            )
+            actor.save_weights(args.actor_weights_path)
+            save_critic_weights(critic1, critic2, args)
+            print(f"Saved actor weights: {args.actor_weights_path}", flush=True)
+            return
+
         last_saved_episode = None
         for episode in range(start_episode, args.num_episodes):
+            opponent_match = opponent_pool.start_episode(actor, episode)
             use_random_exploration = episode < max(0, args.random_exploration_episodes)
             reset_progress_max = curriculum_reset_progress_max(episode, args)
             env_states = []
             for env_idx, env in enumerate(envs):
+                scenario_config = {
+                    "training_episode": episode,
+                    "max_steps": args.max_steps_per_episode,
+                }
                 if reset_progress_max is not None:
-                    env.configure(reset_progress_min=0.0, reset_progress_max=reset_progress_max)
+                    scenario_config.update(reset_progress_min=0.0, reset_progress_max=reset_progress_max)
+                env.configure(**scenario_config)
                 obs, info = env.reset(seed=args.episode_seed_multiplier * episode + env_idx)
                 if args.multi_agent:
                     agent_count = len(env.agent_ids)
@@ -566,6 +1025,13 @@ def main():
                     collision_count = np.zeros((agent_count,), dtype=np.int32)
                     stalled_seen = np.zeros((agent_count,), dtype=np.bool_)
                     stalled_count = np.zeros((agent_count,), dtype=np.int32)
+                    learner_mask = opponent_pool.learner_mask(
+                        env.agent_team_ids,
+                        opponent_teams,
+                        episode,
+                        env_idx,
+                        use_current_policy=opponent_match.use_current_policy,
+                    )
                 else:
                     done_mask = None
                     ep_reward = 0.0
@@ -581,6 +1047,7 @@ def main():
                     collision_count = 0
                     stalled_seen = False
                     stalled_count = 0
+                    learner_mask = None
                 env_states.append({
                     "obs": obs,
                     "done": False,
@@ -598,6 +1065,7 @@ def main():
                     "collision_count": collision_count,
                     "stalled_seen": stalled_seen,
                     "stalled_count": stalled_count,
+                    "learner_mask": learner_mask,
                 })
 
             actor_losses = []
@@ -606,10 +1074,11 @@ def main():
             alpha_losses = []
             alphas = []
 
-            for step_idx in range(args.max_steps_per_episode):
+            for step_idx in episode_step_indices(args.max_steps_per_episode):
                 if all(state["done"] for state in env_states):
                     break
 
+                step_requests = []
                 for env, state in zip(envs, env_states):
                     if state["done"]:
                         continue
@@ -674,7 +1143,27 @@ def main():
                                 args.action_smoothing,
                             )
 
-                    next_obs, reward, terminated, truncated, info = env.step(action)
+                    if args.multi_agent and opponent_match.model is not None:
+                        opponent_action = select_actions(
+                            opponent_match.model,
+                            state["obs"],
+                            state["done_mask"],
+                            action_low,
+                            action_high,
+                            args.log_std_min,
+                            args.log_std_max,
+                            deterministic=True,
+                        )
+                        action = opponent_pool.merge_actions(
+                            action,
+                            opponent_action,
+                            state["learner_mask"],
+                        )
+
+                    step_requests.append((env, state, action))
+
+                for env, state, action, step_result in stepper.step(step_requests):
+                    next_obs, reward, terminated, truncated, info = step_result
                     done = bool(terminated or truncated)
 
                     if args.multi_agent:
@@ -686,13 +1175,14 @@ def main():
                                 continue
                             agent_info = per_agent_infos[agent_idx] if agent_idx < len(per_agent_infos) else {}
                             update_episode_diagnostics(state, agent_info, agent_idx=agent_idx)
-                            buffer.add(
-                                state["obs"][agent_idx],
-                                action[agent_idx],
-                                float(per_agent_rewards[agent_idx]),
-                                next_obs[agent_idx],
-                                bool(per_agent_done[agent_idx] or done),
-                            )
+                            if state["learner_mask"][agent_idx]:
+                                buffer.add(
+                                    state["obs"][agent_idx],
+                                    action[agent_idx],
+                                    float(per_agent_rewards[agent_idx]),
+                                    next_obs[agent_idx],
+                                    bool(per_agent_done[agent_idx] or done),
+                                )
                             state["ep_reward"][agent_idx] += per_agent_rewards[agent_idx]
                             state["action_sum"][agent_idx] += action[agent_idx]
                             state["action_count"][agent_idx, 0] += 1.0
@@ -716,8 +1206,14 @@ def main():
                     state["obs"] = next_obs
                     state["done"] = done
 
-                    if len(buffer) >= args.replay_warmup:
-                        update_policy = critic_updates_since_resume >= critic_warmup_target
+                    if len(buffer) >= max(args.replay_warmup, args.batch_size):
+                        warmup_complete = critic_updates_since_resume >= critic_warmup_target
+                        update_policy = (
+                            warmup_complete
+                            and policy_update_candidates % args.policy_update_every == 0
+                        )
+                        if warmup_complete:
+                            policy_update_candidates += 1
                         losses = train_step(
                             actor,
                             critic1,
@@ -753,7 +1249,7 @@ def main():
                                 flush=True,
                             )
 
-                if len(buffer) >= args.replay_warmup and (step_idx + 1) % args.target_update_every == 0:
+                if len(buffer) >= max(args.replay_warmup, args.batch_size) and (step_idx + 1) % args.target_update_every == 0:
                     soft_update(target_critic1, critic1, args.tau)
                     soft_update(target_critic2, critic2, args.tau)
 
@@ -784,6 +1280,7 @@ def main():
                 ("mode", [
                     ("exploration", "random" if use_random_exploration else "policy"),
                     ("alpha", f"{float(np.mean(alphas)) if alphas else float(tf.exp(log_alpha).numpy()):.4f}"),
+                    ("opponent", opponent_match.label),
                     *(([("reset_progress_max", f"{reset_progress_max:.3f}")]) if reset_progress_max is not None else []),
                 ]),
                 ("outcome", [
@@ -815,9 +1312,12 @@ def main():
                     flush=True,
                 )
             last_completed_episode = episode + 1
+            snapshot_path = opponent_pool.snapshot(actor, episode + 1)
+            if snapshot_path is not None:
+                print(f"Saved opponent snapshot: {snapshot_path}", flush=True)
 
             if args.checkpoint_every > 0 and (episode + 1) % args.checkpoint_every == 0:
-                save_training_checkpoint(
+                saved_path = save_training_checkpoint(
                     checkpoint,
                     checkpoint_manager,
                     buffer,
@@ -825,6 +1325,23 @@ def main():
                     args,
                 )
                 last_saved_episode = episode + 1
+            else:
+                saved_path = None
+            if best_tracker.should_evaluate(episode + 1):
+                if saved_path is None:
+                    saved_path = save_training_checkpoint(
+                        checkpoint, checkpoint_manager, buffer, episode + 1, args
+                    )
+                    last_saved_episode = episode + 1
+                maybe_update_best_checkpoint(
+                    best_tracker,
+                    best_checkpoint_manager,
+                    checkpoint,
+                    buffer,
+                    saved_path,
+                    episode + 1,
+                    args,
+                )
 
         if last_saved_episode != args.num_episodes:
             save_training_checkpoint(
@@ -856,6 +1373,13 @@ def main():
         else:
             print("Training state was not initialized; no checkpoint was written.", flush=True)
     finally:
+        if stepper is not None:
+            stepper.close()
+        if buffer is not None:
+            try:
+                buffer.wait_for_pending_saves()
+            except Exception as exc:
+                print(f"ERROR waiting for replay save: {exc}", flush=True)
         for env in envs:
             try:
                 env.close()

@@ -12,7 +12,6 @@
 [ext_resource type="Script" uid="uid://dvjsbnwsr82xy" path="res://scripts/agent/progress/Path3DProgressProvider.gd" id="10_progress_provider"]
 [ext_resource type="Script" uid="uid://b47ph323gt6gl" path="res://scripts/agent/events/ScenarioEventSystem.gd" id="11_event_system"]
 [ext_resource type="Script" uid="uid://douxrysm43n8i" path="res://scripts/agent/events/AreaReachedEventSource.gd" id="12_area_event"]
-[ext_resource type="Script" uid="uid://cm1cxhwq6l4nc" path="res://scripts/agent/events/ObservationThresholdEventSource.gd" id="13_observation_event"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_jqq6j"]
 sky_horizon_color = Color(0.66224277, 0.6717428, 0.6867428, 1)
@@ -159,11 +158,6 @@ script = ExtResource("12_area_event")
 event_name = "finish_reached"
 terminal_reason = "finish_reached"
 area = NodePath("../../../Environment/EndRace")
-
-[node name="TargetFirstSeen" type="Node" parent="ScenarioController/ScenarioEventSystem" unique_id=1227809234]
-script = ExtResource("13_observation_event")
-event_name = "target_first_seen"
-observation_name = "target_visible"
 
 [node name="ScenarioRewardSystem" type="Node" parent="ScenarioController" unique_id=1874867625]
 script = ExtResource("4_rewards")

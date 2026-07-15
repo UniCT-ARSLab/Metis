@@ -1,0 +1,145 @@
+===== CHECKPOINT 1950 =====
+Started Godot on port 6892
+Loaded exact policy checkpoint: checkpoints/breakout_27bricks_candidates/ckpt-1950
+Running policy algorithm=dqn obs_dim=5 action_type=discrete action_size=3 agents=['BreakoutPaddle'] training_episode=2500 execution_mode=lockstep
+episode=0000 finished total_reward=-8.0397 steps=597 success=0/1 terminal=['life_lost']
+episode=0001 finished total_reward=4.8390 steps=1810 success=0/1 terminal=['life_lost']
+episode=0002 finished total_reward=-5.0335 steps=535 success=0/1 terminal=['life_lost']
+episode=0003 finished total_reward=9.7913 steps=2287 success=0/1 terminal=['life_lost']
+episode=0004 finished total_reward=-6.0359 steps=559 success=0/1 terminal=['life_lost']
+episode=0005 finished total_reward=-6.0391 steps=591 success=0/1 terminal=['life_lost']
+episode=0006 finished total_reward=1.8813 steps=1387 success=0/1 terminal=['life_lost']
+episode=0007 finished total_reward=-2.0687 steps=887 success=0/1 terminal=['life_lost']
+episode=0008 finished total_reward=-1.0735 steps=935 success=0/1 terminal=['life_lost']
+episode=0009 finished total_reward=-2.0708 steps=908 success=0/1 terminal=['life_lost']
+episode=0010 finished total_reward=13.7700 steps=2500 success=0/1 terminal=['progress_stalled']
+episode=0011 finished total_reward=0.9250 steps=950 success=0/1 terminal=['life_lost']
+episode=0012 finished total_reward=4.7700 steps=2500 success=0/1 terminal=['progress_stalled']
+episode=0013 finished total_reward=-6.0226 steps=426 success=0/1 terminal=['life_lost']
+episode=0014 finished total_reward=-8.0112 steps=312 success=0/1 terminal=['life_lost']
+episode=0015 finished total_reward=-6.0302 steps=502 success=0/1 terminal=['life_lost']
+episode=0016 finished total_reward=-8.0105 steps=305 success=0/1 terminal=['life_lost']
+episode=0017 finished total_reward=-2.1109 steps=1309 success=0/1 terminal=['life_lost']
+episode=0018 finished total_reward=-0.0945 steps=1145 success=0/1 terminal=['life_lost']
+episode=0019 finished total_reward=-2.0656 steps=856 success=0/1 terminal=['life_lost']
+Evaluation summary
+  episodes  20
+  success   0/20 (0.00%)
+  reward    mean:-1.3365 range:[-8.0397,13.7700]
+  steps     mean:1065.1 range:[305,2500]
+===== CHECKPOINT 1975 =====
+Started Godot on port 6892
+Loaded exact policy checkpoint: checkpoints/breakout_27bricks_candidates/ckpt-1975
+Running policy algorithm=dqn obs_dim=5 action_type=discrete action_size=3 agents=['BreakoutPaddle'] training_episode=2500 execution_mode=lockstep
+episode=0000 finished total_reward=-7.0252 steps=452 success=0/1 terminal=['life_lost']
+episode=0001 finished total_reward=14.7700 steps=2500 success=0/1 terminal=['progress_stalled']
+episode=0002 finished total_reward=3.8259 steps=1941 success=0/1 terminal=['life_lost']
+episode=0003 finished total_reward=12.7700 steps=2500 success=0/1 terminal=['progress_stalled']
+episode=0004 finished total_reward=0.8790 steps=1410 success=0/1 terminal=['life_lost']
+episode=0005 finished total_reward=15.7700 steps=2500 success=0/1 terminal=['progress_stalled']
+episode=0006 finished total_reward=-0.0464 steps=664 success=0/1 terminal=['life_lost']
+episode=0007 finished total_reward=16.7700 steps=2500 success=0/1 terminal=['progress_stalled']
+episode=0008 finished total_reward=5.8314 steps=1886 success=0/1 terminal=['life_lost']
+episode=0009 finished total_reward=13.7700 steps=2500 success=0/1 terminal=['progress_stalled']
+episode=0010 finished total_reward=-8.0064 steps=264 success=0/1 terminal=['life_lost']
+episode=0011 finished total_reward=-6.0312 steps=512 success=0/1 terminal=['life_lost']
+episode=0012 finished total_reward=-3.0638 steps=838 success=0/1 terminal=['life_lost']
+episode=0013 finished total_reward=8.7700 steps=2500 success=0/1 terminal=['progress_stalled']
+episode=0014 finished total_reward=11.7700 steps=2500 success=0/1 terminal=['progress_stalled']
+episode=0015 finished total_reward=1.8705 steps=1495 success=0/1 terminal=['life_lost']
+episode=0016 finished total_reward=-4.0612 steps=812 success=0/1 terminal=['life_lost']
+episode=0017 finished total_reward=7.8145 steps=2055 success=0/1 terminal=['life_lost']
+episode=0018 finished total_reward=-8.9954 steps=154 success=0/1 terminal=['life_lost']
+episode=0019 finished total_reward=9.7700 steps=2500 success=0/1 terminal=['progress_stalled']
+Evaluation summary
+  episodes  20
+  success   0/20 (0.00%)
+  reward    mean:4.3576 range:[-8.9954,16.7700]
+  steps     mean:1624.2 range:[154,2500]
+===== CHECKPOINT 2000 =====
+Started Godot on port 6892
+Loaded exact policy checkpoint: checkpoints/breakout_27bricks_candidates/ckpt-2000
+Running policy algorithm=dqn obs_dim=5 action_type=discrete action_size=3 agents=['BreakoutPaddle'] training_episode=2500 execution_mode=lockstep
+episode=0000 finished total_reward=-0.1659 steps=1859 success=0/1 terminal=['life_lost']
+episode=0001 finished total_reward=-8.9977 steps=177 success=0/1 terminal=['life_lost']
+episode=0002 finished total_reward=-8.9966 steps=166 success=0/1 terminal=['life_lost']
+episode=0003 finished total_reward=-7.0187 steps=387 success=0/1 terminal=['life_lost']
+episode=0004 finished total_reward=-8.9958 steps=158 success=0/1 terminal=['life_lost']
+episode=0005 finished total_reward=2.7700 steps=2500 success=0/1 terminal=['progress_stalled']
+episode=0006 finished total_reward=-7.0177 steps=377 success=0/1 terminal=['life_lost']
+episode=0007 finished total_reward=-8.9960 steps=160 success=0/1 terminal=['life_lost']
+episode=0008 finished total_reward=-8.0038 steps=238 success=0/1 terminal=['life_lost']
+episode=0009 finished total_reward=1.8597 steps=1603 success=0/1 terminal=['life_lost']
+episode=0010 finished total_reward=-7.9959 steps=159 success=0/1 terminal=['life_lost']
+episode=0011 finished total_reward=1.8397 steps=1803 success=0/1 terminal=['life_lost']
+episode=0012 finished total_reward=-5.0399 steps=599 success=0/1 terminal=['life_lost']
+episode=0013 finished total_reward=-8.0318 steps=518 success=0/1 terminal=['life_lost']
+episode=0014 finished total_reward=-5.0242 steps=442 success=0/1 terminal=['life_lost']
+episode=0015 finished total_reward=4.7700 steps=2500 success=0/1 terminal=['progress_stalled']
+episode=0016 finished total_reward=-0.1126 steps=1326 success=0/1 terminal=['life_lost']
+episode=0017 finished total_reward=-7.0172 steps=372 success=0/1 terminal=['life_lost']
+episode=0018 finished total_reward=-8.9953 steps=153 success=0/1 terminal=['life_lost']
+episode=0019 finished total_reward=-8.9969 steps=169 success=0/1 terminal=['life_lost']
+Evaluation summary
+  episodes  20
+  success   0/20 (0.00%)
+  reward    mean:-4.9083 range:[-8.9977,4.7700]
+  steps     mean:783.3 range:[153,2500]
+===== CHECKPOINT 2025 =====
+Started Godot on port 6892
+Loaded exact policy checkpoint: checkpoints/breakout_27bricks_candidates/ckpt-2025
+Running policy algorithm=dqn obs_dim=5 action_type=discrete action_size=3 agents=['BreakoutPaddle'] training_episode=2500 execution_mode=lockstep
+episode=0000 finished total_reward=-1.0848 steps=1048 success=0/1 terminal=['life_lost']
+episode=0001 finished total_reward=-1.1555 steps=1755 success=0/1 terminal=['life_lost']
+episode=0002 finished total_reward=8.7700 steps=2500 success=0/1 terminal=['progress_stalled']
+episode=0003 finished total_reward=-2.1342 steps=1542 success=0/1 terminal=['life_lost']
+episode=0004 finished total_reward=-0.1916 steps=2116 success=0/1 terminal=['life_lost']
+episode=0005 finished total_reward=-8.0093 steps=293 success=0/1 terminal=['life_lost']
+episode=0006 finished total_reward=4.7700 steps=2500 success=0/1 terminal=['progress_stalled']
+episode=0007 finished total_reward=1.7700 steps=2500 success=0/1 terminal=['progress_stalled']
+episode=0008 finished total_reward=6.7700 steps=2500 success=0/1 terminal=['progress_stalled']
+episode=0009 finished total_reward=-3.0734 steps=934 success=0/1 terminal=['life_lost']
+episode=0010 finished total_reward=-1.1067 steps=1267 success=0/1 terminal=['life_lost']
+episode=0011 finished total_reward=9.7700 steps=2500 success=0/1 terminal=['progress_stalled']
+episode=0012 finished total_reward=-1.0802 steps=1002 success=0/1 terminal=['life_lost']
+episode=0013 finished total_reward=-4.0203 steps=403 success=0/1 terminal=['life_lost']
+episode=0014 finished total_reward=8.7838 steps=2362 success=0/1 terminal=['life_lost']
+episode=0015 finished total_reward=4.7931 steps=2269 success=0/1 terminal=['life_lost']
+episode=0016 finished total_reward=12.7700 steps=2500 success=0/1 terminal=['progress_stalled']
+episode=0017 finished total_reward=3.7700 steps=2500 success=0/1 terminal=['progress_stalled']
+episode=0018 finished total_reward=1.8094 steps=2106 success=0/1 terminal=['life_lost']
+episode=0019 finished total_reward=-8.9969 steps=169 success=0/1 terminal=['life_lost']
+Evaluation summary
+  episodes  20
+  success   0/20 (0.00%)
+  reward    mean:1.6462 range:[-8.9969,12.7700]
+  steps     mean:1738.3 range:[169,2500]
+===== CHECKPOINT 2042 =====
+Started Godot on port 6892
+Loaded exact policy checkpoint: checkpoints/breakout_27bricks_candidates/ckpt-2042
+Running policy algorithm=dqn obs_dim=5 action_type=discrete action_size=3 agents=['BreakoutPaddle'] training_episode=2500 execution_mode=lockstep
+episode=0000 finished total_reward=-8.0119 steps=319 success=0/1 terminal=['life_lost']
+episode=0001 finished total_reward=-7.9970 steps=170 success=0/1 terminal=['life_lost']
+episode=0002 finished total_reward=-7.9977 steps=177 success=0/1 terminal=['life_lost']
+episode=0003 finished total_reward=-6.0342 steps=542 success=0/1 terminal=['life_lost']
+episode=0004 finished total_reward=-8.9984 steps=184 success=0/1 terminal=['life_lost']
+episode=0005 finished total_reward=-8.0094 steps=294 success=0/1 terminal=['life_lost']
+episode=0006 finished total_reward=-7.0145 steps=345 success=0/1 terminal=['life_lost']
+episode=0007 finished total_reward=-7.0159 steps=359 success=0/1 terminal=['life_lost']
+episode=0008 finished total_reward=-8.9985 steps=185 success=0/1 terminal=['life_lost']
+episode=0009 finished total_reward=-2.0573 steps=773 success=0/1 terminal=['life_lost']
+episode=0010 finished total_reward=-8.0030 steps=230 success=0/1 terminal=['life_lost']
+episode=0011 finished total_reward=-8.0110 steps=310 success=0/1 terminal=['life_lost']
+episode=0012 finished total_reward=-7.0155 steps=355 success=0/1 terminal=['life_lost']
+episode=0013 finished total_reward=-8.0082 steps=282 success=0/1 terminal=['life_lost']
+episode=0014 finished total_reward=-7.0192 steps=392 success=0/1 terminal=['life_lost']
+episode=0015 finished total_reward=-6.0200 steps=400 success=0/1 terminal=['life_lost']
+episode=0016 finished total_reward=-6.0212 steps=412 success=0/1 terminal=['life_lost']
+episode=0017 finished total_reward=-6.0350 steps=550 success=0/1 terminal=['life_lost']
+episode=0018 finished total_reward=-6.0478 steps=678 success=0/1 terminal=['life_lost']
+episode=0019 finished total_reward=-8.9959 steps=159 success=0/1 terminal=['life_lost']
+Evaluation summary
+  episodes  20
+  success   0/20 (0.00%)
+  reward    mean:-7.1656 range:[-8.9985,-2.0573]
+  steps     mean:355.8 range:[159,773]

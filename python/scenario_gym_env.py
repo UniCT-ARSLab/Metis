@@ -41,6 +41,9 @@ class ScenarioGymEnv(gym.Env):
         hello = self._recv()
         if not hello.get("ok", False):
             raise RuntimeError(f"Handshake failed: {hello}")
+        self.execution_mode = str(
+            hello.get("execution_mode", "lockstep" if hello.get("lockstep", True) else "realtime")
+        )
 
         self.spec = self._request_spec()
         self.agent_specs = list(self.spec.get("agents", []))
@@ -48,6 +51,8 @@ class ScenarioGymEnv(gym.Env):
             raise RuntimeError(f"Godot scenario returned no agents in spec: {self.spec}")
 
         self.agent_ids = [str(item["id"]) for item in self.agent_specs]
+        self.agent_team_ids = [item.get("team_id") for item in self.agent_specs]
+        self.agent_team_by_id = dict(zip(self.agent_ids, self.agent_team_ids))
         if agent_id is None:
             self.agent_id = self.agent_ids[0]
         else:
@@ -246,6 +251,24 @@ class ScenarioGymEnv(gym.Env):
             raise RuntimeError(f"Godot config failed: {msg}")
         return msg
 
+    def set_execution_mode(self, mode, simulation_fps=60):
+        mode = str(mode).lower()
+        if mode not in {"lockstep", "realtime"}:
+            raise ValueError("execution mode must be 'lockstep' or 'realtime'")
+        simulation_fps = int(simulation_fps)
+        if simulation_fps < 1:
+            raise ValueError("simulation_fps must be at least 1")
+        self._send({
+            "cmd": "execution_mode",
+            "mode": mode,
+            "simulation_fps": simulation_fps,
+        })
+        msg = self._recv()
+        if not msg.get("ok", False):
+            raise RuntimeError(f"Godot execution-mode change failed: {msg}")
+        self.execution_mode = str(msg.get("mode", mode))
+        return msg
+
     def step(self, action):
         if self.multi_agent:
             if isinstance(action, dict):
@@ -335,3 +358,8 @@ class ScenarioGymEnv(gym.Env):
             return f"agent_count={count} agents={self.agent_ids}"
         sample = self.agent_ids[:sample_size] + ["..."] + self.agent_ids[-sample_size:]
         return f"agent_count={count} agents_sample={sample}"
+
+    def team_summary(self):
+        teams = sorted({team_id for team_id in self.agent_team_ids if team_id is not None}, key=str)
+        missing = sum(team_id is None for team_id in self.agent_team_ids)
+        return f"teams={teams} unassigned={missing}"

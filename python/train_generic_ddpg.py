@@ -5,6 +5,7 @@ import random
 import sys
 import sysconfig
 from pathlib import Path
+from queue import Empty
 
 
 def configure_tensorflow_runtime():
@@ -44,14 +45,32 @@ import tensorflow as tf
 
 from godot_process_manager import GodotProcessManager
 from models import build_continuous_actor, build_continuous_critic
+from opponent_pool import OpponentPool, add_opponent_pool_arguments, validate_team_layout
 from replay_buffer import ReplayBuffer
 from scenario_gym_env import ScenarioGymEnv
 from training_support import (
+    AsyncCollectorPool,
+    AsyncEventScheduler,
+    AsyncEpisodeEvent,
+    AsyncStepEvent,
+    AsyncWorkerDoneEvent,
+    AsyncWorkerErrorEvent,
+    ParallelEnvStepper,
+    PolicySnapshot,
+    BestCheckpointTracker,
+    add_best_checkpoint_arguments,
+    add_collector_arguments,
+    add_parallel_env_arguments,
     add_log_format_argument,
+    add_tensorflow_runtime_arguments,
+    build_async_worker,
+    configure_tensorflow_devices,
+    episode_step_indices,
     print_episode_metrics,
     resolve_resume_checkpoint,
     restore_replay_buffer,
     save_replay_snapshot,
+    validate_async_arguments,
 )
 
 
@@ -60,7 +79,12 @@ def parse_args():
     parser.add_argument("--num-envs", type=int, default=1)
     parser.add_argument("--base-port", type=int, default=6200)
     parser.add_argument("--num-episodes", type=int, default=500)
-    parser.add_argument("--max-steps-per-episode", type=int, default=500)
+    parser.add_argument(
+        "--max-steps-per-episode",
+        type=int,
+        default=500,
+        help="Maximum episode steps shared with Godot; use 0 to rely only on terminal conditions.",
+    )
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--tau", type=float, default=0.005)
@@ -114,12 +138,25 @@ def parse_args():
     parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--godot-debug", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--log-details", action=argparse.BooleanOptionalAction, default=False)
+    add_collector_arguments(parser)
+    add_parallel_env_arguments(parser)
+    add_opponent_pool_arguments(parser)
+    add_best_checkpoint_arguments(parser)
     add_log_format_argument(parser)
+    add_tensorflow_runtime_arguments(parser)
     return parser.parse_args()
 
 
-def describe_tensorflow_backend():
-    print(f"TensorFlow GPU devices: {tf.config.list_physical_devices('GPU')}", flush=True)
+def describe_tensorflow_backend(args):
+    devices, memory_growth = configure_tensorflow_devices(
+        tf,
+        memory_growth=args.gpu_memory_growth,
+        system_name=platform.system(),
+    )
+    print(
+        f"TensorFlow GPU devices: {devices} memory_growth={'enabled' if memory_growth else 'disabled'}",
+        flush=True,
+    )
     if platform.system() == "Darwin":
         print(f"macOS machine: {platform.machine()}", flush=True)
 
@@ -438,6 +475,129 @@ def format_float_list(values, precision=3):
     return "[" + ", ".join(f"{float(value):.{precision}f}" for value in values) + "]"
 
 
+def create_continuous_async_worker(
+    args,
+    envs,
+    local_models,
+    policy_snapshot,
+    action_size,
+    action_selector,
+):
+    def begin_episode(worker_id, env, episode):
+        reset_progress_max = curriculum_reset_progress_max(episode, args)
+        scenario_config = {
+            "training_episode": episode,
+            "max_steps": args.max_steps_per_episode,
+        }
+        if reset_progress_max is not None:
+            scenario_config.update(reset_progress_min=0.0, reset_progress_max=reset_progress_max)
+        env.configure(**scenario_config)
+        obs, info = env.reset(seed=args.episode_seed_multiplier * episode + worker_id)
+        agent_count = len(env.agent_ids) if args.multi_agent else 1
+        state = {
+            "obs": obs,
+            "done": False,
+            "reset_progress_max": reset_progress_max,
+            "use_random_exploration": episode < max(0, args.random_exploration_episodes),
+        }
+        if args.multi_agent:
+            state.update({
+                "done_mask": np.asarray(
+                    info.get("per_agent_done", np.zeros((agent_count,), dtype=np.bool_)),
+                    dtype=np.bool_,
+                ),
+                "ep_reward": np.zeros((agent_count,), dtype=np.float32),
+                "action_sum": np.zeros((agent_count, action_size), dtype=np.float32),
+                "action_count": np.zeros((agent_count, 1), dtype=np.float32),
+                "previous_action": np.full((agent_count, action_size), np.nan, dtype=np.float32),
+                "action_delta_sum": np.zeros((agent_count, action_size), dtype=np.float32),
+                "action_delta_count": np.zeros((agent_count, 1), dtype=np.float32),
+                "max_track_progress": np.zeros((agent_count,), dtype=np.float32),
+                "last_track_progress": np.zeros((agent_count,), dtype=np.float32),
+                "finish_reached": np.zeros((agent_count,), dtype=np.bool_),
+                "collision_seen": np.zeros((agent_count,), dtype=np.bool_),
+                "collision_count": np.zeros((agent_count,), dtype=np.int32),
+                "stalled_seen": np.zeros((agent_count,), dtype=np.bool_),
+                "stalled_count": np.zeros((agent_count,), dtype=np.int32),
+            })
+        else:
+            state.update({
+                "done_mask": None,
+                "ep_reward": 0.0,
+                "action_sum": np.zeros((action_size,), dtype=np.float32),
+                "action_count": 0.0,
+                "previous_action": np.full((action_size,), np.nan, dtype=np.float32),
+                "action_delta_sum": np.zeros((action_size,), dtype=np.float32),
+                "action_delta_count": 0.0,
+                "max_track_progress": 0.0,
+                "last_track_progress": 0.0,
+                "finish_reached": False,
+                "collision_seen": False,
+                "collision_count": 0,
+                "stalled_seen": False,
+                "stalled_count": 0,
+            })
+        return state
+
+    def choose_action(worker_id, env, episode, step_idx, local_model, state):
+        return action_selector(worker_id, env, episode, step_idx, local_model, state)
+
+    def process_step(_worker_id, env, _episode, _step_idx, state, action, step_result):
+        next_obs, reward, terminated, truncated, info = step_result
+        done = bool(terminated or truncated)
+        transitions = []
+        if args.multi_agent:
+            rewards = np.asarray(info.get("per_agent_rewards"), dtype=np.float32)
+            done_mask = np.asarray(info.get("per_agent_done"), dtype=np.bool_)
+            infos = list(info.get("per_agent_infos", []))
+            for agent_idx in range(len(env.agent_ids)):
+                was_done = bool(state["done_mask"][agent_idx])
+                if was_done and done_mask[agent_idx]:
+                    continue
+                agent_info = infos[agent_idx] if agent_idx < len(infos) else {}
+                update_episode_diagnostics(state, agent_info, agent_idx=agent_idx)
+                transitions.append((
+                    state["obs"][agent_idx],
+                    np.asarray(action[agent_idx], dtype=np.float32),
+                    float(rewards[agent_idx]),
+                    next_obs[agent_idx],
+                    bool(done_mask[agent_idx] or done),
+                ))
+                state["ep_reward"][agent_idx] += rewards[agent_idx]
+                state["action_sum"][agent_idx] += action[agent_idx]
+                state["action_count"][agent_idx, 0] += 1.0
+                previous = state["previous_action"][agent_idx]
+                if np.all(np.isfinite(previous)):
+                    state["action_delta_sum"][agent_idx] += np.abs(action[agent_idx] - previous)
+                    state["action_delta_count"][agent_idx, 0] += 1.0
+                state["previous_action"][agent_idx] = action[agent_idx]
+            state["done_mask"] = done_mask
+        else:
+            update_episode_diagnostics(state, info.get("agent_info", {}))
+            transitions.append((state["obs"], np.asarray(action, dtype=np.float32), float(reward), next_obs, done))
+            state["ep_reward"] += float(reward)
+            state["action_sum"] += action
+            state["action_count"] += 1.0
+            if np.all(np.isfinite(state["previous_action"])):
+                state["action_delta_sum"] += np.abs(action - state["previous_action"])
+                state["action_delta_count"] += 1.0
+            state["previous_action"] = action
+        state["obs"] = next_obs
+        state["done"] = done
+        return transitions
+
+    return build_async_worker(
+        local_models,
+        policy_snapshot,
+        args.max_steps_per_episode,
+        args.async_policy_sync_steps,
+        begin_episode,
+        choose_action,
+        process_step,
+        lambda _worker_id, _env, _episode, state: state,
+    )
+
+
 def soft_update(target_model, source_model, tau):
     target_weights = target_model.get_weights()
     source_weights = source_model.get_weights()
@@ -500,14 +660,54 @@ def train_step(
     return actor_loss_value, float(critic_loss.numpy())
 
 
-def save_training_checkpoint(checkpoint, checkpoint_manager, buffer, episode, noise_std, args, final=False):
+def save_training_checkpoint(
+    checkpoint,
+    checkpoint_manager,
+    buffer,
+    episode,
+    noise_std,
+    args,
+    final=False,
+    save_replay=True,
+):
     checkpoint.episode.assign(episode)
     checkpoint.noise_std.assign(noise_std)
     saved_path = checkpoint_manager.save(checkpoint_number=episode)
     print(f"Saved {'final checkpoint' if final else 'checkpoint'}: {saved_path}", flush=True)
-    if args.save_replay_buffer and len(buffer) > 0:
-        save_replay_snapshot(saved_path, checkpoint_manager, buffer)
+    if save_replay and args.save_replay_buffer and len(buffer) > 0:
+        save_replay_snapshot(
+            saved_path,
+            checkpoint_manager,
+            buffer,
+            asynchronous=args.collector_mode == "async" and args.async_replay_save,
+        )
     return saved_path
+
+
+def maybe_update_best_checkpoint(
+    tracker,
+    best_checkpoint_manager,
+    checkpoint,
+    buffer,
+    candidate_path,
+    episode,
+    noise_std,
+    args,
+):
+    result = tracker.evaluate(candidate_path, episode)
+    if result is None or not tracker.is_improvement(result):
+        return None
+    best_path = save_training_checkpoint(
+        checkpoint,
+        best_checkpoint_manager,
+        buffer,
+        episode,
+        noise_std,
+        args,
+        save_replay=False,
+    )
+    tracker.record_best(result, best_path)
+    return best_path
 
 
 def load_demonstration_arrays(paths, obs_dim, action_size, max_transitions=0):
@@ -567,6 +767,278 @@ def load_demonstration_arrays(paths, obs_dim, action_size, max_transitions=0):
     }
 
 
+def run_async_ddpg(
+    args,
+    envs,
+    actor,
+    critic,
+    target_actor,
+    target_critic,
+    actor_optimizer,
+    critic_optimizer,
+    buffer,
+    checkpoint,
+    checkpoint_manager,
+    best_checkpoint_manager,
+    best_tracker,
+    start_episode,
+    start_noise_std,
+    action_low,
+    action_high,
+    random_action_low,
+    random_action_high,
+    actor_drive_indices,
+    critic_warmup_target,
+):
+    validate_async_arguments(args)
+    obs_dim = envs[0].obs_dim
+    action_size = envs[0].action_size
+    with tf.device("/CPU:0"):
+        local_models = [
+            build_continuous_actor(obs_dim=obs_dim, action_size=action_size)
+            for _env in envs
+        ]
+    snapshot = PolicySnapshot(actor.get_weights())
+    rngs = [np.random.default_rng(args.env_seed_base + 100_003 * idx) for idx in range(len(envs))]
+
+    def noise_for_episode(episode):
+        elapsed = max(0, int(episode) - int(start_episode))
+        return max(
+            args.exploration_noise_min,
+            float(start_noise_std) * (args.exploration_noise_decay ** elapsed),
+        )
+
+    def action_selector(worker_id, env, episode, _step_idx, local_actor, state):
+        rng = rngs[worker_id]
+        if state["use_random_exploration"]:
+            action = sample_exploratory_action(
+                action_low,
+                action_high,
+                env.action_names,
+                rng=rng,
+                num_agents=len(env.agent_ids) if args.multi_agent else None,
+                drive_min=args.random_drive_min,
+                steering_abs_max=args.random_steering_abs_max,
+                exploration_low=random_action_low,
+                exploration_high=random_action_high,
+            )
+            if args.multi_agent:
+                action[state["done_mask"]] = action_low
+        else:
+            observations = np.asarray(state["obs"], dtype=np.float32)
+            is_batch = args.multi_agent
+            if not is_batch:
+                observations = np.expand_dims(observations, axis=0)
+            raw_action = local_actor(observations, training=False).numpy()
+            action = scale_action_numpy(raw_action, action_low, action_high)
+            noise_std = noise_for_episode(episode)
+            noise_state = state.get("exploration_noise_state")
+            expected_shape = action.shape
+            if noise_state is None:
+                noise_state = np.zeros(expected_shape, dtype=np.float32)
+            if args.exploration_noise_kind == "ou":
+                noise_state += args.ou_theta * (0.0 - noise_state) + rng.normal(
+                    0.0, noise_std, size=expected_shape
+                )
+                noise = noise_state
+                state["exploration_noise_state"] = noise_state
+            else:
+                noise = rng.normal(0.0, noise_std, size=expected_shape)
+            action = np.clip(action + noise, action_low, action_high).astype(np.float32)
+            if not is_batch:
+                action = action[0]
+            elif np.any(state["done_mask"]):
+                action[state["done_mask"]] = action_low
+        return smooth_actions(
+            action,
+            state["previous_action"],
+            action_low,
+            action_high,
+            args.action_smoothing,
+        )
+
+    worker = create_continuous_async_worker(
+        args,
+        envs,
+        local_models,
+        snapshot,
+        action_size,
+        action_selector,
+    )
+    pool = AsyncCollectorPool(
+        envs,
+        worker,
+        start_episode,
+        args.num_episodes,
+        queue_capacity=args.async_queue_capacity,
+    )
+    scheduler = AsyncEventScheduler(args)
+    print(
+        f"Collector mode: async workers={len(envs)} queue={args.async_queue_capacity} "
+        f"policy_sync_steps={args.async_policy_sync_steps} "
+        f"update_basis={scheduler.update_basis} update_every={scheduler.update_every} "
+        f"updates_per_interval={scheduler.updates_per_interval} "
+        f"max_updates_per_env_step={scheduler.max_updates_per_env_step}",
+        flush=True,
+    )
+    completed = int(start_episode)
+    done_workers = 0
+    learner_updates = 0
+    critic_updates_since_resume = 0
+    actor_losses = []
+    critic_losses = []
+    last_saved_episode = None
+    interrupted = False
+    pool.start()
+    try:
+        while done_workers < len(envs):
+            try:
+                event = scheduler.next_event(pool, timeout=0.2)
+            except Empty:
+                continue
+            if isinstance(event, AsyncWorkerErrorEvent):
+                raise RuntimeError(f"Async collector {event.worker_id} failed") from event.error
+            if isinstance(event, AsyncWorkerDoneEvent):
+                done_workers += 1
+                continue
+            if isinstance(event, AsyncStepEvent):
+                step_events = scheduler.drain_step_events(pool, event)
+                for step_event in step_events:
+                    for transition in step_event.transitions:
+                        buffer.add(*transition)
+                updates_due = scheduler.ingest(step_events)
+                updates_performed = 0
+                if len(buffer) >= max(args.replay_warmup, args.batch_size):
+                    for _update in range(updates_due):
+                        update_actor = critic_updates_since_resume >= critic_warmup_target
+                        actor_loss, critic_loss = train_step(
+                            actor,
+                            critic,
+                            target_actor,
+                            target_critic,
+                            actor_optimizer,
+                            critic_optimizer,
+                            buffer,
+                            args.batch_size,
+                            args.gamma,
+                            action_low,
+                            action_high,
+                            drive_indices=actor_drive_indices,
+                            actor_drive_regularization=args.actor_drive_regularization,
+                            actor_drive_target=args.actor_drive_target,
+                            update_actor=update_actor,
+                        )
+                        critic_losses.append(critic_loss)
+                        critic_updates_since_resume += 1
+                        learner_updates += 1
+                        updates_performed += 1
+                        if actor_loss is not None:
+                            actor_losses.append(actor_loss)
+                        if learner_updates % args.target_update_every == 0:
+                            soft_update(target_actor, actor, args.tau)
+                            soft_update(target_critic, critic, args.tau)
+                        if learner_updates % args.async_policy_publish_updates == 0:
+                            snapshot.publish(actor.get_weights())
+                scheduler.record_updates(updates_performed)
+                continue
+
+            if not isinstance(event, AsyncEpisodeEvent):
+                continue
+            completed += 1
+            state = event.payload
+            noise_std = noise_for_episode(completed)
+            reward_stats = summarize_rewards([state])
+            diagnostics = summarize_episode_diagnostics([state], args.multi_agent)
+            if args.multi_agent:
+                mean_actions = [(state["action_sum"] / np.maximum(state["action_count"], 1.0)).tolist()]
+                controlled_agents = len(state["ep_reward"])
+            else:
+                mean_actions = [(state["action_sum"] / max(float(state["action_count"]), 1.0)).tolist()]
+                controlled_agents = 1
+            mean_action = summarize_actions(mean_actions)
+            mean_delta = summarize_action_deltas([state], args.multi_agent)
+            warmup_left = max(0, critic_warmup_target - critic_updates_since_resume)
+            throughput = scheduler.throughput(pool)
+            print_episode_metrics(event.episode, [
+                ("mode", [
+                    ("collector", "async"),
+                    ("worker", event.worker_id),
+                    ("exploration", "random" if state["use_random_exploration"] else "policy"),
+                    ("noise", f"{noise_std:.3f}"),
+                ]),
+                ("outcome", [
+                    ("reward", f"{reward_stats['mean']:.3f} [{reward_stats['min']:.3f}, {reward_stats['max']:.3f}]"),
+                    ("progress", f"mean:{diagnostics['progress_mean']:.3f} max:{diagnostics['progress_max']:.3f}"),
+                ]),
+                ("agents", [
+                    ("finish", f"{diagnostics['finishes']}/{controlled_agents}"),
+                    ("collision", f"{diagnostics['collisions']}/{controlled_agents}"),
+                    ("stall", f"{diagnostics['stalls']}/{controlled_agents}"),
+                ]),
+                ("actions", [("mean", format_float_list(mean_action)), ("delta", format_float_list(mean_delta))]),
+                ("training", [
+                    ("completed", f"{completed}/{args.num_episodes}"),
+                    ("queue", f"{throughput['queue_size']}/{throughput['queue_capacity']} ({throughput['queue_saturation']:.0%})"),
+                    ("replay", f"{len(buffer)}/{args.replay_capacity}"),
+                    ("critic_updates", len(critic_losses)),
+                    ("policy_updates", len(actor_losses)),
+                    ("warmup_left", warmup_left),
+                    ("actor_loss", f"{float(np.mean(actor_losses)) if actor_losses else 0.0:.5f}"),
+                    ("critic_loss", f"{float(np.mean(critic_losses)) if critic_losses else 0.0:.5f}"),
+                    ("policy_version", snapshot.version),
+                ]),
+                ("throughput", [
+                    ("env_steps_s", f"{throughput['env_steps_s']:.1f}"),
+                    ("transitions_s", f"{throughput['transitions_s']:.1f}"),
+                    ("transitions_step", f"{throughput['transitions_per_env_step']:.1f}"),
+                    ("updates_s", f"{throughput['updates_s']:.1f}"),
+                    ("updates_throttled", throughput["throttled_updates"]),
+                ]),
+            ], args.log_format)
+            actor_losses.clear()
+            critic_losses.clear()
+            if args.checkpoint_every > 0 and completed % args.checkpoint_every == 0:
+                saved_path = save_training_checkpoint(
+                    checkpoint, checkpoint_manager, buffer, completed, noise_std, args
+                )
+                last_saved_episode = completed
+            else:
+                saved_path = None
+            if best_tracker.should_evaluate(completed):
+                if saved_path is None:
+                    saved_path = save_training_checkpoint(
+                        checkpoint, checkpoint_manager, buffer, completed, noise_std, args
+                    )
+                    last_saved_episode = completed
+                maybe_update_best_checkpoint(
+                    best_tracker,
+                    best_checkpoint_manager,
+                    checkpoint,
+                    buffer,
+                    saved_path,
+                    completed,
+                    noise_std,
+                    args,
+                )
+    except KeyboardInterrupt:
+        interrupted = True
+        print("\nInterrupt received: stopping async DDPG collectors...", flush=True)
+    finally:
+        pool.close()
+
+    noise_std = noise_for_episode(completed)
+    if last_saved_episode != completed:
+        save_training_checkpoint(
+            checkpoint, checkpoint_manager, buffer, completed, noise_std, args, final=True
+        )
+    if interrupted:
+        print(
+            f"Interrupted async training saved at completed_episodes={completed}",
+            flush=True,
+        )
+    return completed, noise_std
+
+
 def pretrain_actor_behavior_cloning(actor, demo_data, epochs, batch_size, learning_rate, action_low, action_high):
     optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
     obs = demo_data["obs"]
@@ -605,7 +1077,9 @@ def pretrain_actor_behavior_cloning(actor, demo_data, epochs, batch_size, learni
 
 def main():
     args = parse_args()
-    describe_tensorflow_backend()
+    validate_async_arguments(args)
+    best_tracker = BestCheckpointTracker(args, "ddpg")
+    describe_tensorflow_backend(args)
     random.seed(args.env_seed_base)
     np.random.seed(args.env_seed_base)
     tf.random.set_seed(args.env_seed_base)
@@ -622,11 +1096,18 @@ def main():
     buffer = None
     checkpoint = None
     checkpoint_manager = None
+    best_checkpoint_manager = None
+    stepper = None
     start_episode = 0
     last_completed_episode = None
     noise_std = args.exploration_noise
     try:
-        manager.start_many(ports, headless=args.headless, debug=args.godot_debug)
+        manager.start_many(
+            ports,
+            headless=args.headless,
+            debug=args.godot_debug,
+            render_env_count=args.render_env_count,
+        )
         print(f"Started Godot instances on ports {ports}", flush=True)
         envs = [
             ScenarioGymEnv(
@@ -638,6 +1119,9 @@ def main():
             )
             for idx, port in enumerate(ports)
         ]
+        if args.collector_mode == "sync":
+            stepper = ParallelEnvStepper(len(envs), args.parallel_env_steps)
+            print(f"Environment stepping: {'parallel' if stepper.enabled else 'sequential'}", flush=True)
 
         env0 = envs[0]
         if env0.action_type != "continuous":
@@ -654,7 +1138,8 @@ def main():
         )
         print(
             f"Scenario spec: agent_id={env0.agent_id} {env0.agent_summary()} multi_agent={args.multi_agent} "
-            f"obs_dim={obs_dim} action_size={action_size} action_names={env0.action_names}",
+            f"{env0.team_summary()} obs_dim={obs_dim} action_size={action_size} "
+            f"action_names={env0.action_names}",
             flush=True,
         )
         print(
@@ -710,6 +1195,12 @@ def main():
             directory=args.checkpoint_dir,
             max_to_keep=args.keep_checkpoints,
         )
+        if best_tracker.enabled:
+            best_checkpoint_manager = tf.train.CheckpointManager(
+                checkpoint,
+                directory=str(best_tracker.directory),
+                max_to_keep=args.keep_best_checkpoints,
+            )
         resume_checkpoint = resolve_resume_checkpoint(args, checkpoint_manager)
         restored_replay_count = 0
         if resume_checkpoint:
@@ -774,14 +1265,64 @@ def main():
                 flush=True,
             )
 
+        opponent_teams = validate_team_layout(envs, args.opponent_pool)
+        opponent_pool = OpponentPool(
+            args,
+            algorithm="ddpg",
+            model_factory=lambda: build_continuous_actor(obs_dim=obs_dim, action_size=action_size),
+            metadata={"obs_dim": obs_dim, "action_size": action_size},
+        )
+        if opponent_pool.enabled:
+            print(
+                f"Opponent pool: dir={opponent_pool.directory} teams={opponent_teams} "
+                f"snapshots={len(opponent_pool.entries)} sampling={opponent_pool.sampling}",
+                flush=True,
+            )
+
+        if args.collector_mode == "async":
+            last_completed_episode, noise_std = run_async_ddpg(
+                args,
+                envs,
+                actor,
+                critic,
+                target_actor,
+                target_critic,
+                actor_optimizer,
+                critic_optimizer,
+                buffer,
+                checkpoint,
+                checkpoint_manager,
+                best_checkpoint_manager,
+                best_tracker,
+                start_episode,
+                noise_std,
+                action_low,
+                action_high,
+                random_action_low,
+                random_action_high,
+                actor_drive_indices,
+                critic_warmup_target,
+            )
+            actor.save_weights(args.actor_weights_path)
+            critic.save_weights(args.critic_weights_path)
+            print(f"Saved actor weights: {args.actor_weights_path}", flush=True)
+            print(f"Saved critic weights: {args.critic_weights_path}", flush=True)
+            return
+
         last_saved_episode = None
         for episode in range(start_episode, args.num_episodes):
+            opponent_match = opponent_pool.start_episode(actor, episode)
             use_random_exploration = episode < max(0, args.random_exploration_episodes)
             reset_progress_max = curriculum_reset_progress_max(episode, args)
             env_states = []
             for env_idx, env in enumerate(envs):
+                scenario_config = {
+                    "training_episode": episode,
+                    "max_steps": args.max_steps_per_episode,
+                }
                 if reset_progress_max is not None:
-                    env.configure(reset_progress_min=0.0, reset_progress_max=reset_progress_max)
+                    scenario_config.update(reset_progress_min=0.0, reset_progress_max=reset_progress_max)
+                env.configure(**scenario_config)
                 obs, info = env.reset(seed=args.episode_seed_multiplier * episode + env_idx)
                 if args.multi_agent:
                     done_mask = np.asarray(info.get("per_agent_done", np.zeros((len(env.agent_ids),), dtype=np.bool_)), dtype=np.bool_)
@@ -799,6 +1340,13 @@ def main():
                     collision_count = np.zeros((len(env.agent_ids),), dtype=np.int32)
                     stalled_seen = np.zeros((len(env.agent_ids),), dtype=np.bool_)
                     stalled_count = np.zeros((len(env.agent_ids),), dtype=np.int32)
+                    learner_mask = opponent_pool.learner_mask(
+                        env.agent_team_ids,
+                        opponent_teams,
+                        episode,
+                        env_idx,
+                        use_current_policy=opponent_match.use_current_policy,
+                    )
                 else:
                     done_mask = None
                     ep_reward = 0.0
@@ -815,6 +1363,7 @@ def main():
                     collision_count = 0
                     stalled_seen = False
                     stalled_count = 0
+                    learner_mask = None
                 env_states.append({
                     "obs": obs,
                     "done": False,
@@ -833,14 +1382,16 @@ def main():
                     "collision_count": collision_count,
                     "stalled_seen": stalled_seen,
                     "stalled_count": stalled_count,
+                    "learner_mask": learner_mask,
                 })
 
             actor_losses = []
             critic_losses = []
-            for step_idx in range(args.max_steps_per_episode):
+            for step_idx in episode_step_indices(args.max_steps_per_episode):
                 if all(state["done"] for state in env_states):
                     break
 
+                step_requests = []
                 for env, state in zip(envs, env_states):
                     if state["done"]:
                         continue
@@ -909,7 +1460,26 @@ def main():
                                 args.action_smoothing,
                             )
 
-                    next_obs, reward, terminated, truncated, info = env.step(action)
+                    if args.multi_agent and opponent_match.model is not None:
+                        opponent_action = select_actions(
+                            opponent_match.model,
+                            state["obs"],
+                            state["done_mask"],
+                            action_low,
+                            action_high,
+                            0.0,
+                            noise_kind=args.exploration_noise_kind,
+                        )
+                        action = opponent_pool.merge_actions(
+                            action,
+                            opponent_action,
+                            state["learner_mask"],
+                        )
+
+                    step_requests.append((env, state, action))
+
+                for env, state, action, step_result in stepper.step(step_requests):
+                    next_obs, reward, terminated, truncated, info = step_result
                     done = bool(terminated or truncated)
 
                     if args.multi_agent:
@@ -921,13 +1491,14 @@ def main():
                                 continue
                             agent_info = per_agent_infos[agent_idx] if agent_idx < len(per_agent_infos) else {}
                             update_episode_diagnostics(state, agent_info, agent_idx=agent_idx)
-                            buffer.add(
-                                state["obs"][agent_idx],
-                                action[agent_idx],
-                                float(per_agent_rewards[agent_idx]),
-                                next_obs[agent_idx],
-                                bool(per_agent_done[agent_idx] or done),
-                            )
+                            if state["learner_mask"][agent_idx]:
+                                buffer.add(
+                                    state["obs"][agent_idx],
+                                    action[agent_idx],
+                                    float(per_agent_rewards[agent_idx]),
+                                    next_obs[agent_idx],
+                                    bool(per_agent_done[agent_idx] or done),
+                                )
                             state["ep_reward"][agent_idx] += per_agent_rewards[agent_idx]
                             state["action_sum"][agent_idx] += action[agent_idx]
                             state["action_count"][agent_idx, 0] += 1.0
@@ -951,7 +1522,7 @@ def main():
                     state["obs"] = next_obs
                     state["done"] = done
 
-                    if len(buffer) >= args.replay_warmup:
+                    if len(buffer) >= max(args.replay_warmup, args.batch_size):
                         update_actor = critic_updates_since_resume >= critic_warmup_target
                         actor_loss, critic_loss = train_step(
                             actor,
@@ -981,7 +1552,7 @@ def main():
                                 flush=True,
                             )
 
-                if len(buffer) >= args.replay_warmup and (step_idx + 1) % args.target_update_every == 0:
+                if len(buffer) >= max(args.replay_warmup, args.batch_size) and (step_idx + 1) % args.target_update_every == 0:
                     soft_update(target_actor, actor, args.tau)
                     soft_update(target_critic, critic, args.tau)
 
@@ -1013,6 +1584,7 @@ def main():
                 ("mode", [
                     ("exploration", "random" if use_random_exploration else "policy"),
                     ("noise", f"{noise_std:.3f}"),
+                    ("opponent", opponent_match.label),
                     *(([("reset_progress_max", f"{reset_progress_max:.3f}")]) if reset_progress_max is not None else []),
                 ]),
                 ("outcome", [
@@ -1043,10 +1615,33 @@ def main():
                     flush=True,
                 )
             last_completed_episode = episode + 1
+            snapshot_path = opponent_pool.snapshot(actor, episode + 1)
+            if snapshot_path is not None:
+                print(f"Saved opponent snapshot: {snapshot_path}", flush=True)
 
             if args.checkpoint_every > 0 and (episode + 1) % args.checkpoint_every == 0:
-                save_training_checkpoint(checkpoint, checkpoint_manager, buffer, episode + 1, noise_std, args)
+                saved_path = save_training_checkpoint(
+                    checkpoint, checkpoint_manager, buffer, episode + 1, noise_std, args
+                )
                 last_saved_episode = episode + 1
+            else:
+                saved_path = None
+            if best_tracker.should_evaluate(episode + 1):
+                if saved_path is None:
+                    saved_path = save_training_checkpoint(
+                        checkpoint, checkpoint_manager, buffer, episode + 1, noise_std, args
+                    )
+                    last_saved_episode = episode + 1
+                maybe_update_best_checkpoint(
+                    best_tracker,
+                    best_checkpoint_manager,
+                    checkpoint,
+                    buffer,
+                    saved_path,
+                    episode + 1,
+                    noise_std,
+                    args,
+                )
 
         if last_saved_episode != args.num_episodes:
             save_training_checkpoint(checkpoint, checkpoint_manager, buffer, args.num_episodes, noise_std, args, final=True)
@@ -1068,6 +1663,13 @@ def main():
         else:
             print("Training state was not initialized; no checkpoint was written.", flush=True)
     finally:
+        if stepper is not None:
+            stepper.close()
+        if buffer is not None:
+            try:
+                buffer.wait_for_pending_saves()
+            except Exception as exc:
+                print(f"ERROR waiting for replay save: {exc}", flush=True)
         for env in envs:
             try:
                 env.close()

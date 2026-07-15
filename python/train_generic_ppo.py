@@ -7,6 +7,7 @@ import sys
 import sysconfig
 from collections import OrderedDict
 from pathlib import Path
+from queue import Empty
 
 
 def configure_tensorflow_runtime():
@@ -46,8 +47,27 @@ import tensorflow as tf
 
 from godot_process_manager import GodotProcessManager
 from models import build_hybrid_actor_critic
+from opponent_pool import OpponentPool, add_opponent_pool_arguments, validate_team_layout
 from scenario_gym_env import ScenarioGymEnv
-from training_support import add_log_format_argument, print_episode_metrics, resolve_resume_checkpoint
+from training_support import (
+    AsyncCollectorPool,
+    AsyncEpisodeEvent,
+    AsyncWorkerDoneEvent,
+    AsyncWorkerErrorEvent,
+    ParallelEnvStepper,
+    PolicySnapshot,
+    BestCheckpointTracker,
+    add_best_checkpoint_arguments,
+    add_collector_arguments,
+    add_log_format_argument,
+    add_parallel_env_arguments,
+    add_tensorflow_runtime_arguments,
+    configure_tensorflow_devices,
+    episode_step_indices,
+    print_episode_metrics,
+    resolve_resume_checkpoint,
+    validate_async_arguments,
+)
 
 
 LOG_2PI = np.float32(np.log(2.0 * np.pi))
@@ -58,7 +78,12 @@ def parse_args():
     parser.add_argument("--num-envs", type=int, default=1)
     parser.add_argument("--base-port", type=int, default=6200)
     parser.add_argument("--num-episodes", type=int, default=500)
-    parser.add_argument("--max-steps-per-episode", type=int, default=500)
+    parser.add_argument(
+        "--max-steps-per-episode",
+        type=int,
+        default=500,
+        help="Maximum episode steps shared with Godot; use 0 to rely only on terminal conditions.",
+    )
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--ppo-epochs", type=int, default=4)
     parser.add_argument("--gamma", type=float, default=0.99)
@@ -84,7 +109,12 @@ def parse_args():
     parser.add_argument("--godot-scene", default=None)
     parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--godot-debug", action=argparse.BooleanOptionalAction, default=False)
+    add_collector_arguments(parser)
+    add_opponent_pool_arguments(parser)
+    add_best_checkpoint_arguments(parser)
+    add_parallel_env_arguments(parser)
     add_log_format_argument(parser)
+    add_tensorflow_runtime_arguments(parser)
     return parser.parse_args()
 
 
@@ -95,8 +125,31 @@ def save_training_checkpoint(checkpoint, checkpoint_manager, episode, final=Fals
     return saved_path
 
 
-def describe_tensorflow_backend():
-    print(f"TensorFlow GPU devices: {tf.config.list_physical_devices('GPU')}", flush=True)
+def maybe_update_best_checkpoint(
+    tracker,
+    best_checkpoint_manager,
+    checkpoint,
+    candidate_path,
+    episode,
+):
+    result = tracker.evaluate(candidate_path, episode)
+    if result is None or not tracker.is_improvement(result):
+        return None
+    best_path = save_training_checkpoint(checkpoint, best_checkpoint_manager, episode)
+    tracker.record_best(result, best_path)
+    return best_path
+
+
+def describe_tensorflow_backend(args):
+    devices, memory_growth = configure_tensorflow_devices(
+        tf,
+        memory_growth=args.gpu_memory_growth,
+        system_name=platform.system(),
+    )
+    print(
+        f"TensorFlow GPU devices: {devices} memory_growth={'enabled' if memory_growth else 'disabled'}",
+        flush=True,
+    )
     if platform.system() == "Darwin":
         print(f"macOS machine: {platform.machine()}", flush=True)
 
@@ -412,9 +465,261 @@ def ppo_update(model, log_std, optimizer, batch, action_meta, args):
     }
 
 
+def run_async_ppo(
+    args,
+    envs,
+    model,
+    log_std,
+    optimizer,
+    action_meta,
+    obs_dim,
+    checkpoint,
+    checkpoint_manager,
+    best_checkpoint_manager,
+    best_tracker,
+    start_episode,
+):
+    validate_async_arguments(args)
+    with tf.device("/CPU:0"):
+        local_models = [
+            build_hybrid_actor_critic(
+                obs_dim=obs_dim,
+                discrete_sizes=action_meta["discrete_sizes"],
+                continuous_size=action_meta["continuous_size"],
+            )
+            for _env in envs
+        ]
+    snapshot = PolicySnapshot(model.get_weights(), state=log_std.numpy())
+
+    def worker(worker_id, env, _allocator, put, stop_event):
+        local_model = local_models[worker_id]
+        policy_version = -1
+        for episode in range(start_episode, args.num_episodes):
+            if stop_event.is_set():
+                return
+            policy_version, local_log_std = snapshot.sync_model_with_state(
+                local_model,
+                policy_version,
+            )
+            local_log_std = tf.convert_to_tensor(local_log_std, dtype=tf.float32)
+            env.configure(
+                training_episode=episode,
+                max_steps=args.max_steps_per_episode,
+            )
+            obs, info = env.reset(seed=args.episode_seed_multiplier * episode + worker_id)
+
+            if args.multi_agent:
+                done_mask = np.asarray(
+                    info.get("per_agent_done", np.zeros((len(env.agent_ids),), dtype=np.bool_)),
+                    dtype=np.bool_,
+                )
+                trajectories = {agent_id: new_trajectory() for agent_id in env.agent_ids}
+                episode_reward = np.zeros((len(env.agent_ids),), dtype=np.float32)
+            else:
+                done_mask = None
+                trajectory = new_trajectory()
+                episode_reward = 0.0
+
+            global_done = False
+            for _step_idx in episode_step_indices(args.max_steps_per_episode):
+                if stop_event.is_set() or global_done:
+                    break
+                if args.multi_agent:
+                    action_payload = {}
+                    selected_by_agent = {}
+                    for agent_idx, agent_id in enumerate(env.agent_ids):
+                        if done_mask[agent_idx]:
+                            action_payload[agent_id] = zero_env_action(action_meta)
+                            continue
+                        selected = select_action(
+                            local_model,
+                            local_log_std,
+                            obs[agent_idx],
+                            action_meta,
+                        )
+                        action_payload[agent_id] = selected["env_action"]
+                        selected_by_agent[agent_id] = (
+                            agent_idx,
+                            selected,
+                            obs[agent_idx].copy(),
+                        )
+                    step_result = env.step(action_payload)
+                else:
+                    selected = select_action(local_model, local_log_std, obs, action_meta)
+                    selected_obs = obs.copy()
+                    step_result = env.step(selected["env_action"])
+
+                next_obs, reward, terminated, truncated, step_info = step_result
+                global_done = bool(terminated or truncated)
+                if args.multi_agent:
+                    per_agent_rewards = np.asarray(step_info.get("per_agent_rewards"), dtype=np.float32)
+                    per_agent_done = np.asarray(step_info.get("per_agent_done"), dtype=np.bool_)
+                    episode_reward += per_agent_rewards
+                    for agent_id, (agent_idx, selected, agent_obs) in selected_by_agent.items():
+                        append_transition(
+                            trajectories[agent_id],
+                            agent_obs,
+                            selected,
+                            float(per_agent_rewards[agent_idx]),
+                            bool(global_done or per_agent_done[agent_idx]),
+                        )
+                    done_mask = np.logical_or(done_mask, per_agent_done)
+                    global_done = global_done or bool(np.all(done_mask))
+                else:
+                    append_transition(
+                        trajectory,
+                        selected_obs,
+                        selected,
+                        float(reward),
+                        global_done,
+                    )
+                    episode_reward += float(reward)
+                obs = next_obs
+
+            if stop_event.is_set():
+                return
+            if args.multi_agent:
+                rollout_trajectories = [
+                    trajectory
+                    for trajectory in trajectories.values()
+                    if trajectory_has_samples(trajectory)
+                ]
+                rewards = episode_reward.tolist()
+            else:
+                rollout_trajectories = [trajectory] if trajectory_has_samples(trajectory) else []
+                rewards = episode_reward
+            payload = {
+                "policy_version": policy_version,
+                "trajectories": rollout_trajectories,
+                "rewards": rewards,
+            }
+            if not put(AsyncEpisodeEvent(worker_id, episode, payload)):
+                return
+            if episode + 1 < args.num_episodes:
+                if not snapshot.wait_for_newer(policy_version, stop_event):
+                    return
+
+    pool = AsyncCollectorPool(
+        envs,
+        worker,
+        start_episode,
+        args.num_episodes,
+        queue_capacity=args.async_queue_capacity,
+    )
+    print(
+        f"Collector mode: async on-policy workers={len(envs)} queue={args.async_queue_capacity} "
+        "barrier=policy_generation",
+        flush=True,
+    )
+    completed = int(start_episode)
+    pending = {}
+    last_saved_episode = None
+    interrupted = False
+    done_workers = 0
+    pool.start()
+    try:
+        while completed < args.num_episodes:
+            try:
+                event = pool.get(timeout=0.2)
+            except Empty:
+                if done_workers == len(envs):
+                    raise RuntimeError("All PPO collectors stopped before training completed")
+                continue
+            if isinstance(event, AsyncWorkerErrorEvent):
+                raise RuntimeError(f"Async PPO collector {event.worker_id} failed") from event.error
+            if isinstance(event, AsyncWorkerDoneEvent):
+                done_workers += 1
+                continue
+            if not isinstance(event, AsyncEpisodeEvent):
+                continue
+
+            generation = pending.setdefault(event.episode, {})
+            generation[event.worker_id] = event.payload
+            if event.episode != completed or len(generation) < len(envs):
+                continue
+
+            payloads = [generation[worker_id] for worker_id in range(len(envs))]
+            versions = {payload["policy_version"] for payload in payloads}
+            if len(versions) != 1 or next(iter(versions)) != snapshot.version:
+                raise RuntimeError(
+                    f"PPO generation {completed} mixed policy versions: {sorted(versions)} "
+                    f"current={snapshot.version}"
+                )
+            trajectories = [
+                trajectory
+                for payload in payloads
+                for trajectory in payload["trajectories"]
+            ]
+            rewards_summary = [payload["rewards"] for payload in payloads]
+            update_batch = build_update_batch(
+                trajectories,
+                action_meta,
+                args.gamma,
+                args.gae_lambda,
+            )
+            if update_batch is None:
+                metrics = None
+            else:
+                metrics = ppo_update(model, log_std, optimizer, update_batch, action_meta, args)
+
+            completed += 1
+            policy_version = snapshot.publish(model.get_weights(), state=log_std.numpy())
+            training_metrics = [
+                ("completed", f"{completed}/{args.num_episodes}"),
+                ("queue", pool.events.qsize()),
+                ("policy_version", policy_version),
+            ]
+            if metrics is None:
+                training_metrics.append(("skipped", "no_samples"))
+            else:
+                training_metrics.extend([
+                    ("samples", len(update_batch["obs"])),
+                    ("loss", f"{metrics['loss']:.5f}"),
+                    ("policy_loss", f"{metrics['policy_loss']:.5f}"),
+                    ("value_loss", f"{metrics['value_loss']:.5f}"),
+                    ("entropy", f"{metrics['entropy']:.5f}"),
+                ])
+            print_episode_metrics(event.episode, [
+                ("mode", [("collector", "async_on_policy"), ("workers", len(envs))]),
+                ("outcome", [("rewards", rewards_summary)]),
+                ("training", training_metrics),
+            ], args.log_format)
+            pending.pop(event.episode, None)
+
+            if args.checkpoint_every > 0 and completed % args.checkpoint_every == 0:
+                saved_path = save_training_checkpoint(checkpoint, checkpoint_manager, completed)
+                last_saved_episode = completed
+            else:
+                saved_path = None
+            if best_tracker.should_evaluate(completed):
+                if saved_path is None:
+                    saved_path = save_training_checkpoint(checkpoint, checkpoint_manager, completed)
+                    last_saved_episode = completed
+                maybe_update_best_checkpoint(
+                    best_tracker,
+                    best_checkpoint_manager,
+                    checkpoint,
+                    saved_path,
+                    completed,
+                )
+    except KeyboardInterrupt:
+        interrupted = True
+        print("\nInterrupt received: stopping async PPO collectors...", flush=True)
+    finally:
+        pool.close()
+
+    if last_saved_episode != completed:
+        save_training_checkpoint(checkpoint, checkpoint_manager, completed, final=True)
+    if interrupted:
+        print(f"Interrupted async PPO training saved at episode={completed}", flush=True)
+    return completed
+
+
 def main():
     args = parse_args()
-    describe_tensorflow_backend()
+    validate_async_arguments(args)
+    best_tracker = BestCheckpointTracker(args, "ppo")
+    describe_tensorflow_backend(args)
     random.seed(args.env_seed_base)
     np.random.seed(args.env_seed_base)
     tf.random.set_seed(args.env_seed_base)
@@ -429,10 +734,17 @@ def main():
     model = None
     checkpoint = None
     checkpoint_manager = None
+    best_checkpoint_manager = None
+    stepper = None
     start_episode = 0
     last_completed_episode = None
     try:
-        manager.start_many(ports, headless=args.headless, debug=args.godot_debug)
+        manager.start_many(
+            ports,
+            headless=args.headless,
+            debug=args.godot_debug,
+            render_env_count=args.render_env_count,
+        )
         print(f"Started Godot instances on ports {ports}", flush=True)
         envs = [
             ScenarioGymEnv(
@@ -444,6 +756,9 @@ def main():
             )
             for idx, port in enumerate(ports)
         ]
+        if args.collector_mode == "sync":
+            stepper = ParallelEnvStepper(len(envs), args.parallel_env_steps)
+            print(f"Environment stepping: {'parallel' if stepper.enabled else 'sequential'}", flush=True)
 
         env0 = envs[0]
         if env0.action_type != "hybrid":
@@ -453,7 +768,8 @@ def main():
         action_meta = build_action_metadata(env0.action_space_spec)
         expected_action_space = json.dumps(env0.action_space_spec, sort_keys=True)
         print(
-            f"Scenario spec: agent_id={env0.agent_id} {env0.agent_summary()} multi_agent={args.multi_agent} obs_dim={obs_dim} "
+            f"Scenario spec: agent_id={env0.agent_id} {env0.agent_summary()} multi_agent={args.multi_agent} "
+            f"{env0.team_summary()} obs_dim={obs_dim} "
             f"discrete={action_meta['discrete']} continuous={action_meta['continuous']}",
             flush=True,
         )
@@ -492,6 +808,12 @@ def main():
             directory=args.checkpoint_dir,
             max_to_keep=args.keep_checkpoints,
         )
+        if best_tracker.enabled:
+            best_checkpoint_manager = tf.train.CheckpointManager(
+                checkpoint,
+                directory=str(best_tracker.directory),
+                max_to_keep=args.keep_best_checkpoints,
+            )
         resume_checkpoint = resolve_resume_checkpoint(args, checkpoint_manager)
         if resume_checkpoint:
             checkpoint.restore(resume_checkpoint).expect_partial()
@@ -499,75 +821,173 @@ def main():
             print(f"Resumed checkpoint {resume_checkpoint} from episode={start_episode}", flush=True)
         optimizer.learning_rate.assign(args.learning_rate)
 
+        opponent_teams = validate_team_layout(envs, args.opponent_pool)
+        opponent_pool = OpponentPool(
+            args,
+            algorithm="ppo",
+            model_factory=lambda: build_hybrid_actor_critic(
+                obs_dim=obs_dim,
+                discrete_sizes=action_meta["discrete_sizes"],
+                continuous_size=action_meta["continuous_size"],
+            ),
+            metadata={"obs_dim": obs_dim, "action_space": env0.action_space_spec},
+            state_getter=lambda: log_std.numpy(),
+        )
+        if opponent_pool.enabled:
+            print(
+                f"Opponent pool: dir={opponent_pool.directory} teams={opponent_teams} "
+                f"snapshots={len(opponent_pool.entries)} sampling={opponent_pool.sampling}",
+                flush=True,
+            )
+
+        if args.collector_mode == "async":
+            last_completed_episode = run_async_ppo(
+                args,
+                envs,
+                model,
+                log_std,
+                optimizer,
+                action_meta,
+                obs_dim,
+                checkpoint,
+                checkpoint_manager,
+                best_checkpoint_manager,
+                best_tracker,
+                start_episode,
+            )
+            model.save_weights(args.weights_path)
+            print(f"Saved weights: {args.weights_path}", flush=True)
+            return
+
         last_saved_episode = None
         for episode in range(start_episode, args.num_episodes):
+            opponent_match = opponent_pool.start_episode(model, episode)
+            opponent_log_std = (
+                tf.convert_to_tensor(opponent_match.state, dtype=tf.float32)
+                if opponent_match.state is not None
+                else log_std
+            )
             trajectories = []
             rewards_summary = []
-
+            env_states = []
             for env_idx, env in enumerate(envs):
+                env.configure(
+                    training_episode=episode,
+                    max_steps=args.max_steps_per_episode,
+                )
                 obs, _ = env.reset(seed=args.episode_seed_multiplier * episode + env_idx)
                 if args.multi_agent:
+                    learner_mask = opponent_pool.learner_mask(
+                        env.agent_team_ids,
+                        opponent_teams,
+                        episode,
+                        env_idx,
+                        use_current_policy=opponent_match.use_current_policy,
+                    )
                     env_trajectories = {
                         agent_id: new_trajectory()
-                        for agent_id in env.agent_ids
+                        for agent_idx, agent_id in enumerate(env.agent_ids)
+                        if learner_mask[agent_idx]
                     }
                     done_mask = np.zeros((len(env.agent_ids),), dtype=np.bool_)
                     episode_reward = np.zeros((len(env.agent_ids),), dtype=np.float32)
+                    env_states.append({
+                        "obs": obs,
+                        "done": False,
+                        "learner_mask": learner_mask,
+                        "trajectories": env_trajectories,
+                        "done_mask": done_mask,
+                        "episode_reward": episode_reward,
+                    })
+                else:
+                    env_states.append({
+                        "obs": obs,
+                        "done": False,
+                        "trajectory": new_trajectory(),
+                        "episode_reward": 0.0,
+                    })
 
-                    for _step in range(args.max_steps_per_episode):
+            for _step in episode_step_indices(args.max_steps_per_episode):
+                step_requests = []
+                for env, state in zip(envs, env_states):
+                    if state["done"]:
+                        continue
+                    if args.multi_agent:
                         action_payload = {}
                         selected_by_agent = {}
                         for agent_idx, agent_id in enumerate(env.agent_ids):
-                            if done_mask[agent_idx]:
+                            if state["done_mask"][agent_idx]:
                                 action_payload[agent_id] = zero_env_action(action_meta)
                                 continue
-                            selected = select_action(model, log_std, obs[agent_idx], action_meta)
+                            is_learner = bool(state["learner_mask"][agent_idx])
+                            action_model = model if is_learner else opponent_match.model
+                            action_log_std = log_std if is_learner else opponent_log_std
+                            selected = select_action(
+                                action_model,
+                                action_log_std,
+                                state["obs"][agent_idx],
+                                action_meta,
+                            )
                             action_payload[agent_id] = selected["env_action"]
-                            selected_by_agent[agent_id] = (agent_idx, selected, obs[agent_idx].copy())
+                            if is_learner:
+                                selected_by_agent[agent_id] = (
+                                    agent_idx,
+                                    selected,
+                                    state["obs"][agent_idx].copy(),
+                                )
+                        state["selected_by_agent"] = selected_by_agent
+                        step_requests.append((env, state, action_payload))
+                    else:
+                        selected = select_action(model, log_std, state["obs"], action_meta)
+                        state["selected"] = selected
+                        state["selected_obs"] = state["obs"].copy()
+                        step_requests.append((env, state, selected["env_action"]))
 
-                        next_obs, _reward, terminated, truncated, info = env.step(action_payload)
-                        global_done = bool(terminated or truncated)
+                for env, state, _action, step_result in stepper.step(step_requests):
+                    next_obs, reward, terminated, truncated, info = step_result
+                    global_done = bool(terminated or truncated)
+                    if args.multi_agent:
                         per_agent_rewards = np.asarray(info.get("per_agent_rewards"), dtype=np.float32)
                         per_agent_done = np.asarray(info.get("per_agent_done"), dtype=np.bool_)
-
-                        for agent_id, (agent_idx, selected, agent_obs) in selected_by_agent.items():
+                        state["episode_reward"] += per_agent_rewards
+                        for agent_id, (agent_idx, selected, agent_obs) in state["selected_by_agent"].items():
                             done = bool(global_done or per_agent_done[agent_idx])
                             append_transition(
-                                env_trajectories[agent_id],
+                                state["trajectories"][agent_id],
                                 agent_obs,
                                 selected,
                                 float(per_agent_rewards[agent_idx]),
                                 done,
                             )
-                            episode_reward[agent_idx] += per_agent_rewards[agent_idx]
+                        state["done_mask"] = np.logical_or(state["done_mask"], per_agent_done)
+                        state["done"] = global_done or bool(np.all(state["done_mask"]))
+                    else:
+                        append_transition(
+                            state["trajectory"],
+                            state["selected_obs"],
+                            state["selected"],
+                            float(reward),
+                            global_done,
+                        )
+                        state["episode_reward"] += float(reward)
+                        state["done"] = global_done
+                    state["obs"] = next_obs
 
-                        obs = next_obs
-                        done_mask = np.logical_or(done_mask, per_agent_done)
-                        if global_done or bool(np.all(done_mask)):
-                            break
+                if all(state["done"] for state in env_states):
+                    break
 
+            for state in env_states:
+                if args.multi_agent:
                     trajectories.extend(
                         trajectory
-                        for trajectory in env_trajectories.values()
+                        for trajectory in state["trajectories"].values()
                         if trajectory_has_samples(trajectory)
                     )
-                    rewards_summary.append(episode_reward.tolist())
+                    rewards_summary.append(state["episode_reward"].tolist())
                 else:
-                    trajectory = new_trajectory()
-                    episode_reward = 0.0
-                    for _step in range(args.max_steps_per_episode):
-                        selected = select_action(model, log_std, obs, action_meta)
-                        next_obs, reward, terminated, truncated, _info = env.step(selected["env_action"])
-                        done = bool(terminated or truncated)
-
-                        append_transition(trajectory, obs, selected, float(reward), done)
-                        episode_reward += float(reward)
-                        obs = next_obs
-                        if done:
-                            break
-                    if trajectory_has_samples(trajectory):
-                        trajectories.append(trajectory)
-                    rewards_summary.append(episode_reward)
+                    if trajectory_has_samples(state["trajectory"]):
+                        trajectories.append(state["trajectory"])
+                    rewards_summary.append(state["episode_reward"])
 
             update_batch = build_update_batch(
                 trajectories,
@@ -586,6 +1006,7 @@ def main():
             metrics = ppo_update(model, log_std, optimizer, update_batch, action_meta, args)
             sample_count = len(update_batch["rewards"]) if "rewards" in update_batch else len(update_batch["obs"])
             print_episode_metrics(episode, [
+                ("mode", [("opponent", opponent_match.label)]),
                 ("outcome", [("rewards", rewards_summary)]),
                 ("training", [
                     ("samples", sample_count),
@@ -596,10 +1017,26 @@ def main():
                 ]),
             ], args.log_format)
             last_completed_episode = episode + 1
+            snapshot_path = opponent_pool.snapshot(model, episode + 1)
+            if snapshot_path is not None:
+                print(f"Saved opponent snapshot: {snapshot_path}", flush=True)
 
             if args.checkpoint_every > 0 and (episode + 1) % args.checkpoint_every == 0:
-                save_training_checkpoint(checkpoint, checkpoint_manager, episode + 1)
+                saved_path = save_training_checkpoint(checkpoint, checkpoint_manager, episode + 1)
                 last_saved_episode = episode + 1
+            else:
+                saved_path = None
+            if best_tracker.should_evaluate(episode + 1):
+                if saved_path is None:
+                    saved_path = save_training_checkpoint(checkpoint, checkpoint_manager, episode + 1)
+                    last_saved_episode = episode + 1
+                maybe_update_best_checkpoint(
+                    best_tracker,
+                    best_checkpoint_manager,
+                    checkpoint,
+                    saved_path,
+                    episode + 1,
+                )
 
         if last_saved_episode != args.num_episodes:
             save_training_checkpoint(checkpoint, checkpoint_manager, args.num_episodes, final=True)
@@ -615,6 +1052,8 @@ def main():
         else:
             print("Training state was not initialized; no checkpoint was written.", flush=True)
     finally:
+        if stepper is not None:
+            stepper.close()
         for env in envs:
             try:
                 env.close()

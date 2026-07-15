@@ -1,7 +1,7 @@
 extends "res://scripts/agent/events/ScenarioEventSource.gd"
 class_name AreaReachedEventSource
 
-@export var area:Area3D
+@export var area:Node
 @export var only_once := true
 
 var _agents := {}
@@ -9,7 +9,9 @@ var _reached := {}
 
 
 func _ready() -> void:
-	if area != null and not area.body_entered.is_connected(_on_body_entered):
+	if area == null or not area.has_signal("body_entered"):
+		return
+	if not area.body_entered.is_connected(_on_body_entered):
 		area.body_entered.connect(_on_body_entered)
 
 

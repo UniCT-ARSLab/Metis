@@ -1,0 +1,85 @@
+[gd_scene format=3 uid="uid://h3xfrrw0mt1k"]
+
+[ext_resource type="Texture2D" uid="uid://c7y6gc31prv7" path="res://assets/sprites/breakout/paddleBlu.png" id="1_gkoiq"]
+[ext_resource type="Script" uid="uid://ck2qw03f5oqft" path="res://agents/BreakoutPaddle/breakout_paddle.gd" id="1_hqqp6"]
+[ext_resource type="Script" uid="uid://byrdvsguqdev3" path="res://scripts/agent/Agent.gd" id="2_wf0fb"]
+[ext_resource type="Script" uid="uid://bjhxcss2ima54" path="res://scripts/agent/action_space/ActionSpace.gd" id="3_hqqp6"]
+[ext_resource type="Script" uid="uid://c3v2k8xuahe2j" path="res://scripts/agent/action_space/DiscreteActionSet.gd" id="4_2q727"]
+[ext_resource type="Script" uid="uid://d1xuba84xevcv" path="res://scripts/agent/RewardSystem.gd" id="5_lonxf"]
+[ext_resource type="Script" uid="uid://dyq1fjgcu1wqu" path="res://scripts/agent/reward_components/StepPenaltyReward.gd" id="6_cmbfi"]
+[ext_resource type="Script" uid="uid://clefx53jebtj3" path="res://scripts/agent/observations/ObservationSystem.gd" id="7_cm808"]
+[ext_resource type="Script" uid="uid://cys7i0vchrdlo" path="res://scripts/agent/observations/MethodObservationSource.gd" id="8_ft730"]
+[ext_resource type="Script" uid="uid://cp4g4r5f7n1kx" path="res://scripts/agent/action_space/DiscreteAction.gd" id="9_discrete_action"]
+
+[sub_resource type="CapsuleShape2D" id="CapsuleShape2D_chi8s"]
+radius = 24.0
+height = 210.0
+
+[node name="BreakoutPaddle" type="CharacterBody2D" unique_id=100166131]
+script = ExtResource("1_hqqp6")
+
+[node name="Sprite2D" type="Sprite2D" parent="." unique_id=888959028]
+texture = ExtResource("1_gkoiq")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="." unique_id=238518252]
+rotation = -1.5707964
+shape = SubResource("CapsuleShape2D_chi8s")
+
+[node name="Agent" type="Node" parent="." unique_id=808346629]
+script = ExtResource("2_wf0fb")
+metadata/_custom_type_script = "uid://byrdvsguqdev3"
+
+[node name="ActionSpace" type="Node" parent="Agent" unique_id=2013457645]
+script = ExtResource("3_hqqp6")
+metadata/_custom_type_script = "uid://bjhxcss2ima54"
+
+[node name="Actions" type="Node" parent="Agent/ActionSpace" unique_id=1444139103]
+script = ExtResource("4_2q727")
+metadata/_custom_type_script = "uid://c3v2k8xuahe2j"
+
+[node name="Idle" type="Node" parent="Agent/ActionSpace/Actions" unique_id=1485420049]
+script = ExtResource("9_discrete_action")
+action_name = "idle"
+method_name = &"stop"
+
+[node name="MoveLeft" type="Node" parent="Agent/ActionSpace/Actions" unique_id=703408387]
+script = ExtResource("9_discrete_action")
+action_name = "move_left"
+method_name = &"move_left"
+
+[node name="MoveRight" type="Node" parent="Agent/ActionSpace/Actions" unique_id=399135050]
+script = ExtResource("9_discrete_action")
+action_name = "move_right"
+method_name = &"move_right"
+
+[node name="RewardSystem" type="Node" parent="Agent" unique_id=1138365893]
+script = ExtResource("5_lonxf")
+metadata/_custom_type_script = "uid://d1xuba84xevcv"
+
+[node name="TimePenalty" type="Node" parent="Agent/RewardSystem" unique_id=1513122641]
+script = ExtResource("6_cmbfi")
+term_name = "time"
+penalty = -0.0001
+metadata/_custom_type_script = "uid://dyq1fjgcu1wqu"
+
+[node name="ObservationSystem" type="Node" parent="Agent" unique_id=1628153221]
+script = ExtResource("7_cm808")
+metadata/_custom_type_script = "uid://clefx53jebtj3"
+
+[node name="PaddlePosition" type="Node" parent="Agent/ObservationSystem" unique_id=1488401114]
+script = ExtResource("8_ft730")
+observation_name = "paddle_x"
+method_name = "get_paddle_x_observation"
+metadata/_custom_type_script = "uid://cys7i0vchrdlo"
+
+[node name="BallPosition" type="Node" parent="Agent/ObservationSystem" unique_id=1779448433]
+script = ExtResource("8_ft730")
+observation_name = "ball_relative_position"
+method_name = "get_ball_relative_position_observation"
+metadata/_custom_type_script = "uid://cys7i0vchrdlo"
+
+[node name="BallVelocity" type="Node" parent="Agent/ObservationSystem" unique_id=669825025]
+script = ExtResource("8_ft730")
+observation_name = "ball_velocity"
+method_name = "get_ball_velocity_observation"
+metadata/_custom_type_script = "uid://cys7i0vchrdlo"
