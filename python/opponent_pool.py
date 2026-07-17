@@ -1,6 +1,7 @@
 import argparse
 import json
 import random
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -107,7 +108,13 @@ class OpponentPool:
         self.metadata = dict(metadata or {})
         self.state_getter = state_getter
         self.entries = []
-        self._opponent_model = None
+        # One opponent model per caller. A single shared instance was fine while only the
+        # sync loop existed, but async collectors each pick their own snapshot per episode
+        # and would load_weights over each other's model.
+        self._opponent_models = {}
+        # Guards `entries`, the manifest, and the snapshot files. Pruning deletes files a
+        # collector may be loading, so the load happens under the lock too.
+        self._lock = threading.RLock()
 
         if not self.enabled:
             return
@@ -153,8 +160,17 @@ class OpponentPool:
         temporary.replace(self.manifest_path)
 
     def snapshot(self, model, episode, force=False):
+        """Freeze `model` into the pool. Call from the learner: it holds the live policy.
+
+        Async collectors hold their own periodically-synced copy, so snapshotting from a
+        worker would freeze a policy that is up to --async-policy-sync-steps stale.
+        """
         if not self.enabled:
             return None
+        with self._lock:
+            return self._snapshot_locked(model, episode, force=force)
+
+    def _snapshot_locked(self, model, episode, force=False):
         episode = int(episode)
         if not force and episode % self.snapshot_every != 0:
             return None
@@ -177,31 +193,44 @@ class OpponentPool:
         self._write_manifest()
         return self.directory / filename
 
-    def start_episode(self, current_model, episode):
+    def _model_for(self, worker_id):
+        model = self._opponent_models.get(worker_id)
+        if model is None:
+            model = self.model_factory()
+            self._opponent_models[worker_id] = model
+        return model
+
+    def start_episode(self, current_model, episode, worker_id=0):
+        """Pick this episode's opponent, into a model private to `worker_id`.
+
+        The whole body runs under the lock: pruning inside a concurrent snapshot() can
+        delete the very file being loaded here, and each worker must land in its own
+        model rather than racing over a shared one.
+        """
         if not self.enabled:
             return OpponentMatch(None, "disabled", True)
-        if not self.entries:
-            self.snapshot(current_model, episode, force=True)
-        eligible_entries = [
-            entry for entry in self.entries if int(entry["episode"]) <= int(episode)
-        ]
-        if not eligible_entries:
-            return OpponentMatch(None, "current:no_eligible_snapshot", True)
+        with self._lock:
+            if not self.entries:
+                self._snapshot_locked(current_model, episode, force=True)
+            eligible_entries = [
+                entry for entry in self.entries if int(entry["episode"]) <= int(episode)
+            ]
+            if not eligible_entries:
+                return OpponentMatch(None, "current:no_eligible_snapshot", True)
 
-        rng = random.Random(self.seed_base + int(episode) * 104729)
-        if rng.random() < self.current_probability:
-            return OpponentMatch(None, "current", True)
+            rng = random.Random(self.seed_base + int(episode) * 104729)
+            if rng.random() < self.current_probability:
+                return OpponentMatch(None, "current", True)
 
-        entry = eligible_entries[-1] if self.sampling == "latest" else rng.choice(eligible_entries)
-        if self._opponent_model is None:
-            self._opponent_model = self.model_factory()
-        self._opponent_model.load_weights(str(self.directory / entry["file"]))
-        return OpponentMatch(
-            self._opponent_model,
-            f"snapshot:{int(entry['episode'])}",
-            False,
-            entry.get("state"),
-        )
+            entry = eligible_entries[-1] if self.sampling == "latest" else rng.choice(eligible_entries)
+            model = self._model_for(worker_id)
+            model.load_weights(str(self.directory / entry["file"]))
+            return OpponentMatch(
+                model,
+                f"snapshot:{int(entry['episode'])}",
+                False,
+                entry.get("state"),
+            )
 
     def learner_mask(self, agent_team_ids, teams, episode, env_index, use_current_policy=False):
         if not self.enabled or use_current_policy:

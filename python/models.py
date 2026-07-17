@@ -31,6 +31,22 @@ def build_greedy_action_fn(model, obs_dim, device="/CPU:0"):
     return greedy_action
 
 
+def build_actor_forward_fn(model, obs_dim, device="/CPU:0"):
+    """Trace a deterministic actor forward for an async collector thread.
+
+    Same thread-safety reason as build_greedy_action_fn: an eager `actor(obs)` called
+    from several collector threads corrupts the output under concurrency. DDPG/TD3 add
+    exploration noise in numpy after this, so only the forward pass needs tracing.
+    Batch is dynamic so one graph serves both single- and multi-agent collectors.
+    """
+    @tf.function(input_signature=[tf.TensorSpec([None, obs_dim], tf.float32)])
+    def actor_forward(obs_batch):
+        with tf.device(device):
+            return model(obs_batch, training=False)
+
+    return actor_forward
+
+
 def build_shared_q_network(obs_dim, num_actions):
     inputs = keras.Input(shape=(obs_dim,))
     x = keras.layers.Dense(256, activation="relu")(inputs)

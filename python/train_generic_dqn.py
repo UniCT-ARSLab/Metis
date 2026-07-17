@@ -46,7 +46,12 @@ import tensorflow as tf
 
 from godot_process_manager import GodotProcessManager
 from models import build_greedy_action_fn, build_shared_q_network
-from opponent_pool import OpponentPool, add_opponent_pool_arguments, validate_team_layout
+from opponent_pool import (
+    OpponentMatch,
+    OpponentPool,
+    add_opponent_pool_arguments,
+    validate_team_layout,
+)
 from replay_buffer import ReplayBuffer
 from scenario_gym_env import ScenarioGymEnv
 from training_support import (
@@ -367,8 +372,10 @@ def run_async_dqn(
     start_episode,
     start_epsilon,
     learner_step,
+    opponent_pool=None,
+    opponent_teams=None,
 ):
-    validate_async_arguments(args)
+    validate_async_arguments(args, supports_opponent_pool=True)
     obs_dim = envs[0].obs_dim
     num_actions = envs[0].num_actions
     with tf.device("/CPU:0"):
@@ -397,6 +404,13 @@ def run_async_dqn(
             physics_frames_per_step=args.physics_frames_per_step,
         )
         obs, info = env.reset(seed=args.episode_seed_multiplier * episode + worker_id)
+        # Each worker draws its own opponent into a model private to it, so concurrent
+        # episodes cannot load weights over one another.
+        opponent_match = (
+            opponent_pool.start_episode(model, episode, worker_id=worker_id)
+            if opponent_pool is not None and opponent_pool.enabled
+            else OpponentMatch(None, "disabled", True)
+        )
         if args.multi_agent:
             agent_count = len(env.agent_ids)
             done_mask = np.asarray(
@@ -416,6 +430,20 @@ def run_async_dqn(
                 "terminal_counts": {},
                 "action_counts": np.zeros((agent_count, num_actions), dtype=np.int32),
                 "last_action": np.zeros((agent_count,), dtype=np.int32),
+                "opponent_match": opponent_match,
+                # Which agents the learner drives, and therefore which transitions may
+                # enter the replay buffer. The opponent's experience is not ours to learn.
+                "learner_mask": (
+                    opponent_pool.learner_mask(
+                        env.agent_team_ids,
+                        opponent_teams,
+                        episode,
+                        worker_id,
+                        use_current_policy=opponent_match.use_current_policy,
+                    )
+                    if opponent_pool is not None and opponent_pool.enabled
+                    else np.ones((agent_count,), dtype=np.bool_)
+                ),
             }
         return {
             "obs": obs,
@@ -430,6 +458,8 @@ def run_async_dqn(
             "terminal_counts": {},
             "action_counts": np.zeros((num_actions,), dtype=np.int32),
             "last_action": 0,
+            "opponent_match": opponent_match,
+            "learner_mask": None,
         }
 
     def choose_action(worker_id, _env, episode, _step_idx, local_model, state):
@@ -444,6 +474,17 @@ def run_async_dqn(
                     actions[agent_idx] = 0
                 elif rng.random() < epsilon:
                     actions[agent_idx] = int(rng.integers(num_actions))
+            opponent_model = state["opponent_match"].model
+            if opponent_model is not None:
+                # The frozen opponent plays greedily off its own snapshot: exploration
+                # noise belongs to the learner, and the snapshot is not being trained.
+                opponent_q = opponent_model(observations, training=False).numpy()
+                opponent_actions = np.argmax(opponent_q, axis=1).astype(np.int32)
+                opponent_actions[state["done_mask"]] = 0
+                actions = opponent_pool.merge_actions(
+                    actions, opponent_actions, state["learner_mask"]
+                )
+            for agent_idx in range(len(actions)):
                 state["action_counts"][agent_idx, actions[agent_idx]] += 1
                 state["last_action"][agent_idx] = actions[agent_idx]
             return actions
@@ -485,7 +526,12 @@ def run_async_dqn(
                 )
                 state["target_reached"][agent_idx] |= bool(agent_info.get("target_reached", False))
                 state["target_seen"][agent_idx] |= bool(agent_info.get("target_first_seen", False))
-                if not (was_done and done_mask[agent_idx]):
+                learner_mask = state["learner_mask"]
+                is_learner = learner_mask is None or bool(learner_mask[agent_idx])
+                # The opponent's transitions come from a frozen snapshot's policy, not
+                # ours: learning from them would poison the buffer with off-policy data
+                # the learner never chose.
+                if is_learner and not (was_done and done_mask[agent_idx]):
                     transitions.append((
                         state["obs"][agent_idx],
                         int(action[agent_idx]),
@@ -587,6 +633,11 @@ def run_async_dqn(
             state = event.payload
             if completed % args.target_update_every == 0:
                 target_model.set_weights(model.get_weights())
+            if opponent_pool is not None:
+                # Snapshot from the learner, not the workers: a worker's local model is
+                # only synced every --async-policy-sync-steps and would freeze a policy
+                # that is already stale.
+                opponent_pool.snapshot(model, completed)
             epsilon = epsilon_for_episode(completed)
             rewards = state["ep_reward"].tolist() if hasattr(state["ep_reward"], "tolist") else state["ep_reward"]
             if args.multi_agent:
@@ -786,7 +837,7 @@ def pretrain_behavior_cloning(model, demo_data, epochs, batch_size, learning_rat
 
 def main():
     args = parse_args()
-    validate_async_arguments(args)
+    validate_async_arguments(args, supports_opponent_pool=True)
     best_tracker = BestCheckpointTracker(args, "dqn")
     describe_tensorflow_backend(args)
     random.seed(args.env_seed_base)
@@ -998,6 +1049,8 @@ def main():
                 start_episode,
                 epsilon,
                 learner_step,
+                opponent_pool=opponent_pool,
+                opponent_teams=opponent_teams,
             )
             model.save_weights(args.weights_path)
             print(f"Saved weights: {args.weights_path}", flush=True)

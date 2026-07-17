@@ -10,6 +10,10 @@ from scenario_gym_env import ScenarioGymEnv
 BACKENDS = {
     "dqn": "train_generic_dqn.py",
     "ddpg": "train_generic_ddpg.py",
+    "ddpg_bc": "train_generic_ddpg_bc.py",
+    "ddpgfd": "train_generic_ddpgfd.py",
+    "td3": "train_generic_td3.py",
+    "td3_bc": "train_generic_td3_bc.py",
     "sac": "train_generic_sac.py",
     "ppo": "train_generic_ppo.py",
 }
@@ -21,11 +25,16 @@ def parse_args(argv):
             "Unified Godot training entrypoint. With --algorithm auto it inspects "
             "the scenario action space and delegates to DQN for discrete actions, "
             "DDPG for continuous actions, or PPO for hybrid actions. SAC can be "
-            "selected explicitly for continuous action spaces."
+            "selected explicitly for continuous action spaces, as can TD3 and the "
+            "demonstration-aware deterministic variants."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--algorithm", choices=["auto", "dqn", "ddpg", "sac", "ppo"], default="auto")
+    parser.add_argument(
+        "--algorithm",
+        choices=["auto", "dqn", "ddpg", "ddpg_bc", "ddpgfd", "td3", "td3_bc", "sac", "ppo"],
+        default="auto",
+    )
     parser.add_argument("--probe-port", type=int, default=None)
     parser.add_argument("--num-envs", type=int, default=1)
     parser.add_argument("--base-port", type=int, default=6200)

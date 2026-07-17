@@ -993,7 +993,13 @@ class AsyncEventScheduler:
         return metrics
 
 
-def validate_async_arguments(args):
+def validate_async_arguments(args, supports_opponent_pool=False):
+    """Validate async collector settings.
+
+    `supports_opponent_pool` is per-trainer and defaults to False: a trainer whose async
+    path does not thread the pool through must keep failing loudly here rather than
+    accept --opponent-pool and quietly ignore it.
+    """
     if int(getattr(args, "max_steps_per_episode", 500)) < 0:
         raise ValueError("--max-steps-per-episode cannot be negative; use 0 for no limit")
     if args.collector_mode != "async":
@@ -1016,10 +1022,10 @@ def validate_async_arguments(args):
         raise ValueError("--async-max-updates-per-env-step cannot be negative")
     if args.async_drain_max_events <= 0:
         raise ValueError("--async-drain-max-events must be greater than zero")
-    if getattr(args, "opponent_pool", False):
+    if getattr(args, "opponent_pool", False) and not supports_opponent_pool:
         raise ValueError(
-            "--collector-mode async currently supports shared-policy self-play but not "
-            "historical --opponent-pool sampling; use --collector-mode sync for that mode."
+            "This trainer's --collector-mode async path does not support historical "
+            "--opponent-pool sampling; use --collector-mode sync for that mode."
         )
 
 

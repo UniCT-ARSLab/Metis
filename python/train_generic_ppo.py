@@ -256,55 +256,87 @@ def zero_env_action(action_meta):
     return pack_action(discrete_actions, continuous_action, action_meta)
 
 
-def value_of(model, obs, action_meta):
-    """V(obs) from the critic head, for bootstrapping a time-limit-truncated trajectory."""
-    obs_tensor = tf.convert_to_tensor(np.expand_dims(obs, axis=0), dtype=tf.float32)
-    outputs = model(obs_tensor, training=False)
-    _logits, _continuous_mean, value = split_model_outputs(outputs, action_meta)
-    return float(value.numpy()[0])
+def value_of(sample_fn, log_std, obs, action_meta):
+    """V(obs) from the critic head, for bootstrapping a time-limit-truncated trajectory.
+
+    Goes through the same traced sampler as select_action so bootstrapping shares its
+    thread-safety; the sampled action is discarded, and bootstrapping only happens on a
+    truncation, so the extra draw is negligible.
+    """
+    obs_batch = np.expand_dims(np.asarray(obs, dtype=np.float32), axis=0)
+    log_std_tensor = tf.convert_to_tensor(log_std, dtype=tf.float32)
+    _discrete, _continuous, _log_prob, value_t = sample_fn(obs_batch, log_std_tensor)
+    return float(value_t.numpy())
 
 
-def select_action(model, log_std, obs, action_meta):
-    obs_tensor = tf.convert_to_tensor(np.expand_dims(obs, axis=0), dtype=tf.float32)
-    outputs = model(obs_tensor, training=False)
-    logits, continuous_mean, value = split_model_outputs(outputs, action_meta)
+def build_sample_action_fn(model, obs_dim, action_meta, device="/CPU:0"):
+    """Trace the stochastic action sample into one graph per collector.
 
-    discrete_actions = []
-    log_prob_parts = []
-    for component_logits in logits:
-        action = tf.random.categorical(component_logits, 1, dtype=tf.int32)
-        action = tf.squeeze(action, axis=-1)
-        discrete_actions.append(int(action.numpy()[0]))
-        selected_log_prob = -tf.nn.sparse_softmax_cross_entropy_with_logits(
-            labels=action,
-            logits=component_logits,
-        )
-        log_prob_parts.append(selected_log_prob)
+    The eager op-by-op version corrupts tensor shapes when several collector threads
+    run it concurrently -- a 0-D tensor where a 1-D one is expected -- crashing roughly
+    two runs in five at --num-envs 4. A traced concrete function is safe to call from
+    multiple threads where eager execution is not, the same fix build_greedy_action_fn
+    applies to DQN. Pinning to `device` keeps the ops with the collector's CPU weights.
+    """
+    continuous_size = int(action_meta["continuous_size"])
+    low = tf.constant(action_meta["continuous_low"], dtype=tf.float32)
+    high = tf.constant(action_meta["continuous_high"], dtype=tf.float32)
 
-    if action_meta["continuous_size"] > 0:
-        mean = continuous_mean[0]
-        std = tf.exp(log_std)
-        raw_action = mean + tf.random.normal(tf.shape(mean)) * std
-        low = tf.convert_to_tensor(action_meta["continuous_low"], dtype=tf.float32)
-        high = tf.convert_to_tensor(action_meta["continuous_high"], dtype=tf.float32)
-        continuous_action = tf.clip_by_value(raw_action, low, high)
-        continuous_log_prob = gaussian_log_prob(raw_action[None, :], continuous_mean, log_std)
-        log_prob_parts.append(continuous_log_prob)
-        continuous_np = continuous_action.numpy().astype(np.float32)
-    else:
-        continuous_np = np.zeros((0,), dtype=np.float32)
+    @tf.function(input_signature=[
+        tf.TensorSpec([1, obs_dim], tf.float32),
+        tf.TensorSpec([continuous_size], tf.float32),
+    ])
+    def sample(obs_batch, log_std):
+        with tf.device(device):
+            outputs = model(obs_batch, training=False)
+            logits, continuous_mean, value = split_model_outputs(outputs, action_meta)
 
-    if log_prob_parts:
-        log_prob = float(tf.reduce_sum(tf.stack(log_prob_parts, axis=0)).numpy())
-    else:
-        log_prob = 0.0
+            discrete_actions = []
+            log_prob = tf.zeros((), dtype=tf.float32)
+            for component_logits in logits:
+                action = tf.random.categorical(component_logits, 1, dtype=tf.int32)
+                action = tf.squeeze(action, axis=[0, 1])  # scalar
+                discrete_actions.append(action)
+                component_log_prob = -tf.nn.sparse_softmax_cross_entropy_with_logits(
+                    labels=action[None], logits=component_logits
+                )
+                log_prob += component_log_prob[0]
+
+            discrete_out = (
+                tf.stack(discrete_actions, axis=0)
+                if discrete_actions
+                else tf.zeros((0,), dtype=tf.int32)
+            )
+
+            # continuous_size is a Python constant, so this branch is resolved at trace
+            # time -- a discrete-only scenario never traces the continuous ops at all.
+            if continuous_size > 0:
+                mean = continuous_mean[0]
+                std = tf.exp(log_std)
+                raw_action = mean + tf.random.normal(tf.shape(mean)) * std
+                continuous_out = tf.clip_by_value(raw_action, low, high)
+                log_prob += gaussian_log_prob(raw_action[None, :], continuous_mean, log_std)[0]
+            else:
+                continuous_out = tf.zeros((0,), dtype=tf.float32)
+
+            return discrete_out, continuous_out, log_prob, value[0]
+
+    return sample
+
+
+def select_action(sample_fn, log_std, obs, action_meta):
+    obs_batch = np.expand_dims(np.asarray(obs, dtype=np.float32), axis=0)
+    log_std_tensor = tf.convert_to_tensor(log_std, dtype=tf.float32)
+    discrete_t, continuous_t, log_prob_t, value_t = sample_fn(obs_batch, log_std_tensor)
+    discrete_actions = discrete_t.numpy().astype(np.int32)
+    continuous_np = continuous_t.numpy().astype(np.float32)
 
     return {
         "env_action": pack_action(discrete_actions, continuous_np, action_meta),
-        "discrete_actions": np.asarray(discrete_actions, dtype=np.int32),
+        "discrete_actions": discrete_actions,
         "continuous_action": continuous_np,
-        "log_prob": log_prob,
-        "value": float(value.numpy()[0]),
+        "log_prob": float(log_prob_t.numpy()),
+        "value": float(value_t.numpy()),
     }
 
 
@@ -528,10 +560,14 @@ def run_async_ppo(
             )
             for _env in envs
         ]
+    # One traced sampler per collector: they run concurrently, and eager sampling is not
+    # thread-safe. set_weights on the closed-over model keeps each trace current.
+    sample_fns = [build_sample_action_fn(m, obs_dim, action_meta) for m in local_models]
     snapshot = PolicySnapshot(model.get_weights(), state=log_std.numpy())
 
     def worker(worker_id, env, _allocator, put, stop_event):
         local_model = local_models[worker_id]
+        sample_fn = sample_fns[worker_id]
         policy_version = -1
         for episode in range(start_episode, args.num_episodes):
             if stop_event.is_set():
@@ -572,7 +608,7 @@ def run_async_ppo(
                             action_payload[agent_id] = zero_env_action(action_meta)
                             continue
                         selected = select_action(
-                            local_model,
+                            sample_fn,
                             local_log_std,
                             obs[agent_idx],
                             action_meta,
@@ -585,7 +621,7 @@ def run_async_ppo(
                         )
                     step_result = env.step(action_payload)
                 else:
-                    selected = select_action(local_model, local_log_std, obs, action_meta)
+                    selected = select_action(sample_fn, local_log_std, obs, action_meta)
                     selected_obs = obs.copy()
                     step_result = env.step(selected["env_action"])
 
@@ -612,7 +648,7 @@ def run_async_ppo(
                         )
                         if cut_short and not per_agent_terminated[agent_idx]:
                             trajectories[agent_id]["bootstrap_value"] = value_of(
-                                local_model, next_obs[agent_idx], action_meta
+                                sample_fn, local_log_std, next_obs[agent_idx], action_meta
                             )
                     done_mask = np.logical_or(done_mask, per_agent_done)
                     global_done = global_done or bool(np.all(done_mask))
@@ -625,7 +661,9 @@ def run_async_ppo(
                         bool(terminated),
                     )
                     if cut_short:
-                        trajectory["bootstrap_value"] = value_of(local_model, next_obs, action_meta)
+                        trajectory["bootstrap_value"] = value_of(
+                            sample_fn, local_log_std, next_obs, action_meta
+                        )
                     episode_reward += float(reward)
                 obs = next_obs
 
@@ -913,6 +951,18 @@ def main():
             print(f"Saved weights: {args.weights_path}", flush=True)
             return
 
+        # The sync loop forwards on the main thread, so eager would be safe here, but it
+        # goes through the same traced sampler as async for one code path. One per model:
+        # the learner's, plus any opponent-pool snapshot models, which the pool reuses.
+        sample_fns = {}
+
+        def sample_fn_for(sampled_model):
+            fn = sample_fns.get(id(sampled_model))
+            if fn is None:
+                fn = build_sample_action_fn(sampled_model, obs_dim, action_meta)
+                sample_fns[id(sampled_model)] = fn
+            return fn
+
         last_saved_episode = None
         for episode in range(start_episode, args.num_episodes):
             opponent_match = opponent_pool.start_episode(model, episode)
@@ -978,7 +1028,7 @@ def main():
                             action_model = model if is_learner else opponent_match.model
                             action_log_std = log_std if is_learner else opponent_log_std
                             selected = select_action(
-                                action_model,
+                                sample_fn_for(action_model),
                                 action_log_std,
                                 state["obs"][agent_idx],
                                 action_meta,
@@ -993,7 +1043,7 @@ def main():
                         state["selected_by_agent"] = selected_by_agent
                         step_requests.append((env, state, action_payload))
                     else:
-                        selected = select_action(model, log_std, state["obs"], action_meta)
+                        selected = select_action(sample_fn_for(model), log_std, state["obs"], action_meta)
                         state["selected"] = selected
                         state["selected_obs"] = state["obs"].copy()
                         step_requests.append((env, state, selected["env_action"]))
@@ -1022,7 +1072,7 @@ def main():
                             )
                             if cut_short and not per_agent_terminated[agent_idx]:
                                 state["trajectories"][agent_id]["bootstrap_value"] = value_of(
-                                    model, next_obs[agent_idx], action_meta
+                                    sample_fn_for(model), log_std, next_obs[agent_idx], action_meta
                                 )
                         state["done_mask"] = np.logical_or(state["done_mask"], per_agent_done)
                         state["done"] = global_done or bool(np.all(state["done_mask"]))
@@ -1036,7 +1086,7 @@ def main():
                         )
                         if cut_short:
                             state["trajectory"]["bootstrap_value"] = value_of(
-                                model, next_obs, action_meta
+                                sample_fn_for(model), log_std, next_obs, action_meta
                             )
                         state["episode_reward"] += float(reward)
                         state["done"] = global_done

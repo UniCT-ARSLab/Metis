@@ -544,7 +544,7 @@ python/.venv/bin/python python/train_generic.py \
   --checkpoint-dir checkpoints/pong_shared_dqn_v1 \
   --weights-path pong_shared_dqn_v1.weights.h5 \
   --multi-agent \
-  --collector-mode sync \
+  --collector-mode async \
   --opponent-pool \
   --opponent-snapshot-every 100 \
   --opponent-pool-size 10 \
@@ -558,10 +558,12 @@ il pool conserva fino a dieci copie congelate dei suoi pesi. Per ogni episodio v
 scelta una snapshot e, in ogni env, viene sorteggiato quale `team_id` apprende. Nel 20%
 degli episodi entrambi i team usano invece la policy corrente.
 
-L'opponent pool storico richiede `--collector-mode sync`: il framework rifiuta
-esplicitamente la combinazione con `async`, perche' ogni episodio deve restare associato
-alla snapshot e al lato learner scelti. Se disabiliti il pool, il parameter sharing
-current-vs-current puo' invece usare il collector asincrono.
+Il trainer DQN supporta l'opponent pool anche con `--collector-mode async`. Ogni worker
+seleziona a inizio episodio la propria snapshot e il proprio lato learner, conserva
+questa associazione fino al terminale e usa un modello avversario privato. Le transizioni
+della snapshot congelata restano escluse dal replay. Gli altri backend supportano il
+collector async normale, ma al momento richiedono ancora `sync` quando usano
+`--opponent-pool`.
 
 Pong richiede reazioni rapide: conserva `--physics-frames-per-step 1` come base. Un
 frame skip maggiore puo' aumentare il throughput, ma riduce la frequenza con cui il
@@ -661,7 +663,7 @@ snapshot rappresenta la rete iniziale e fornisce un avversario debole e stabile.
 
 In alternativa puoi eseguire 200-300 episodi di self-play simultaneo con
 `--no-opponent-pool`, poi riprendere lo stesso checkpoint aggiungendo
-`--collector-mode sync --opponent-pool`. Al primo episodio ripreso, il framework crea la prima snapshot dalla
+`--collector-mode async --opponent-pool`. Al primo episodio ripreso, il framework crea la prima snapshot dalla
 policy gia' parzialmente allenata. Questa variante puo' aiutare se all'inizio gli scambi
 finiscono immediatamente e il replay contiene quasi soltanto servizi falliti.
 
@@ -691,7 +693,7 @@ python/.venv/bin/python python/train_generic.py \
   --checkpoint-dir checkpoints/pong_shared_dqn_v1 \
   --weights-path pong_shared_dqn_v1.weights.h5 \
   --multi-agent \
-  --collector-mode sync \
+  --collector-mode async \
   --opponent-pool \
   --opponent-snapshot-every 100 \
   --opponent-pool-size 10 \

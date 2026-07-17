@@ -5,7 +5,7 @@ from queue import Empty
 
 import numpy as np
 
-from train_generic_ddpg import (
+from deterministic_training import (
     continuous_exploration_bounds,
     create_continuous_async_worker,
     curriculum_reset_progress_max,
@@ -267,6 +267,44 @@ def select_action(actor, obs, action_low, action_high, log_std_min, log_std_max)
     )[0]
 
 
+def build_sac_sample_fn(actor, obs_dim, action_low, action_high, log_std_min, log_std_max, device="/CPU:0"):
+    """Trace the squashed-Gaussian sample into one graph per collector.
+
+    The collector calls the actor and tf.random.normal in eager mode. Run concurrently
+    from several collector threads that is the exact hazard that crashed PPO -- shape
+    corruption at best, silently wrong actions at worst. A traced concrete function is
+    safe to call across threads; pinning to `device` keeps the ops with the CPU weights.
+    Mirrors build_greedy_action_fn (DQN) and build_sample_action_fn (PPO).
+    """
+    low = tf.constant(np.asarray(action_low, dtype=np.float32).reshape(1, -1))
+    high = tf.constant(np.asarray(action_high, dtype=np.float32).reshape(1, -1))
+
+    @tf.function(input_signature=[tf.TensorSpec([None, obs_dim], tf.float32)])
+    def sample(obs_batch):
+        with tf.device(device):
+            mean, log_std = actor(obs_batch, training=False)
+            log_std = tf.clip_by_value(log_std, log_std_min, log_std_max)
+            std = tf.exp(log_std)
+            pre_tanh = mean + std * tf.random.normal(tf.shape(mean))
+            raw_action = tf.tanh(pre_tanh)
+            return low + 0.5 * (raw_action + 1.0) * (high - low)
+
+    return sample
+
+
+def select_actions_with(sample_fn, obs_batch, done_mask, action_low, action_high):
+    actions = sample_fn(np.asarray(obs_batch, dtype=np.float32)).numpy().astype(np.float32)
+    if done_mask is not None:
+        actions[np.asarray(done_mask, dtype=np.bool_)] = action_low
+    return np.clip(actions, action_low, action_high).astype(np.float32)
+
+
+def select_action_with(sample_fn, obs, action_low, action_high):
+    return select_actions_with(
+        sample_fn, np.expand_dims(obs, axis=0), None, action_low, action_high
+    )[0]
+
+
 def train_step(
     actor,
     critic1,
@@ -493,6 +531,12 @@ def run_async_sac(
             build_sac_actor(obs_dim=obs_dim, action_size=action_size)
             for _env in envs
         ]
+    # One traced sampler per collector: they run concurrently and eager sampling is not
+    # thread-safe. set_weights on the closed-over actor keeps each trace current.
+    sample_fns = [
+        build_sac_sample_fn(m, obs_dim, action_low, action_high, args.log_std_min, args.log_std_max)
+        for m in local_models
+    ]
     snapshot = PolicySnapshot(actor.get_weights())
     rngs = [np.random.default_rng(args.env_seed_base + 100_003 * idx) for idx in range(len(envs))]
 
@@ -512,23 +556,19 @@ def run_async_sac(
             if args.multi_agent:
                 action[state["done_mask"]] = action_low
         elif args.multi_agent:
-            action = select_actions(
-                local_actor,
+            action = select_actions_with(
+                sample_fns[worker_id],
                 state["obs"],
                 state["done_mask"],
                 action_low,
                 action_high,
-                args.log_std_min,
-                args.log_std_max,
             )
         else:
-            action = select_action(
-                local_actor,
+            action = select_action_with(
+                sample_fns[worker_id],
                 state["obs"],
                 action_low,
                 action_high,
-                args.log_std_min,
-                args.log_std_max,
             )
         return smooth_actions(
             action,

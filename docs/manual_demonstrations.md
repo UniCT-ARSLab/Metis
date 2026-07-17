@@ -1,6 +1,6 @@
 # Dimostrazioni Manuali per gli Agenti
 
-Questa funzione permette di guidare manualmente un agente in Godot e salvare le transizioni in un dataset `.npz` riusabile dal trainer. Con azioni discrete viene usato dal DQN; con azioni continue può essere usato da DDPG o SAC.
+Questa funzione permette di guidare manualmente un agente in Godot e salvare le transizioni in un dataset `.npz` riusabile dal trainer. Con azioni discrete viene usato dal DQN; con azioni continue puo' essere usato da DDPG, DDPG+BC, DDPGfD, TD3+BC o SAC.
 
 Il formato salvato contiene:
 
@@ -139,6 +139,50 @@ python/.venv/bin/python python/train_generic.py \
   --critic2-weights-path cars_sac_track_demo_critic2.weights.h5 \
   --headless
 ```
+
+Per continuare ad applicare behavior cloning durante il reinforcement learning usa
+`ddpg_bc` oppure `td3_bc`. La loss BC legge un batch separato di vere dimostrazioni:
+
+```bash
+python/.venv/bin/python python/train_generic.py \
+  --algorithm td3_bc \
+  --godot-bin /home/fedyfausto/Godot/Godot_v4.6.2-stable_linux.x86_64 \
+  --godot-project godot \
+  --godot-scene res://scenarios/cars/cars_scenario.tscn \
+  --num-envs 4 \
+  --demo-path demos/cars_track_demo.npz \
+  --demo-bc-weight-start 1.0 \
+  --demo-bc-weight-end 0.05 \
+  --demo-bc-decay-updates 100000 \
+  --checkpoint-dir checkpoints/cars_td3_bc \
+  --headless
+```
+
+Per DDPG from Demonstrations:
+
+```bash
+python/.venv/bin/python python/train_generic.py \
+  --algorithm ddpgfd \
+  --godot-bin /home/fedyfausto/Godot/Godot_v4.6.2-stable_linux.x86_64 \
+  --godot-project godot \
+  --godot-scene res://scenarios/cars/cars_scenario.tscn \
+  --num-envs 4 \
+  --demo-path demos/cars_track_demo.npz \
+  --ddpgfd-pretrain-updates 1000 \
+  --checkpoint-dir checkpoints/cars_ddpgfd \
+  --headless
+```
+
+DDPGfD inserisce le dimostrazioni per prime, le protegge dalla sovrascrittura e usa
+replay prioritizzato con un bonus di priorita' per gli esempi esperti. Occorre quindi
+lasciare attivo `--demo-prefill`. `ddpg_bc` e `td3_bc`, invece, possono usare anche
+`--no-demo-prefill`: il dataset continua a essere usato dalla loss BC senza entrare nel
+replay online.
+
+In questo framework `td3_bc` prosegue online dopo le demo: non e' limitato a un dataset
+offline immutabile. DDPGfD usa replay prioritizzato e target TD a un passo; non concatena
+alla cieca transizioni adiacenti per un ritorno n-step, perche' il replay puo' interlacciare
+piu' agenti e piu' istanze Godot.
 
 Per usare le demo solo per behavior cloning senza riempire il replay buffer:
 

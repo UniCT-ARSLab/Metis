@@ -231,9 +231,13 @@ class EveryTrainerDrainsBeforeExitTests(unittest.TestCase):
     TRAINERS = ["dqn", "ppo", "sac", "ddpg"]
     TRAINER_DIR = Path(__file__).resolve().parents[1]
 
+    def trainer_source(self, trainer):
+        filename = "deterministic_training.py" if trainer == "ddpg" else f"train_generic_{trainer}.py"
+        return (self.TRAINER_DIR / filename).read_text()
+
     def test_every_trainer_drains_in_both_collector_modes(self):
         for trainer in self.TRAINERS:
-            source = (self.TRAINER_DIR / f"train_generic_{trainer}.py").read_text()
+            source = self.trainer_source(trainer)
             drains = source.count("wait_timeout=args.best_final_drain_timeout")
             # One for the async tail, one before the sync final save_weights.
             self.assertEqual(
@@ -244,7 +248,7 @@ class EveryTrainerDrainsBeforeExitTests(unittest.TestCase):
     def test_no_trainer_kept_a_private_copy_of_the_helper(self):
         # Four near-identical copies is how the live-weights bug survived in all of them.
         for trainer in self.TRAINERS:
-            source = (self.TRAINER_DIR / f"train_generic_{trainer}.py").read_text()
+            source = self.trainer_source(trainer)
             self.assertNotIn(
                 "def apply_ready_best_checkpoint", source,
                 msg=f"train_generic_{trainer}.py redefines the shared helper",

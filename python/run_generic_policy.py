@@ -37,7 +37,8 @@ def ensure_nvidia_pip_libs_on_path():
     os.environ["GODOT_GYM_TF_LD_READY"] = "1"
     if missing_paths:
         os.environ["LD_LIBRARY_PATH"] = ":".join(missing_paths + current_paths)
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        original_args = list(getattr(sys, "orig_argv", sys.argv))
+        os.execv(sys.executable, [sys.executable] + original_args[1:])
 
 
 configure_tensorflow_runtime()
@@ -58,7 +59,11 @@ SUCCESS_TERMINAL_REASONS = SUCCESS_EVENTS
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run a trained policy on any Godot BridgeServer scenario.")
-    parser.add_argument("--algorithm", choices=["auto", "dqn", "ddpg", "sac", "ppo"], default="auto")
+    parser.add_argument(
+        "--algorithm",
+        choices=["auto", "dqn", "ddpg", "ddpg_bc", "ddpgfd", "td3", "td3_bc", "sac", "ppo"],
+        default="auto",
+    )
     parser.add_argument("--load-from", choices=["auto", "weights", "checkpoint"], default="auto")
     parser.add_argument("--weights-path", default="generic_dqn_weights.weights.h5")
     parser.add_argument("--actor-weights-path", default=None)
@@ -225,8 +230,12 @@ def resolve_algorithm(requested, env, weights_path):
     if env.action_type == "discrete":
         return "dqn"
     if env.action_type == "continuous":
-        if "sac" in Path(weights_path).name.lower():
+        weight_name = Path(weights_path).name.lower()
+        if "sac" in weight_name:
             return "sac"
+        for variant in ("td3_bc", "ddpg_bc", "ddpgfd", "td3"):
+            if variant in weight_name:
+                return variant
         return "ddpg"
     if env.action_type == "hybrid":
         return "ppo"
@@ -234,7 +243,7 @@ def resolve_algorithm(requested, env, weights_path):
 
 
 def policy_weights_path(args, algorithm):
-    if algorithm in {"ddpg", "sac"} and args.actor_weights_path:
+    if algorithm in {"ddpg", "ddpg_bc", "ddpgfd", "td3", "td3_bc", "sac"} and args.actor_weights_path:
         return args.actor_weights_path
     return args.weights_path
 
@@ -256,7 +265,7 @@ def checkpoint_episode(checkpoint_path):
 def build_policy_checkpoint(model, algorithm):
     if algorithm == "dqn":
         return tf.train.Checkpoint(model=model)
-    if algorithm in {"ddpg", "sac"}:
+    if algorithm in {"ddpg", "ddpg_bc", "ddpgfd", "td3", "td3_bc", "sac"}:
         return tf.train.Checkpoint(actor=model)
     if algorithm == "ppo":
         return tf.train.Checkpoint(model=model)
@@ -421,7 +430,7 @@ def main():
         algorithm = resolve_algorithm(args.algorithm, env, args.actor_weights_path or args.weights_path)
         if algorithm == "dqn":
             model = build_shared_q_network(obs_dim=env.obs_dim, num_actions=env.num_actions)
-        elif algorithm == "ddpg":
+        elif algorithm in {"ddpg", "ddpg_bc", "ddpgfd", "td3", "td3_bc"}:
             model = build_continuous_actor(obs_dim=env.obs_dim, action_size=env.action_size)
         elif algorithm == "sac":
             model = build_sac_actor(obs_dim=env.obs_dim, action_size=env.action_size)

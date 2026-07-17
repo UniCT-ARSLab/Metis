@@ -13,7 +13,7 @@ Per creare un nuovo agente o scenario, vedi [Tutorial nuovo scenario/agente](doc
 - `ScenarioController` coordina agenti, reset, reward di scenario e terminal state.
 - Il bridge usa lockstep di default: con Python connesso, la fisica avanza solo durante
   `reset` e `step`; in headless Godot usa timestep fisso senza attesa del tempo reale.
-- Con `--collector-mode async` (default), DQN, DDPG e SAC eseguono un collector indipendente per
+- Con `--collector-mode async` (default), DQN, DDPG, TD3 e SAC eseguono un collector indipendente per
   ogni env, ciascuno con una copia CPU della policy. Il learner aggiorna il modello in
   parallelo e pubblica periodicamente nuovi pesi ai collector.
 - Il training usa un solo learner centrale: replay buffer, optimizer e modello trainabile
@@ -41,7 +41,8 @@ opponent pool. Ogni corpo agente deve esporre `get_team_id()` (oppure una propri
 snapshot storiche in `CHECKPOINT_DIR/opponents`, assegna a rotazione una squadra alla
 policy corrente e usa una snapshot congelata per l'altra. Le esperienze dell'avversario
 non vengono inserite nel replay o nel batch on-policy.
-L'opponent pool storico richiede attualmente `--collector-mode sync`.
+L'opponent pool storico funziona in async con DQN; PPO, SAC e la famiglia DDPG/TD3
+richiedono ancora `--collector-mode sync` quando il pool e' attivo.
 
 ## Python Attuale
 
@@ -49,7 +50,12 @@ File principali:
 
 - `python/train_generic.py`: entrypoint unico per il training.
 - `python/train_generic_dqn.py`: azioni discrete.
-- `python/train_generic_ddpg.py`: azioni continue.
+- `python/train_generic_ddpg.py`: DDPG per azioni continue.
+- `python/train_generic_ddpg_bc.py`: DDPG con behavior cloning.
+- `python/train_generic_ddpgfd.py`: DDPG from Demonstrations.
+- `python/train_generic_td3.py`: TD3 per azioni continue.
+- `python/train_generic_td3_bc.py`: TD3 con behavior cloning.
+- `python/deterministic_training.py`: infrastruttura condivisa dai cinque trainer deterministici.
 - `python/train_generic_sac.py`: azioni continue con SAC.
 - `python/train_generic_ppo.py`: azioni ibride.
 - `python/run_generic_policy.py`: esecuzione di un modello addestrato.
@@ -185,7 +191,7 @@ directory cronologica principale, oppure `--resume-checkpoint` con un checkpoint
 preciso dotato del replay associato.
 
 Tutti i trainer supportano `--log-format pretty` (default) e `--log-format compact`.
-Con `Ctrl+C` salvano l'ultimo episodio completato, i pesi e, per SAC/DDPG/DQN,
+Con `Ctrl+C` salvano l'ultimo episodio completato, i pesi e, per SAC/DDPG/TD3/DQN,
 anche il replay buffer; poi chiudono connessioni e processi Godot senza traceback.
 Attendi il messaggio `Interrupted training saved` prima di chiudere il terminale.
 
@@ -264,7 +270,7 @@ comportamento precedente usa `--async-update-basis env_steps`. Il numero di upda
 intervallo e' `--async-updates-per-step`; usa
 `--async-max-updates-per-env-step 0` soltanto se vuoi disabilitare il limite di sicurezza.
 
-In DQN, DDPG e SAC le policy locali sono sincronizzate ogni
+In DQN, DDPG, TD3 e SAC le policy locali sono sincronizzate ogni
 `--async-policy-sync-steps` control step e il
 learner pubblica una snapshot ogni `--async-policy-publish-updates` aggiornamenti della
 policy. Valori piu' bassi riducono il ritardo della policy ma aumentano copie e
@@ -273,7 +279,7 @@ learner. I checkpoint memorizzano gli episodi gia' consumati dal learner; dopo
 un'interruzione un episodio parziale puo' essere ripetuto, evitando di saltare
 esperienza che era ancora in coda.
 
-DQN, DDPG e SAC usano un replay buffer NumPy circolare preallocato: il costo del
+DQN, DDPG, TD3 e SAC usano un replay buffer NumPy circolare preallocato: il costo del
 sampling non cresce con la dimensione del buffer. In async, `--async-replay-save`
 (default) copia uno snapshot consistente e comprime il file `.npz` in background.
 La chiusura finale attende comunque il completamento del file. Usa
@@ -300,9 +306,10 @@ rollout, poi attendono tutti il PPO update della generazione prima di ripartire 
 nuova rete e il nuovo `log_std`. Nei log compare `collector=async_on_policy`. Non usa
 policy lag e non scarta rollout.
 
-Il self-play con `--opponent-pool` storico richiede per ora `--collector-mode sync`;
-`--multi-agent` con parameter sharing e policy corrente funziona invece in `async` per
-tutti i backend.
+Tutti i backend supportano `--collector-mode async` con single-agent o multi-agent e
+parameter sharing. Anche l'opponent pool storico DQN supporta async: ogni worker conserva
+la propria snapshot congelata e il proprio lato learner per l'intero episodio. Negli
+altri backend l'opponent pool richiede ancora `--collector-mode sync`.
 
 Per ripristinare il comportamento precedente usa esplicitamente:
 
@@ -333,13 +340,15 @@ Il rendering e' indipendente dal collector mode:
 Le opzioni sono comuni a DQN, DDPG, SAC e PPO:
 
 ```text
---collector-mode sync
 --opponent-pool
 --opponent-snapshot-every 100
 --opponent-pool-size 10
 --opponent-current-probability 0.2
 --opponent-sampling uniform
 ```
+
+Con DQN puoi aggiungere `--collector-mode async`; con PPO, SAC, DDPG, TD3 e relative
+varianti usa ancora `--collector-mode sync` quando il pool e' attivo.
 
 `uniform` campiona tutte le snapshot conservate, mentre `latest` usa sempre la piu'
 recente. Nel 20% degli episodi dell'esempio entrambi i team usano la policy corrente.
@@ -414,6 +423,27 @@ VSync. Il parametro storico `--delay` viene applicato soltanto in lockstep.
 ## Demo Manuali
 
 Le demo si registrano con `record_demonstrations.py` e possono essere usate per prefill del replay buffer o behavior cloning. Vedi [Dimostrazioni Manuali](docs/manual_demonstrations.md).
+
+Per action space continui sono disponibili cinque trainer deterministici espliciti:
+
+| `--algorithm` | Uso |
+| --- | --- |
+| `ddpg` | Un actor e un critic; non richiede dimostrazioni. E' anche il default di `auto` per azioni continue. |
+| `ddpg_bc` | DDPG con una loss di behavior cloning calcolata soltanto su vere dimostrazioni. |
+| `ddpgfd` | DDPG from Demonstrations con pretraining actor/critic, replay prioritizzato e transizioni demo protette. |
+| `td3` | Twin critics, target policy smoothing e aggiornamento ritardato dell'actor. |
+| `td3_bc` | TD3 con regolarizzazione BC adattiva su un dataset esperto separato. |
+
+Le varianti `ddpg_bc`, `ddpgfd` e `td3_bc` richiedono almeno un
+`--demo-path`. DDPGfD mantiene le demo nel replay senza permettere alle transizioni
+online di sovrascriverle. TD3 possiede due critic, quindi non puo' riprendere un
+checkpoint DDPG; ogni variante verifica l'identita' dell'algoritmo salvata nel checkpoint.
+
+`td3_bc` e' una variante online: il critic continua a imparare dal replay del training,
+mentre l'actor riceve anche la loss BC da un batch esperto separato. DDPGfD usa un target
+TD a un passo. Il ritorno n-step ausiliario del paper non viene ricostruito attraversando
+il replay, perche' negli scenari con piu' env e agenti le transizioni adiacenti possono
+appartenere a traiettorie differenti.
 
 ## Tutorial Nuovi Scenari
 

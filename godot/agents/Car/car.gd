@@ -181,11 +181,15 @@ func set_training_optimized(enabled:bool) -> void:
 		return
 	update_status_text = false
 	auto_manage_camera = false
-	status_text.visible = false
-	debug_bars.visible = false
-	bars_viewport.process_mode = Node.PROCESS_MODE_DISABLED
-	camera.current = false
-	camera.process_mode = Node.PROCESS_MODE_DISABLED
+	if status_text != null:
+		status_text.visible = false
+	if debug_bars != null:
+		debug_bars.visible = false
+	if bars_viewport != null:
+		bars_viewport.process_mode = Node.PROCESS_MODE_DISABLED
+	if camera != null:
+		camera.current = false
+		camera.process_mode = Node.PROCESS_MODE_DISABLED
 
 
 func _apply_discrete_action(action:Variant) -> int:

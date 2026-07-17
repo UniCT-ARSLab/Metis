@@ -649,7 +649,7 @@ python/.venv/bin/python python/train_generic.py \
   --headless
 ```
 
-Con `--algorithm auto`, Python legge lo scenario e sceglie DQN per azioni discrete, DDPG per azioni continue e PPO per azioni ibride. SAC va selezionato esplicitamente.
+Con `--algorithm auto`, Python legge lo scenario e sceglie DQN per azioni discrete, DDPG per azioni continue e PPO per azioni ibride. SAC, TD3, DDPG+BC, DDPGfD e TD3+BC vanno selezionati esplicitamente. Le varianti BC e DDPGfD richiedono dimostrazioni compatibili registrate con `record_demonstrations.py`.
 
 Il training e' headless per default. Aggiungi `--no-headless` per osservare tutte le
 istanze oppure `--no-headless --render-env-count 1` per mostrare una sola preview. Il

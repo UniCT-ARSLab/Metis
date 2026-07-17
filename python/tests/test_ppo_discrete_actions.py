@@ -108,5 +108,75 @@ class DiscretePolicyRoundTripTests(unittest.TestCase):
         self.assertEqual(value.shape, (1,))
 
 
+class TracedSamplerTests(unittest.TestCase):
+    """The sampler is traced per collector because eager sampling corrupts tensor shapes
+    under concurrent collector threads. These check the shapes the crash was about, and
+    that concurrent calls stay well-formed.
+    """
+
+    def build(self, spec, obs_dim=5):
+        import tensorflow as tf
+        from models import build_hybrid_actor_critic
+        from train_generic_ppo import build_action_metadata, build_sample_action_fn, select_action
+
+        meta = build_action_metadata(spec)
+        model = build_hybrid_actor_critic(
+            obs_dim=obs_dim,
+            discrete_sizes=meta["discrete_sizes"],
+            continuous_size=meta["continuous_size"],
+        )
+        fn = build_sample_action_fn(model, obs_dim, action_meta=meta)
+        return meta, fn, select_action
+
+    def test_discrete_sampler_returns_a_scalar_action_and_bare_int(self):
+        import numpy as np
+
+        meta, fn, select_action = self.build(BREAKOUT_SPEC)
+        log_std = np.zeros((0,), dtype=np.float32)
+        selected = select_action(fn, log_std, np.zeros((5,), np.float32), meta)
+
+        self.assertIsInstance(selected["env_action"], int)
+        self.assertEqual(selected["discrete_actions"].shape, (1,))
+        self.assertIn(selected["env_action"], (0, 1, 2))
+        self.assertEqual(selected["continuous_action"].shape, (0,))
+
+    def test_hybrid_sampler_returns_the_component_dict(self):
+        import numpy as np
+
+        meta, fn, select_action = self.build(HYBRID_SPEC)
+        log_std = np.zeros((meta["continuous_size"],), dtype=np.float32)
+        selected = select_action(fn, log_std, np.zeros((5,), np.float32), meta)
+
+        self.assertIsInstance(selected["env_action"], dict)
+        self.assertIn("gear", selected["env_action"])
+        self.assertIn("steer", selected["env_action"])
+
+    def test_concurrent_calls_stay_well_formed(self):
+        # The reason this exists: eager sampling produced a 0-D action under 4 threads.
+        # A traced function is safe; this asserts every concurrent result is usable.
+        import threading
+
+        import numpy as np
+
+        meta, fn, select_action = self.build(BREAKOUT_SPEC)
+        log_std = np.zeros((0,), dtype=np.float32)
+        errors = []
+
+        def hammer():
+            try:
+                for _ in range(200):
+                    selected = select_action(fn, log_std, np.zeros((5,), np.float32), meta)
+                    assert isinstance(selected["env_action"], int)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=hammer) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30.0)
+        self.assertEqual(errors, [])
+
+
 if __name__ == "__main__":
     unittest.main()
