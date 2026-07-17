@@ -60,6 +60,7 @@ from training_support import (
     PolicySnapshot,
     BestCheckpointTracker,
     add_best_checkpoint_arguments,
+    apply_ready_best_checkpoint,
     add_collector_arguments,
     add_lockstep_tuning_arguments,
     add_parallel_env_arguments,
@@ -362,7 +363,6 @@ def run_async_dqn(
     buffer,
     checkpoint,
     checkpoint_manager,
-    best_checkpoint_manager,
     best_tracker,
     start_episode,
     start_epsilon,
@@ -546,9 +546,7 @@ def run_async_dqn(
     pool.start()
     try:
         while done_workers < len(envs):
-            apply_ready_best_checkpoint(
-                best_tracker, best_checkpoint_manager, checkpoint, buffer, completed, epsilon_for_episode(completed), args
-            )
+            apply_ready_best_checkpoint(best_tracker)
             try:
                 event = scheduler.next_event(pool, timeout=0.2)
             except Empty:
@@ -658,6 +656,11 @@ def run_async_dqn(
             f"Interrupted async training saved at completed_episodes={completed}",
             flush=True,
         )
+    else:
+        # An evaluation requested near the last episode is still running here; without
+        # this drain its result is dropped and a genuine final best is lost. Skipped on
+        # interrupt: Ctrl-C should exit, not wait.
+        apply_ready_best_checkpoint(best_tracker, wait_timeout=args.best_final_drain_timeout)
     return completed, epsilon
 
 
@@ -689,27 +692,6 @@ def request_best_checkpoint_evaluation(tracker, candidate_path, episode):
     tracker.evaluate_async(candidate_path, episode)
 
 
-def apply_ready_best_checkpoint(tracker, best_checkpoint_manager, checkpoint, buffer, current_episode, epsilon, args):
-    result = tracker.poll_ready()
-    if result is None or not tracker.is_improvement(result):
-        return None
-    best_path = save_training_checkpoint(
-        checkpoint,
-        best_checkpoint_manager,
-        buffer,
-        current_episode,
-        epsilon,
-        args,
-        save_replay=False,
-    )
-    if int(current_episode) != int(result.episode):
-        print(
-            f"Best checkpoint applied using live weights at episode={current_episode} "
-            f"(background evaluation was requested for episode={result.episode})",
-            flush=True,
-        )
-    tracker.record_best(result, best_path)
-    return best_path
 
 
 def load_demonstration_arrays(paths, obs_dim, num_actions, max_transitions=0):
@@ -822,7 +804,6 @@ def main():
     buffer = None
     checkpoint = None
     checkpoint_manager = None
-    best_checkpoint_manager = None
     stepper = None
     start_episode = 0
     last_completed_episode = None
@@ -891,12 +872,6 @@ def main():
             directory=args.checkpoint_dir,
             max_to_keep=args.keep_checkpoints,
         )
-        if best_tracker.enabled:
-            best_checkpoint_manager = tf.train.CheckpointManager(
-                checkpoint,
-                directory=str(best_tracker.directory),
-                max_to_keep=args.keep_best_checkpoints,
-            )
         resume_checkpoint = resolve_resume_checkpoint(args, checkpoint_manager)
         restored_replay_count = 0
         if resume_checkpoint and args.initial_weights_path:
@@ -1019,7 +994,6 @@ def main():
                 buffer,
                 checkpoint,
                 checkpoint_manager,
-                best_checkpoint_manager,
                 best_tracker,
                 start_episode,
                 epsilon,
@@ -1273,9 +1247,7 @@ def main():
             if snapshot_path is not None:
                 print(f"Saved opponent snapshot: {snapshot_path}", flush=True)
 
-            apply_ready_best_checkpoint(
-                best_tracker, best_checkpoint_manager, checkpoint, buffer, episode + 1, epsilon, args
-            )
+            apply_ready_best_checkpoint(best_tracker)
             if args.checkpoint_every > 0 and (episode + 1) % args.checkpoint_every == 0:
                 saved_path = save_training_checkpoint(
                     checkpoint, checkpoint_manager, buffer, episode + 1, epsilon, args
@@ -1293,6 +1265,9 @@ def main():
 
         if last_saved_episode != args.num_episodes:
             save_training_checkpoint(checkpoint, checkpoint_manager, buffer, args.num_episodes, epsilon, args, final=True)
+        # The evaluation requested on the last episode is still running; collect it
+        # instead of dropping a possibly-best result on the floor.
+        apply_ready_best_checkpoint(best_tracker, wait_timeout=args.best_final_drain_timeout)
         model.save_weights(args.weights_path)
         print(f"Saved weights: {args.weights_path}", flush=True)
     except KeyboardInterrupt:

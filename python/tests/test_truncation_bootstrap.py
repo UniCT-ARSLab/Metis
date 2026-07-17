@@ -5,6 +5,7 @@ bootstrapping through an episode that was cut by a step cap while still running.
 them teaches the agent that the world ends at --max-steps-per-episode.
 """
 
+import ast
 import sys
 import unittest
 from pathlib import Path
@@ -13,10 +14,12 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from train_generic_ppo import compute_returns_advantages  # noqa: E402
+from train_generic_ppo import compute_returns_advantages, new_trajectory  # noqa: E402
 
 GAMMA = 0.9
 LAMBDA = 1.0
+
+PPO_SOURCE = Path(__file__).resolve().parents[1] / "train_generic_ppo.py"
 
 
 class PPOTruncationBootstrapTests(unittest.TestCase):
@@ -69,6 +72,51 @@ class PPOTruncationBootstrapTests(unittest.TestCase):
         )
         # Step 0 is terminal: nothing after it may contribute.
         self.assertEqual(returns[0], 0.0)
+
+
+class PPOCollectorWiringTests(unittest.TestCase):
+    """Guards the regression that actually happened: the async collector was fixed and
+    the sync one was not, so PPO sync kept learning that the step cap ends the world.
+
+    These read the source because the collectors need live envs to run. That makes them
+    coarse, but they fail on exactly the mistake that slipped through once already.
+    """
+
+    @staticmethod
+    def append_transition_done_args():
+        """The `done` argument of every append_transition(...) call in the PPO trainer."""
+        tree = ast.parse(PPO_SOURCE.read_text())
+        args = []
+        for node in ast.walk(tree):
+            is_call = isinstance(node, ast.Call)
+            if is_call and getattr(node.func, "id", None) == "append_transition":
+                args.append(ast.unparse(node.args[4]))
+        return args
+
+    def test_no_collector_passes_the_fused_flag_to_a_transition(self):
+        done_args = self.append_transition_done_args()
+        self.assertTrue(done_args, "expected to find append_transition calls to check")
+        for done_arg in done_args:
+            self.assertNotIn(
+                "global_done", done_arg,
+                msg=(f"append_transition receives {done_arg!r}: a truncation would be "
+                     "recorded as a real terminal"),
+            )
+            self.assertIn("terminated", done_arg)
+
+    def test_every_collector_path_can_bootstrap_a_truncation(self):
+        # Four collector paths take a transition: async/sync x single/multi-agent. Each
+        # must set bootstrap_value on a step-cap cut, or its dones-only change is inert.
+        source = PPO_SOURCE.read_text()
+        self.assertEqual(
+            source.count('"bootstrap_value"] = value_of'),
+            len(self.append_transition_done_args()),
+            msg="a collector path records transitions but never sets bootstrap_value",
+        )
+
+    def test_new_trajectory_defaults_bootstrap_value_to_zero(self):
+        # Terminal episodes must not bootstrap; 0.0 is what makes the default correct.
+        self.assertEqual(new_trajectory()["bootstrap_value"], 0.0)
 
 
 class DQNTargetSemanticsTests(unittest.TestCase):

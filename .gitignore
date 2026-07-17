@@ -1,6 +1,8 @@
 .agents
 .codex
 .vscode
+.claude
 checkpoints
 
 *.h5
+*.log

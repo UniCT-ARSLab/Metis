@@ -58,6 +58,7 @@ from training_support import (
     PolicySnapshot,
     BestCheckpointTracker,
     add_best_checkpoint_arguments,
+    apply_ready_best_checkpoint,
     add_collector_arguments,
     add_log_format_argument,
     add_lockstep_tuning_arguments,
@@ -73,6 +74,10 @@ from training_support import (
 
 
 LOG_2PI = np.float32(np.log(2.0 * np.pi))
+
+# 'hybrid' mixes discrete and continuous heads; 'discrete' is the same model with the
+# continuous head absent. Both are driven from action_space_spec components.
+SUPPORTED_ACTION_TYPES = {"hybrid", "discrete"}
 
 
 def parse_args():
@@ -141,19 +146,6 @@ def request_best_checkpoint_evaluation(tracker, candidate_path, episode):
     tracker.evaluate_async(candidate_path, episode)
 
 
-def apply_ready_best_checkpoint(tracker, best_checkpoint_manager, checkpoint, current_episode):
-    result = tracker.poll_ready()
-    if result is None or not tracker.is_improvement(result):
-        return None
-    best_path = save_training_checkpoint(checkpoint, best_checkpoint_manager, current_episode)
-    if int(current_episode) != int(result.episode):
-        print(
-            f"Best checkpoint applied using live weights at episode={current_episode} "
-            f"(background evaluation was requested for episode={result.episode})",
-            flush=True,
-        )
-    tracker.record_best(result, best_path)
-    return best_path
 
 
 def describe_tensorflow_backend(args):
@@ -204,6 +196,9 @@ def build_action_metadata(action_space_spec):
         "continuous_size": int(offset),
         "continuous_low": np.asarray(continuous_low, dtype=np.float32),
         "continuous_high": np.asarray(continuous_high, dtype=np.float32),
+        # One discrete component and nothing else: the env exposes Discrete(n) and wants
+        # a bare int, not the hybrid dict. See pack_action.
+        "single_discrete": len(discrete) == 1 and not continuous,
     }
 
 
@@ -232,6 +227,16 @@ def split_model_outputs(outputs, action_meta):
 
 
 def pack_action(discrete_actions, continuous_action, action_meta):
+    """Build the action in whatever shape this scenario's env expects.
+
+    Hybrid scenarios take a {component_name: value} dict. A plain discrete scenario --
+    Breakout, for instance -- exposes Discrete(n) and its env does `int(action)`, which
+    would raise on a dict. Emitting the bare int here keeps the difference contained to
+    one function instead of leaking into every call site.
+    """
+    if action_meta["single_discrete"]:
+        return int(discrete_actions[0])
+
     action = {}
     for idx, component in enumerate(action_meta["discrete"]):
         action[component["name"]] = int(discrete_actions[idx])
@@ -422,9 +427,11 @@ def build_update_batch(trajectories, action_meta, gamma, gae_lambda):
                 len(action_meta["discrete"]),
             )
         )
+        # A discrete-only scenario has continuous_size == 0, and numpy cannot infer a -1
+        # row count against a zero-width column, so state the rows explicitly.
         continuous_parts.append(
             np.asarray(trajectory["continuous_actions"], dtype=np.float32).reshape(
-                -1,
+                len(trajectory["rewards"]),
                 action_meta["continuous_size"],
             )
         )
@@ -508,7 +515,6 @@ def run_async_ppo(
     obs_dim,
     checkpoint,
     checkpoint_manager,
-    best_checkpoint_manager,
     best_tracker,
     start_episode,
 ):
@@ -666,7 +672,7 @@ def run_async_ppo(
     pool.start()
     try:
         while completed < args.num_episodes:
-            apply_ready_best_checkpoint(best_tracker, best_checkpoint_manager, checkpoint, completed)
+            apply_ready_best_checkpoint(best_tracker)
             try:
                 event = pool.get(timeout=0.2)
             except Empty:
@@ -754,6 +760,10 @@ def run_async_ppo(
         save_training_checkpoint(checkpoint, checkpoint_manager, completed, final=True)
     if interrupted:
         print(f"Interrupted async PPO training saved at episode={completed}", flush=True)
+    else:
+        # Collect the evaluation requested near the last episode. Skipped on interrupt:
+        # Ctrl-C should exit, not wait.
+        apply_ready_best_checkpoint(best_tracker, wait_timeout=args.best_final_drain_timeout)
     return completed
 
 
@@ -776,7 +786,6 @@ def main():
     model = None
     checkpoint = None
     checkpoint_manager = None
-    best_checkpoint_manager = None
     stepper = None
     start_episode = 0
     last_completed_episode = None
@@ -804,8 +813,15 @@ def main():
             print(f"Environment stepping: {'parallel' if stepper.enabled else 'sequential'}", flush=True)
 
         env0 = envs[0]
-        if env0.action_type != "hybrid":
-            raise RuntimeError(f"train_generic_ppo.py requires action_type='hybrid', got {env0.action_type!r}")
+        # 'hybrid' is the general case; 'discrete' is the same policy with no continuous
+        # head, which build_action_metadata and build_hybrid_actor_critic already handle.
+        # 'continuous' is not: PPO's action space here is built from action_space_spec
+        # components, and a bare continuous env exposes no discrete head to sample from.
+        if env0.action_type not in SUPPORTED_ACTION_TYPES:
+            raise RuntimeError(
+                f"train_generic_ppo.py supports action_type in {sorted(SUPPORTED_ACTION_TYPES)}, "
+                f"got {env0.action_type!r}"
+            )
 
         obs_dim = env0.obs_dim
         action_meta = build_action_metadata(env0.action_space_spec)
@@ -818,8 +834,10 @@ def main():
         )
 
         for env in envs:
-            if env.obs_dim != obs_dim or env.action_type != "hybrid":
-                raise RuntimeError("All parallel environments must expose the same obs_dim and hybrid action_type")
+            if env.obs_dim != obs_dim or env.action_type != env0.action_type:
+                raise RuntimeError(
+                    "All parallel environments must expose the same obs_dim and action_type"
+                )
             specs_to_check = env.agent_specs if args.multi_agent else [env._spec_for_agent(env.agent_id)]
             for spec in specs_to_check:
                 action_space = spec.get("action_space", {})
@@ -851,12 +869,6 @@ def main():
             directory=args.checkpoint_dir,
             max_to_keep=args.keep_checkpoints,
         )
-        if best_tracker.enabled:
-            best_checkpoint_manager = tf.train.CheckpointManager(
-                checkpoint,
-                directory=str(best_tracker.directory),
-                max_to_keep=args.keep_best_checkpoints,
-            )
         resume_checkpoint = resolve_resume_checkpoint(args, checkpoint_manager)
         if resume_checkpoint:
             checkpoint.restore(resume_checkpoint).expect_partial()
@@ -894,7 +906,6 @@ def main():
                 obs_dim,
                 checkpoint,
                 checkpoint_manager,
-                best_checkpoint_manager,
                 best_tracker,
                 start_episode,
             )
@@ -989,20 +1000,30 @@ def main():
 
                 for env, state, _action, step_result in stepper.step(step_requests):
                     next_obs, reward, terminated, truncated, info = step_result
+                    # `global_done` ends the rollout; only `terminated` cuts the GAE chain.
+                    # A step-cap truncation leaves real future value behind, captured below
+                    # as the trajectory's bootstrap value.
                     global_done = bool(terminated or truncated)
+                    cut_short = bool(truncated and not terminated)
                     if args.multi_agent:
                         per_agent_rewards = np.asarray(info.get("per_agent_rewards"), dtype=np.float32)
                         per_agent_done = np.asarray(info.get("per_agent_done"), dtype=np.bool_)
+                        per_agent_terminated = np.asarray(
+                            info.get("per_agent_terminated", per_agent_done), dtype=np.bool_
+                        )
                         state["episode_reward"] += per_agent_rewards
                         for agent_id, (agent_idx, selected, agent_obs) in state["selected_by_agent"].items():
-                            done = bool(global_done or per_agent_done[agent_idx])
                             append_transition(
                                 state["trajectories"][agent_id],
                                 agent_obs,
                                 selected,
                                 float(per_agent_rewards[agent_idx]),
-                                done,
+                                bool(terminated or per_agent_terminated[agent_idx]),
                             )
+                            if cut_short and not per_agent_terminated[agent_idx]:
+                                state["trajectories"][agent_id]["bootstrap_value"] = value_of(
+                                    model, next_obs[agent_idx], action_meta
+                                )
                         state["done_mask"] = np.logical_or(state["done_mask"], per_agent_done)
                         state["done"] = global_done or bool(np.all(state["done_mask"]))
                     else:
@@ -1011,8 +1032,12 @@ def main():
                             state["selected_obs"],
                             state["selected"],
                             float(reward),
-                            global_done,
+                            bool(terminated),
                         )
+                        if cut_short:
+                            state["trajectory"]["bootstrap_value"] = value_of(
+                                model, next_obs, action_meta
+                            )
                         state["episode_reward"] += float(reward)
                         state["done"] = global_done
                     state["obs"] = next_obs
@@ -1065,7 +1090,7 @@ def main():
             if snapshot_path is not None:
                 print(f"Saved opponent snapshot: {snapshot_path}", flush=True)
 
-            apply_ready_best_checkpoint(best_tracker, best_checkpoint_manager, checkpoint, episode + 1)
+            apply_ready_best_checkpoint(best_tracker)
             if args.checkpoint_every > 0 and (episode + 1) % args.checkpoint_every == 0:
                 saved_path = save_training_checkpoint(checkpoint, checkpoint_manager, episode + 1)
                 last_saved_episode = episode + 1
@@ -1079,6 +1104,9 @@ def main():
 
         if last_saved_episode != args.num_episodes:
             save_training_checkpoint(checkpoint, checkpoint_manager, args.num_episodes, final=True)
+        # The evaluation requested on the last episode is still running; without this the
+        # finally-block's close() cancels it and a final best can never be promoted.
+        apply_ready_best_checkpoint(best_tracker, wait_timeout=args.best_final_drain_timeout)
         model.save_weights(args.weights_path)
         print(f"Saved weights: {args.weights_path}", flush=True)
     except KeyboardInterrupt:

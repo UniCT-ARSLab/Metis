@@ -815,12 +815,11 @@ delta fisico di 1/60 s ma esegue i tick senza attendere il tempo reale.
 ### Osservare il training con piu' env
 
 Il collector asincrono e' il default: ogni env avanza indipendentemente e il learner
-consuma la coda senza imporre una barriera fra le istanze. Senza `--headless`, tutti
-gli env sono visibili. Per mostrare una sola preview e lasciare gli altri worker
-headless usa:
+consuma la coda senza imporre una barriera fra le istanze. Il training e' headless per
+default. Per mostrare una sola preview e lasciare gli altri worker headless usa:
 
 ```text
---collector-mode async --render-env-count 1
+--collector-mode async --no-headless --render-env-count 1
 ```
 
 La preview non e' un env speciale: usa la stessa policy, le stesse observation e le
@@ -838,6 +837,7 @@ TensorFlow aggiorna il modello. Puoi invece separare raccolta e learner con:
 --async-queue-capacity 256 \
 --async-update-every 4 \
 --async-drain-max-events 64 \
+--no-headless \
 --render-env-count 1
 ```
 
@@ -869,15 +869,23 @@ python/.venv/bin/python python/train_generic.py \
   --async-update-every 4 \
   --async-drain-max-events 64 \
   --log-action-every 10 \
-  --checkpoint-dir checkpoints/breakout_lockstep_v1 \
-  --weights-path breakout_lockstep_v1.weights.h5 \
+  --checkpoint-dir checkpoints/breakout_dqn_v1 \
+  --weights-path breakout_dqn_v1.weights.h5 \
   --headless
 ```
 
-Per il primo training dopo l'introduzione del lockstep usa una directory nuova e non
-aggiungere `--resume` o `--initial-weights-path`. I vecchi replay contengono transizioni
-nelle quali Godot poteva avanzare durante l'aggiornamento TensorFlow; anche i pesi
-derivati da quelle transizioni non sono una base affidabile per questa validazione.
+DQN e' il backend adatto a questo action space discreto. Nel framework attuale PPO e'
+riservato agli action space ibridi, quindi non sostituire semplicemente `dqn` con `ppo`
+in questo esempio.
+
+Il default `--physics-frames-per-step 1` produce una decisione a ogni tick fisico. Puoi
+provare `2` o `4` per ridurre socket e inferenze, ma la Paddle reagira' meno spesso. In
+quel caso verifica di nuovo reward per step, durata massima e finestre temporali dello
+scenario.
+
+Usa una directory nuova quando cambi observation, action space, reward o semantica della
+fisica. Un replay raccolto con un contratto differente non e' una base valida per il
+nuovo training.
 
 Il log DQN ora riporta diagnostica indipendente dal tipo di scenario. Per Breakout
 leggerai, per esempio:
@@ -907,8 +915,8 @@ python/.venv/bin/python python/train_generic.py \
   --godot-scene res://scenarios/breakout/breakout_scenario.tscn \
   --num-envs 4 \
   --batch-size 128 \
-  --checkpoint-dir checkpoints/breakout_lockstep_v1 \
-  --weights-path breakout_lockstep_v1.weights.h5 \
+  --checkpoint-dir checkpoints/breakout_dqn_v1 \
+  --weights-path breakout_dqn_v1.weights.h5 \
   --max-steps-per-episode 0 \
   --num-episodes 3000 \
   --resume \
@@ -921,26 +929,36 @@ Al termine del training non serve uno script specifico per Breakout. Usa
 `run_generic_policy.py`, che legge lo stesso action space e lo stesso observation
 space esposti dallo scenario.
 
-Per caricare automaticamente l'ultimo checkpoint disponibile:
+Per caricare automaticamente l'ultimo checkpoint cronologico disponibile:
 
 ```bash
 python/.venv/bin/python python/run_generic_policy.py \
   --algorithm dqn \
   --load-from checkpoint \
-  --checkpoint-dir checkpoints/breakout_lockstep_v1 \
+  --checkpoint-dir checkpoints/breakout_dqn_v1 \
   --godot-bin /home/fedyfausto/Godot/Godot_v4.6.2-stable_linux.x86_64 \
   --godot-project godot \
   --godot-scene res://scenarios/breakout/breakout_scenario.tscn \
   --episodes 20 \
   --max-steps 1500 \
   --epsilon 0.0 \
-  --delay 0.02 \
   --no-headless
 ```
 
 `--epsilon 0.0` disabilita le azioni casuali: il Paddle usa sempre l'azione con il
-Q-value maggiore. `--delay 0.02` rallenta soltanto la visualizzazione e non modifica
-la fisica dello scenario.
+Q-value maggiore. Con una finestra visibile il runner `auto` seleziona la modalita'
+realtime; per una valutazione deterministica usa invece
+`--headless --execution-mode lockstep`.
+
+Per eseguire il checkpoint migliore scelto dalle valutazioni automatiche, usa lo stesso
+comando sostituendo la directory con:
+
+```text
+--checkpoint-dir checkpoints/breakout_dqn_v1/best
+```
+
+Riprendi sempre il training dalla directory cronologica principale: contiene il replay
+buffer, mentre `best` e' destinata a valutazione ed esecuzione.
 
 Se vuoi caricare direttamente i pesi finali invece di un checkpoint:
 
@@ -948,14 +966,13 @@ Se vuoi caricare direttamente i pesi finali invece di un checkpoint:
 python/.venv/bin/python python/run_generic_policy.py \
   --algorithm dqn \
   --load-from weights \
-  --weights-path breakout_lockstep_v1.weights.h5 \
+  --weights-path breakout_dqn_v1.weights.h5 \
   --godot-bin /home/fedyfausto/Godot/Godot_v4.6.2-stable_linux.x86_64 \
   --godot-project godot \
   --godot-scene res://scenarios/breakout/breakout_scenario.tscn \
   --episodes 20 \
   --max-steps 1500 \
   --epsilon 0.0 \
-  --delay 0.02 \
   --no-headless
 ```
 
@@ -965,14 +982,13 @@ Per lasciare la policy in esecuzione finche' non premi `Ctrl+C`:
 python/.venv/bin/python python/run_generic_policy.py \
   --algorithm dqn \
   --load-from checkpoint \
-  --checkpoint-dir checkpoints/breakout_lockstep_v1 \
+  --checkpoint-dir checkpoints/breakout_dqn_v1 \
   --godot-bin /home/fedyfausto/Godot/Godot_v4.6.2-stable_linux.x86_64 \
   --godot-project godot \
   --godot-scene res://scenarios/breakout/breakout_scenario.tscn \
   --infinite \
   --no-time-limit \
   --epsilon 0.0 \
-  --delay 0.02 \
   --no-headless
 ```
 

@@ -832,6 +832,13 @@ python/.venv/bin/python python/train_generic.py \
 PPO e' on-policy: non usa replay buffer. `--batch-size` indica la dimensione dei
 minibatch usati per aggiornare le traiettorie appena raccolte.
 
+L'opponent pool storico richiede `--collector-mode sync`; il trainer rifiuta la
+combinazione con `async` per evitare che una traiettoria cambi avversario o lato learner.
+Senza pool, il multi-agent con policy corrente condivisa puo' usare il collector
+asincrono. Mantieni `--physics-frames-per-step 1` finche' non hai validato missili,
+cooldown e sensori: un valore maggiore riduce la frequenza delle decisioni e cambia la
+durata fisica di ogni finestra espressa in step.
+
 Per riprendere:
 
 ```bash
@@ -845,6 +852,11 @@ python/.venv/bin/python python/train_generic.py \
   --checkpoint-dir checkpoints/tank_battle_ppo_v1 \
   --weights-path tank_battle_ppo_v1.weights.h5 \
   --multi-agent \
+  --collector-mode sync \
+  --opponent-pool \
+  --opponent-snapshot-every 100 \
+  --opponent-pool-size 12 \
+  --opponent-current-probability 0.2 \
   --resume \
   --headless
 ```
@@ -864,7 +876,9 @@ python/.venv/bin/python python/run_generic_policy.py \
 ```
 
 In esecuzione, le azioni discrete usano `argmax` e quelle continue la media della
-policy, senza rumore di esplorazione.
+policy, senza rumore di esplorazione. Per caricare il best checkpoint al posto dei pesi
+finali usa `--load-from checkpoint` insieme a
+`--checkpoint-dir checkpoints/tank_battle_ppo_v1/best` e ometti `--weights-path`.
 
 ## 19. Metriche utili
 

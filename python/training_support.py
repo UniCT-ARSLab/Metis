@@ -3,6 +3,8 @@ import copy
 import json
 import os
 import re
+import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -10,7 +12,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from itertools import count
 from pathlib import Path
 from queue import Empty, Full, Queue
@@ -89,6 +91,17 @@ def add_best_checkpoint_arguments(parser):
     )
     parser.add_argument("--best-evaluation-timeout", type=float, default=1800.0)
     parser.add_argument(
+        "--best-final-drain-timeout",
+        type=float,
+        default=120.0,
+        help=(
+            "Seconds to wait, when training finishes normally, for an evaluation that is "
+            "still running so its result is not thrown away. An evaluation requested on "
+            "the last episode would otherwise never be collected. Zero exits immediately; "
+            "interrupting with Ctrl-C never waits."
+        ),
+    )
+    parser.add_argument(
         "--best-evaluation-device",
         choices=["cpu", "auto"],
         default="cpu",
@@ -111,6 +124,9 @@ class PolicyEvaluationResult:
 class BestCheckpointTracker:
     """Evaluate exact checkpoints in an isolated Godot process and rank them consistently."""
 
+    # Grace between asking the evaluator to stop and killing it outright.
+    EVALUATION_TERMINATE_GRACE = 5.0
+
     def __init__(self, args, algorithm):
         self.args = args
         self.algorithm = str(algorithm)
@@ -118,16 +134,29 @@ class BestCheckpointTracker:
         configured_dir = getattr(args, "best_checkpoint_dir", None)
         self.directory = Path(configured_dir or (Path(args.checkpoint_dir) / "best"))
         self.metadata_path = self.directory / "best_metrics.json"
+        self.staging_directory = self.directory / ".staging"
         self.best_key = None
         self.best_summary = None
         self._executor = None
-        self._pending = None  # (future, episode, checkpoint_path)
+        self._pending = None  # (future, episode, staged_prefix)
+        self._ready = None  # (result, staged_prefix) awaiting promote or discard
+        self._retained = []  # [(episode, prefix)] oldest first
+        self._closing = threading.Event()
+        self._process = None
+        self._process_lock = threading.Lock()
         if self.enabled:
             self._validate_arguments()
             self.directory.mkdir(parents=True, exist_ok=True)
+            self.staging_directory.mkdir(parents=True, exist_ok=True)
+            self._clear_staging()  # drop leftovers from a killed run
+            self._load_retained()
             self._load_metadata()
 
     def _validate_arguments(self):
+        # The tracker owns and prunes its directory, so sharing it with the training
+        # checkpoints would let it delete live training state.
+        if self.directory.resolve() == Path(self.args.checkpoint_dir).resolve():
+            raise ValueError("--best-checkpoint-dir must differ from --checkpoint-dir")
         if int(self.args.best_evaluation_every) < 1:
             raise ValueError("--best-evaluation-every must be at least 1 when best checkpoints are enabled")
         if int(self.args.best_evaluation_episodes) < 1:
@@ -136,6 +165,9 @@ class BestCheckpointTracker:
             raise ValueError("--keep-best-checkpoints must be at least 1")
         if float(self.args.best_evaluation_timeout) <= 0.0:
             raise ValueError("--best-evaluation-timeout must be greater than zero")
+        # Zero is meaningful (exit without waiting); negative is not.
+        if float(getattr(self.args, "best_final_drain_timeout", 0.0)) < 0.0:
+            raise ValueError("--best-final-drain-timeout cannot be negative")
         if self.args.best_evaluation_training_episode is not None and int(
             self.args.best_evaluation_training_episode
         ) < 0:
@@ -235,13 +267,8 @@ class BestCheckpointTracker:
                 flush=True,
             )
             try:
-                completed = subprocess.run(
-                    command,
-                    env=child_env,
-                    capture_output=True,
-                    text=True,
-                    timeout=float(self.args.best_evaluation_timeout),
-                    check=False,
+                returncode, stdout, stderr = self._run_evaluation_process(
+                    command, child_env, float(self.args.best_evaluation_timeout)
                 )
             except subprocess.TimeoutExpired:
                 print(
@@ -250,10 +277,14 @@ class BestCheckpointTracker:
                     flush=True,
                 )
                 return None
-            if completed.returncode != 0 or not summary_path.is_file():
-                details = (completed.stderr or completed.stdout or "no evaluator output").strip()
+            if self._closing.is_set():
+                # We killed it on the way out; an exit code from that is not a failure.
+                print("Best-policy evaluation cancelled during shutdown.", flush=True)
+                return None
+            if returncode != 0 or not summary_path.is_file():
+                details = (stderr or stdout or "no evaluator output").strip()
                 print(
-                    f"WARNING: best-policy evaluation failed with exit={completed.returncode}:\n{details}",
+                    f"WARNING: best-policy evaluation failed with exit={returncode}:\n{details}",
                     flush=True,
                 )
                 return None
@@ -266,6 +297,75 @@ class BestCheckpointTracker:
             )
             return PolicyEvaluationResult(int(episode), summary)
 
+    def _run_evaluation_process(self, command, child_env, timeout):
+        """Run the evaluator, keeping a handle so close() can actually stop it.
+
+        subprocess.run() gives no way to reach the child, so a shutdown had to wait out
+        --best-evaluation-timeout (30 min by default) -- and ThreadPoolExecutor's atexit
+        hook joins its non-daemon threads, so that wait blocked interpreter exit.
+
+        start_new_session isolates the evaluator from the terminal's Ctrl-C so that
+        _terminate_evaluation is the single path that stops it. That is only safe
+        together with the killpg in _signal_evaluation: on its own it would strand the
+        evaluator on Ctrl-C, which is the very hang this removes.
+        """
+        popen_kwargs = {"start_new_session": True} if os.name == "posix" else {}
+        process = subprocess.Popen(
+            command,
+            env=child_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            **popen_kwargs,
+        )
+        with self._process_lock:
+            self._process = process
+        try:
+            if self._closing.is_set():
+                # close() can run between the enabled-check and Popen; without this the
+                # child would outlive the shutdown that was meant to take it down.
+                self._terminate_evaluation()
+            stdout, stderr = process.communicate(timeout=timeout)
+            return process.returncode, stdout, stderr
+        except subprocess.TimeoutExpired:
+            self._terminate_evaluation()
+            process.communicate()
+            raise
+        finally:
+            with self._process_lock:
+                self._process = None
+
+    def _terminate_evaluation(self):
+        with self._process_lock:
+            process = self._process
+        if process is None or process.poll() is not None:
+            return
+        print("Stopping the in-flight best-policy evaluation...", flush=True)
+        self._signal_evaluation(process, signal.SIGTERM)
+        try:
+            process.wait(timeout=self.EVALUATION_TERMINATE_GRACE)
+        except subprocess.TimeoutExpired:
+            self._signal_evaluation(process, signal.SIGKILL)
+
+    @staticmethod
+    def _signal_evaluation(process, signal_number):
+        """Signal the evaluator's whole session, so its Godot child dies with it.
+
+        run_generic_policy.py only reaps Godot from a `finally`, which a bare kill()
+        skips entirely. The orphaned instance keeps holding --best-evaluation-port and
+        would make every later run's evaluation fail to bind.
+        """
+        try:
+            if os.name == "posix":
+                os.killpg(os.getpgid(process.pid), signal_number)
+                return
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        if signal_number == signal.SIGKILL:
+            process.kill()
+        else:
+            process.terminate()
+
     def evaluate_async(self, checkpoint_path, episode):
         """Schedule evaluate() on a background thread so it never blocks the training loop.
 
@@ -273,7 +373,7 @@ class BestCheckpointTracker:
         (in which case this evaluation request is skipped) or best-checkpoint tracking
         is disabled.
         """
-        if not self.enabled:
+        if not self.enabled or self._closing.is_set():
             return False
         if self._pending is not None:
             print(
@@ -282,34 +382,156 @@ class BestCheckpointTracker:
                 flush=True,
             )
             return False
+        episode = int(episode)
+        # Copy now, not on promotion. The training directory prunes to
+        # --keep-checkpoints while the evaluation runs, so by the time a result comes
+        # back the evaluated bytes may already be gone -- and the evaluator itself has
+        # been reading a file the trainer was free to delete underneath it.
+        try:
+            staged_prefix = copy_checkpoint_files(
+                checkpoint_path, self.staging_directory / f"ckpt-{episode}"
+            )
+        except OSError as exc:
+            print(
+                f"WARNING: could not stage checkpoint {checkpoint_path} for evaluation: {exc}",
+                flush=True,
+            )
+            return False
         if self._executor is None:
             self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="best-ckpt-eval")
-        future = self._executor.submit(self.evaluate, checkpoint_path, episode)
-        self._pending = (future, int(episode), checkpoint_path)
+        future = self._executor.submit(self.evaluate, staged_prefix, episode)
+        self._pending = (future, episode, staged_prefix)
         return True
 
-    def poll_ready(self):
-        """Non-blocking check for a completed background evaluation.
+    def poll_ready(self, timeout=0.0):
+        """Collect a completed background evaluation.
 
-        Returns the PolicyEvaluationResult if one just finished (or None if it failed/
-        timed out), or None immediately when nothing has completed yet.
+        timeout=0.0 is the non-blocking check the training loop uses every iteration.
+        A positive timeout waits, so a final evaluation requested on the last episode
+        can still be collected instead of being silently thrown away at exit.
         """
         if self._pending is None:
             return None
-        future, _episode, _checkpoint_path = self._pending
-        if not future.done():
+        future, episode, staged_prefix = self._pending
+        if timeout > 0.0:
+            print(
+                f"Waiting up to {timeout:g}s for the best-policy evaluation of episode={episode}...",
+                flush=True,
+            )
+            try:
+                future.result(timeout=timeout)
+            except FutureTimeoutError:
+                print(
+                    f"WARNING: the evaluation of episode={episode} did not finish within "
+                    f"{timeout:g}s; its result is discarded.",
+                    flush=True,
+                )
+                return None
+            except Exception:
+                pass  # surfaced by the future.result() below
+        elif not future.done():
             return None
         self._pending = None
         try:
-            return future.result()
+            result = future.result()
         except Exception as exc:  # pragma: no cover - defensive: evaluate() already catches its own errors
             print(f"WARNING: best-policy evaluation raised an exception: {exc}", flush=True)
+            result = None
+        if result is None:
+            remove_checkpoint_files(staged_prefix)
             return None
+        # Hand the result over still attached to the bytes that produced it, so a caller
+        # cannot promote anything else by accident.
+        self._ready = (result, staged_prefix)
+        return result
+
+    def discard_ready(self):
+        """Drop a polled result that did not improve, and its staged copy."""
+        if self._ready is None:
+            return
+        _result, staged_prefix = self._ready
+        self._ready = None
+        remove_checkpoint_files(staged_prefix)
+
+    def promote_ready(self, result):
+        """Publish the exact weights that produced `result`.
+
+        Previously the caller re-saved the *live* model here, so the metadata paired
+        episode-N metrics with weights from whatever episode training had since reached.
+        Moving the staged copy means the file and the metrics always agree.
+        """
+        if self._ready is None or self._ready[0] is not result:
+            raise RuntimeError("promote_ready() requires the result returned by the last poll_ready()")
+        _result, staged_prefix = self._ready
+        self._ready = None
+        episode = int(result.episode)
+        best_prefix = self.directory / f"ckpt-{episode}"
+        remove_checkpoint_files(best_prefix)
+        for shard in checkpoint_shard_paths(staged_prefix):
+            suffix = shard.name[len(staged_prefix.name):]
+            os.replace(shard, best_prefix.with_name(best_prefix.name + suffix))
+        self._retained = [entry for entry in self._retained if entry[0] != episode]
+        self._retained.append((episode, best_prefix))
+        self._retained.sort()
+        self._prune_retained()
+        self._write_checkpoint_state()
+        self.record_best(result, best_prefix)
+        return best_prefix
+
+    def _load_retained(self):
+        entries = []
+        for index_path in self.directory.glob("ckpt-*.index"):
+            prefix = index_path.with_suffix("")
+            number = checkpoint_number(prefix)
+            if number is not None:
+                entries.append((number, prefix))
+        self._retained = sorted(entries)
+
+    def _prune_retained(self):
+        while len(self._retained) > int(self.args.keep_best_checkpoints):
+            _episode, prefix = self._retained.pop(0)
+            remove_checkpoint_files(prefix)
+
+    def _write_checkpoint_state(self):
+        """Keep tf.train.latest_checkpoint() working on the best directory.
+
+        run_generic_policy.py falls back to latest_checkpoint() when --checkpoint-path is
+        omitted, so this metafile is a user-facing contract even though a CheckpointManager
+        no longer writes it. Note the public compat.v1 entry point has no
+        save_relative_paths, so these are absolute: the best directory is not relocatable.
+        """
+        if not self._retained:
+            return
+        import tensorflow as tf  # local: keeps training_support importable without TF
+
+        tf.compat.v1.train.update_checkpoint_state(
+            str(self.directory),
+            model_checkpoint_path=str(self._retained[-1][1]),
+            all_model_checkpoint_paths=[str(prefix) for _episode, prefix in self._retained],
+        )
+
+    def _clear_staging(self):
+        for index_path in self.staging_directory.glob("ckpt-*.index"):
+            remove_checkpoint_files(index_path.with_suffix(""))
 
     def close(self):
+        """Stop the evaluator and its Godot child, then wait for the worker to unwind.
+
+        wait=True is only cheap because _terminate_evaluation ran first: once the child
+        is gone communicate() returns in milliseconds. Waiting is worth it -- the
+        executor's threads are non-daemon and CPython joins them at exit regardless, so
+        the choice is between waiting here with the child dead or waiting at exit with
+        it alive.
+        """
+        self._closing.set()
+        self._terminate_evaluation()
         if self._executor is not None:
-            self._executor.shutdown(wait=False)
+            self._executor.shutdown(wait=True, cancel_futures=True)
             self._executor = None
+        self._pending = None
+        self.discard_ready()
+        if self.enabled:
+            self._clear_staging()
 
     def record_best(self, result, checkpoint_path):
         self.best_key = self.comparison_key(result.summary)
@@ -915,6 +1137,66 @@ def resolve_resume_checkpoint(args, checkpoint_manager):
 def checkpoint_number(checkpoint_path):
     match = re.search(r"ckpt-(\d+)$", str(checkpoint_path))
     return int(match.group(1)) if match else None
+
+
+def apply_ready_best_checkpoint(tracker, wait_timeout=0.0):
+    """Promote the evaluated checkpoint itself, never the live model.
+
+    Replaces four near-identical per-trainer copies that each re-saved the live
+    checkpoint at the current episode, attributing the evaluated episode's metrics to
+    weights that were never evaluated.
+
+    wait_timeout > 0 drains an in-flight evaluation, for use when training ends normally.
+    """
+    result = tracker.poll_ready(timeout=wait_timeout)
+    if result is None:
+        return None
+    if not tracker.is_improvement(result):
+        tracker.discard_ready()
+        return None
+    return tracker.promote_ready(result)
+
+
+def checkpoint_shard_paths(prefix):
+    """Every file that makes up the TensorFlow checkpoint written at `prefix`.
+
+    The '.' in the glob keeps ckpt-1 from also matching ckpt-10's shards.
+    """
+    prefix = Path(prefix)
+    return sorted(
+        path
+        for path in prefix.parent.glob(prefix.name + ".*")
+        if path.name == prefix.name + ".index" or ".data-" in path.name
+    )
+
+
+def copy_checkpoint_files(source_prefix, target_prefix):
+    """Copy a checkpoint's shards so it survives --keep-checkpoints pruning.
+
+    Each shard lands via a temporary name and an atomic replace: a reader that opens the
+    destination concurrently sees either nothing or a complete file, never a partial one.
+    """
+    source_prefix = Path(normalize_checkpoint_path(source_prefix))
+    target_prefix = Path(target_prefix)
+    shards = checkpoint_shard_paths(source_prefix)
+    if not any(shard.name.endswith(".index") for shard in shards):
+        raise FileNotFoundError(f"Checkpoint {str(source_prefix)!r} has no .index file")
+    target_prefix.parent.mkdir(parents=True, exist_ok=True)
+    for shard in shards:
+        suffix = shard.name[len(source_prefix.name):]
+        destination = target_prefix.with_name(target_prefix.name + suffix)
+        temporary = destination.with_name(destination.name + ".tmp")
+        shutil.copyfile(shard, temporary)
+        temporary.replace(destination)
+    return target_prefix
+
+
+def remove_checkpoint_files(prefix):
+    for shard in checkpoint_shard_paths(prefix):
+        try:
+            shard.unlink()
+        except OSError:
+            pass
 
 
 def replay_path_for_checkpoint(checkpoint_path):

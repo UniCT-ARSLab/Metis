@@ -91,7 +91,8 @@ Il recorder salva l'azione continua realmente applicata:
 Solo replay-buffer prefill:
 
 ```bash
-python/.venv/bin/python python/train_generic_dqn.py \
+python/.venv/bin/python python/train_generic.py \
+  --algorithm dqn \
   --godot-bin /home/fedyfausto/Godot/Godot_v4.6.2-stable_linux.x86_64 \
   --godot-project godot \
   --multi-agent \
@@ -105,7 +106,8 @@ python/.venv/bin/python python/train_generic_dqn.py \
 Behavior cloning più DQN:
 
 ```bash
-python/.venv/bin/python python/train_generic_dqn.py \
+python/.venv/bin/python python/train_generic.py \
+  --algorithm dqn \
   --godot-bin /home/fedyfausto/Godot/Godot_v4.6.2-stable_linux.x86_64 \
   --godot-project godot \
   --multi-agent \

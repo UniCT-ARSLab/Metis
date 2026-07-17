@@ -603,6 +603,12 @@ Non usare `--multi-agent` finche' non hai validato un singolo veicolo. In seguit
 replicare agenti che non collidono tra loro per raccogliere piu' esperienza nello
 stesso env.
 
+Il training e' headless e asincrono per default. Per osservare un solo environment usa
+`--no-headless --render-env-count 1`. Parti con `--physics-frames-per-step 1`: valori
+maggiori riducono inferenze e traffico socket, ma mantengono acceleratore e sterzo per
+piu' tick fisici. Di conseguenza cambiano reattivita', durata delle finestre di stall e
+tempo fisico rappresentato da `--max-steps-per-episode`.
+
 ## 16. Allenare su piu' piste
 
 Per generalizzare davvero, usa piu' curve e geometrie. Una soluzione pulita mantiene
@@ -742,6 +748,12 @@ python/.venv/bin/python python/run_generic_policy.py \
 ```
 
 I pesi non sono intercambiabili: i due modelli hanno input dimension differenti.
+
+Per eseguire la policy migliore invece dei pesi finali, sostituisci
+`--actor-weights-path` con `--load-from checkpoint` e
+`--checkpoint-dir checkpoints/driving_path_aware_sac_v1/best`, oppure usa la
+corrispondente directory `driving_sensor_only_sac_v1/best`. I resume usano sempre la
+directory principale con il replay buffer cronologico.
 
 ## 20. Scelta pratica
 

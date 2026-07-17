@@ -651,6 +651,21 @@ python/.venv/bin/python python/train_generic.py \
 
 Con `--algorithm auto`, Python legge lo scenario e sceglie DQN per azioni discrete, DDPG per azioni continue e PPO per azioni ibride. SAC va selezionato esplicitamente.
 
+Il training e' headless per default. Aggiungi `--no-headless` per osservare tutte le
+istanze oppure `--no-headless --render-env-count 1` per mostrare una sola preview. Il
+collector asincrono e' il default; usa `--collector-mode sync` quando serve una barriera
+fra gli environment o quando abiliti l'opponent pool storico.
+
+Per ridurre il numero di round trip puoi aggiungere `--physics-frames-per-step N`: la
+stessa azione rimane attiva per `N` tick fisici prima della observation successiva. Parti
+da `1`; valori come `2` o `4` hanno senso solo se l'agente non richiede controlli rapidi.
+Reward per step, finestre di stall e limite di step misurano decision step, quindi vanno
+rivalutati quando cambi questo parametro.
+
+Mantieni distinta la fine reale dell'episodio (`terminated`) da un limite esterno
+(`truncated`). Il framework azzera il bootstrap del valore soltanto sui terminali reali;
+usare `terminated` per un semplice timeout insegna quindi un valore finale artificiale.
+
 Per azioni continue puoi guidare l'esplorazione casuale iniziale direttamente da Godot:
 
 ```gdscript
@@ -843,15 +858,23 @@ Usa lo script di run o un modello random. Serve solo a vedere che tutto si muove
 Per scenario nuovo:
 
 ```bash
-python train_capture_point_dqn.py \
-  --headless \
+python/.venv/bin/python python/train_generic.py \
+  --algorithm dqn \
+  --godot-bin /percorso/a/Godot \
+  --godot-project godot \
+  --godot-scene res://scenarios/capture_point/capture_point.tscn \
   --num-envs 4 \
   --num-episodes 2000 \
   --batch-size 128 \
   --learning-rate 0.0005 \
   --replay-warmup 4000 \
-  --epsilon-decay 0.997
+  --checkpoint-dir checkpoints/capture_point_dqn \
+  --weights-path capture_point_dqn_weights.weights.h5
 ```
+
+Il trainer e' gia' headless e asincrono con questi argomenti. Omettendo
+`--epsilon-decay`, DQN ricava automaticamente una discesa coerente con gli episodi
+rimanenti, anche dopo un resume.
 
 Se il training e' instabile:
 
@@ -877,7 +900,7 @@ Se non impara nulla:
 
 ## 13. Usare il modello addestrato
 
-Durante il training vengono salvati checkpoint:
+Durante il training vengono salvati checkpoint cronologici:
 
 ```text
 checkpoints/capture_point_dqn/
@@ -889,7 +912,28 @@ e pesi finali:
 capture_point_dqn_weights.weights.h5
 ```
 
-Per usare i pesi devi ricostruire la stessa rete:
+Per osservare la policy migliore selezionata dalle valutazioni automatiche:
+
+```bash
+python/.venv/bin/python python/run_generic_policy.py \
+  --algorithm dqn \
+  --load-from checkpoint \
+  --checkpoint-dir checkpoints/capture_point_dqn/best \
+  --godot-bin /percorso/a/Godot \
+  --godot-project godot \
+  --godot-scene res://scenarios/capture_point/capture_point.tscn \
+  --episodes 20 \
+  --epsilon 0.0 \
+  --no-headless
+```
+
+Il runner visibile usa automaticamente la modalita' realtime; in headless usa lockstep.
+Per riprendere l'allenamento usa invece `--resume` con la directory cronologica
+principale, che contiene anche il replay buffer. La directory `best` e' pensata per
+valutazione e produzione.
+
+Se integri il modello in uno script personalizzato, puoi anche caricare i pesi
+ricostruendo la stessa rete:
 
 ```python
 from models import build_shared_q_network

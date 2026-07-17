@@ -76,6 +76,8 @@ class AsyncPPOTests(unittest.TestCase):
             async_replay_save=True,
             num_episodes=2,
             max_steps_per_episode=2,
+            physics_frames_per_step=1,
+            best_final_drain_timeout=0.0,
             episode_seed_multiplier=1000,
             multi_agent=False,
             gamma=0.99,
@@ -101,8 +103,14 @@ class AsyncPPOTests(unittest.TestCase):
                 obs_dim,
                 checkpoint,
                 manager,
-                None,
-                SimpleNamespace(should_evaluate=lambda _episode: False),
+                # The loop polls the tracker every iteration, so the fake needs the
+                # whole surface apply_ready_best_checkpoint touches, not just
+                # should_evaluate.
+                SimpleNamespace(
+                    should_evaluate=lambda _episode: False,
+                    poll_ready=lambda timeout=0.0: None,
+                    enabled=False,
+                ),
                 start_episode=0,
             )
 

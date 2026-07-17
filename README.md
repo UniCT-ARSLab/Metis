@@ -24,9 +24,9 @@ Per creare un nuovo agente o scenario, vedi [Tutorial nuovo scenario/agente](doc
   quindi resta correttamente on-policy senza una barriera a ogni step.
 - Con `--collector-mode sync`, i trainer inviano gli step dei vari env in parallelo ma
   attendono tutte le risposte prima di aggiornare il modello.
-- Senza `--headless`, tutte le istanze vengono renderizzate per default. Usa
-  `--render-env-count 1` per mostrare una sola preview e lasciare gli altri worker
-  headless. `--headless` forza invece tutte le istanze senza rendering.
+- Il training e' headless per default. Usa `--no-headless` per mostrare le istanze;
+  insieme a `--render-env-count 1` viene renderizzata una sola preview e gli altri
+  worker restano headless.
 - Ogni agente Godot espone observation space, action space, reward e done.
 - `Agent/ActionSpace` dichiara azioni discrete, continue o ibride da Inspector.
 - `Agent/ObservationSystem` registra observation source riusabili come metodi del corpo, raycast e sensori target.
@@ -157,6 +157,12 @@ di successo; per scenari senza successi raggiunti la reward distingue comunque i
 candidati. Le metriche e il checkpoint scelto sono registrati in
 `CHECKPOINT_DIR/best/best_metrics.json`.
 
+La valutazione avviene in background su una copia esatta del checkpoint candidato,
+senza fermare il learner. Se una valutazione precedente e' ancora attiva, il candidato
+successivo viene saltato invece di accumulare processi e code. Alla fine del training il
+trainer attende per default fino a 120 secondi l'ultima valutazione
+(`--best-final-drain-timeout`); con `Ctrl+C` la annulla per garantire una chiusura pulita.
+
 La frequenza e il campione si configurano con `--best-evaluation-every` e
 `--best-evaluation-episodes`; `--best-metric reward_mean` rende invece la reward il
 criterio primario. `--best-evaluation-training-episode` consente di fissare
@@ -172,6 +178,11 @@ I checkpoint cronologici restano la fonte consigliata per `--resume`, perche'
 conservano anche il replay buffer. I checkpoint `best` conservano modello,
 optimizer e stato del trainer ma non duplicano il replay buffer: sono destinati
 soprattutto alla valutazione e all'esecuzione della policy migliore.
+
+Per eseguire direttamente la policy migliore usa `--load-from checkpoint` insieme a
+`--checkpoint-dir CHECKPOINT_DIR/best`. Per riprendere il training usa invece la
+directory cronologica principale, oppure `--resume-checkpoint` con un checkpoint
+preciso dotato del replay associato.
 
 Tutti i trainer supportano `--log-format pretty` (default) e `--log-format compact`.
 Con `Ctrl+C` salvano l'ultimo episodio completato, i pesi e, per SAC/DDPG/DQN,
@@ -195,6 +206,21 @@ terminale, per esempio `life_lost`, `level_cleared`, collisione o goal. Usala so
 quando ogni episodio possiede una condizione terminale affidabile: un episodio bloccato
 non aggiorna i contatori per episodio e puo' trattenere indefinitamente un collector.
 Il default resta finito per proteggere scenari nuovi o configurati in modo incompleto.
+
+`terminated=true` indica una conclusione reale dello scenario; `truncated=true` indica
+un taglio esterno, come il limite di step. I trainer mantengono il bootstrap del valore
+sulle transizioni troncate e lo azzerano soltanto sui terminali reali.
+
+### Frequenza delle azioni
+
+`--physics-frames-per-step N` mantiene la stessa azione per `N` tick fisici Godot prima
+di restituire una nuova observation. Per esempio, con fisica a 60 Hz e `N=4`, la policy
+decide a 15 Hz. Questo riduce round trip socket e inferenze senza cambiare `time_scale`
+o il significato di `delta`; il default e' `1`.
+
+Il parametro va scelto in base alla dinamica dello scenario. Reward per step, finestre
+di stall, cooldown espressi in step e `--max-steps-per-episode` misurano decision step,
+quindi modificare `N` cambia la loro durata fisica e puo' richiedere di scalarli.
 
 ### Collector sincrono e asincrono
 
@@ -292,11 +318,11 @@ registrati nel replay.
 Il rendering e' indipendente dal collector mode:
 
 ```text
-# Tutti gli env visibili (default se --headless e' assente)
---num-envs 4
+# Tutti gli env visibili
+--num-envs 4 --no-headless
 
 # Solo un env visibile, gli altri tre headless
---num-envs 4 --render-env-count 1
+--num-envs 4 --no-headless --render-env-count 1
 
 # Tutti gli env headless
 --num-envs 4 --headless
@@ -375,10 +401,11 @@ python/.venv/bin/python python/run_generic_policy.py \
   --no-headless
 ```
 
-`run_generic_policy.py` usa `--execution-mode lockstep` per default: Godot esegue
-un passo fisico per richiesta Python, soluzione deterministica adatta a confronti e
-test. Per osservare o distribuire una policy usa `--execution-mode realtime`: Godot
-continua la simulazione tra due inferenze mantenendo l'ultima azione ricevuta.
+`run_generic_policy.py` usa `--execution-mode auto`: seleziona `lockstep` quando e'
+headless e `realtime` quando la finestra Godot e' visibile. In lockstep Godot esegue
+un decision step per richiesta Python, soluzione deterministica adatta a confronti e
+test. In realtime Godot continua la simulazione tra due inferenze mantenendo l'ultima
+azione ricevuta. Le due modalita' possono sempre essere forzate esplicitamente.
 `--realtime-action-hz` limita la frequenza di aggiornamento delle azioni in tempo
 reale (60 Hz per default, `0` senza pacing), mentre
 `--realtime-simulation-fps` limita il loop Godot a 60 FPS anche in headless o senza

@@ -39,6 +39,7 @@ from training_support import (
     PolicySnapshot,
     BestCheckpointTracker,
     add_best_checkpoint_arguments,
+    apply_ready_best_checkpoint,
     add_collector_arguments,
     add_lockstep_tuning_arguments,
     add_parallel_env_arguments,
@@ -435,26 +436,6 @@ def request_best_checkpoint_evaluation(tracker, candidate_path, episode):
     tracker.evaluate_async(candidate_path, episode)
 
 
-def apply_ready_best_checkpoint(tracker, best_checkpoint_manager, checkpoint, buffer, current_episode, args):
-    result = tracker.poll_ready()
-    if result is None or not tracker.is_improvement(result):
-        return None
-    best_path = save_training_checkpoint(
-        checkpoint,
-        best_checkpoint_manager,
-        buffer,
-        current_episode,
-        args,
-        save_replay=False,
-    )
-    if int(current_episode) != int(result.episode):
-        print(
-            f"Best checkpoint applied using live weights at episode={current_episode} "
-            f"(background evaluation was requested for episode={result.episode})",
-            flush=True,
-        )
-    tracker.record_best(result, best_path)
-    return best_path
 
 
 def apply_optimizer_learning_rates(
@@ -496,7 +477,6 @@ def run_async_sac(
     buffer,
     checkpoint,
     checkpoint_manager,
-    best_checkpoint_manager,
     best_tracker,
     start_episode,
     action_low,
@@ -597,7 +577,7 @@ def run_async_sac(
     pool.start()
     try:
         while done_workers < len(envs):
-            apply_ready_best_checkpoint(best_tracker, best_checkpoint_manager, checkpoint, buffer, completed, args)
+            apply_ready_best_checkpoint(best_tracker)
             try:
                 event = scheduler.next_event(pool, timeout=0.2)
             except Empty:
@@ -752,6 +732,10 @@ def run_async_sac(
             f"Interrupted async training saved at completed_episodes={completed}",
             flush=True,
         )
+    else:
+        # Collect the evaluation requested near the last episode. Skipped on interrupt:
+        # Ctrl-C should exit, not wait.
+        apply_ready_best_checkpoint(best_tracker, wait_timeout=args.best_final_drain_timeout)
     return completed
 
 
@@ -779,7 +763,6 @@ def main():
     buffer = None
     checkpoint = None
     checkpoint_manager = None
-    best_checkpoint_manager = None
     stepper = None
     start_episode = 0
     last_completed_episode = None
@@ -869,12 +852,6 @@ def main():
             directory=args.checkpoint_dir,
             max_to_keep=args.keep_checkpoints,
         )
-        if best_tracker.enabled:
-            best_checkpoint_manager = tf.train.CheckpointManager(
-                checkpoint,
-                directory=str(best_tracker.directory),
-                max_to_keep=args.keep_best_checkpoints,
-            )
         resume_checkpoint = resolve_resume_checkpoint(args, checkpoint_manager)
         restored_replay_count = 0
         if resume_checkpoint:
@@ -988,7 +965,6 @@ def main():
                 buffer,
                 checkpoint,
                 checkpoint_manager,
-                best_checkpoint_manager,
                 best_tracker,
                 start_episode,
                 action_low,
@@ -1331,7 +1307,7 @@ def main():
             if snapshot_path is not None:
                 print(f"Saved opponent snapshot: {snapshot_path}", flush=True)
 
-            apply_ready_best_checkpoint(best_tracker, best_checkpoint_manager, checkpoint, buffer, episode + 1, args)
+            apply_ready_best_checkpoint(best_tracker)
             if args.checkpoint_every > 0 and (episode + 1) % args.checkpoint_every == 0:
                 saved_path = save_training_checkpoint(
                     checkpoint,
@@ -1360,6 +1336,9 @@ def main():
                 args,
                 final=True,
             )
+        # The evaluation requested on the last episode is still running; without this the
+        # finally-block's close() cancels it and a final best can never be promoted.
+        apply_ready_best_checkpoint(best_tracker, wait_timeout=args.best_final_drain_timeout)
         actor.save_weights(args.actor_weights_path)
         save_critic_weights(critic1, critic2, args)
         print(f"Saved actor weights: {args.actor_weights_path}", flush=True)

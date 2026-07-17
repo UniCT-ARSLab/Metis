@@ -558,6 +558,15 @@ il pool conserva fino a dieci copie congelate dei suoi pesi. Per ogni episodio v
 scelta una snapshot e, in ogni env, viene sorteggiato quale `team_id` apprende. Nel 20%
 degli episodi entrambi i team usano invece la policy corrente.
 
+L'opponent pool storico richiede `--collector-mode sync`: il framework rifiuta
+esplicitamente la combinazione con `async`, perche' ogni episodio deve restare associato
+alla snapshot e al lato learner scelti. Se disabiliti il pool, il parameter sharing
+current-vs-current puo' invece usare il collector asincrono.
+
+Pong richiede reazioni rapide: conserva `--physics-frames-per-step 1` come base. Un
+frame skip maggiore puo' aumentare il throughput, ma riduce la frequenza con cui il
+Paddle puo' correggere la direzione e cambia la durata delle reward per step.
+
 ### Significato dei parametri del pool
 
 | Parametro | Effetto |
@@ -737,9 +746,13 @@ python/.venv/bin/python python/run_generic_policy.py \
   --episodes 20 \
   --max-steps 1200 \
   --epsilon 0.0 \
-  --delay 0.01 \
   --no-headless
 ```
+
+Con la finestra visibile il runner usa automaticamente la modalita' realtime. Per
+provare la policy selezionata dalle valutazioni automatiche sostituisci la directory con
+`checkpoints/pong_shared_dqn_v1/best`. I resume devono continuare a usare la directory
+principale, che conserva replay, optimizer e opponent pool.
 
 Questo comando usa la stessa policy corrente per entrambi i Paddle. Per osservare una
 singola snapshot storica su entrambi i lati puoi usare, per esempio:

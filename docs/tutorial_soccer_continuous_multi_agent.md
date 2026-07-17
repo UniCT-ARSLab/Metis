@@ -816,6 +816,13 @@ squadra usa l'actor corrente e una usa una snapshot; solo le transizioni della s
 learner aggiornano actor e critic. Negli episodi `current` entrambi i lati usano e
 allenano la policy corrente.
 
+L'opponent pool storico richiede `--collector-mode sync`; la combinazione con `async`
+viene rifiutata per mantenere avversario e lato learner coerenti per tutto il match.
+Senza pool, il parameter sharing current-vs-current puo' usare il collector asincrono.
+Mantieni inizialmente `--physics-frames-per-step 1`: calcio, cooldown e contatti con la
+palla sono sensibili alla frequenza delle decisioni. Se aumenti il valore, rivaluta
+anche reward e finestre espresse in step.
+
 ## 17. Curriculum
 
 Stadi consigliati:
@@ -927,6 +934,11 @@ python/.venv/bin/python python/run_generic_policy.py \
 
 In esecuzione SAC usa la media deterministica dell'actor, quindi `kick_strength` puo'
 essere meno variabile rispetto al training stocastico.
+
+Per eseguire il best checkpoint usa `--load-from checkpoint` insieme a
+`--checkpoint-dir checkpoints/soccer_1v1_sac_v1/best` e ometti
+`--actor-weights-path`. Riprendi invece il training dalla directory principale, che
+conserva replay, optimizer e opponent pool.
 
 ## 21. Metriche
 
