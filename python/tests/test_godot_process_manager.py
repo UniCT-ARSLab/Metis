@@ -1,8 +1,9 @@
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from godot_process_manager import GodotProcessManager
+from envs.process_manager import GodotProcessManager
 
 
 class FakeProcess:
@@ -25,6 +26,12 @@ class FakeProcess:
 
 
 class GodotProcessManagerTests(unittest.TestCase):
+    def test_default_runtime_paths_live_outside_the_python_package(self):
+        manager = GodotProcessManager(godot_bin="godot")
+        repository_root = Path(__file__).resolve().parents[2]
+        self.assertEqual(manager.project_dir, repository_root / "godot")
+        self.assertEqual(manager.logs_dir, repository_root / ".runtime" / "godot_logs")
+
     def start_and_capture(self, *, headless, render_env_count):
         commands = []
 
@@ -39,8 +46,8 @@ class GodotProcessManagerTests(unittest.TestCase):
                 logs_dir=temp_dir,
             )
             with (
-                patch("godot_process_manager.subprocess.Popen", side_effect=fake_popen),
-                patch("godot_process_manager.time.sleep"),
+                patch("envs.process_manager.subprocess.Popen", side_effect=fake_popen),
+                patch("envs.process_manager.time.sleep"),
                 patch.object(manager, "_wait_for_log_ready", return_value=True),
             ):
                 manager.start_many(

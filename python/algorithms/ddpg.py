@@ -1,0 +1,11 @@
+"""DDPG training entrypoint for continuous Godot action spaces."""
+
+from algorithms.common import main as run_training
+
+
+def main():
+    run_training("ddpg")
+
+
+if __name__ == "__main__":
+    main()

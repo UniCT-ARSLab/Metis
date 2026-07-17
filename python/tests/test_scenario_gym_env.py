@@ -1,7 +1,7 @@
 import unittest
 
 
-from scenario_gym_env import ScenarioGymEnv
+from envs.scenario import ScenarioGymEnv
 
 
 class ScenarioGymEnvExecutionModeTests(unittest.TestCase):

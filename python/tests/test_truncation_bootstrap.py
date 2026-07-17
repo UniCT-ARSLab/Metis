@@ -14,12 +14,12 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from train_generic_ppo import compute_returns_advantages, new_trajectory  # noqa: E402
+from algorithms.ppo import compute_returns_advantages, new_trajectory  # noqa: E402
 
 GAMMA = 0.9
 LAMBDA = 1.0
 
-PPO_SOURCE = Path(__file__).resolve().parents[1] / "train_generic_ppo.py"
+PPO_SOURCE = Path(__file__).resolve().parents[1] / "algorithms" / "ppo.py"
 
 
 class PPOTruncationBootstrapTests(unittest.TestCase):

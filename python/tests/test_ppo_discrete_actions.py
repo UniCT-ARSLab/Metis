@@ -15,7 +15,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from train_generic_ppo import (  # noqa: E402
+from algorithms.ppo import (  # noqa: E402
     SUPPORTED_ACTION_TYPES,
     build_action_metadata,
     pack_action,
@@ -92,8 +92,8 @@ class PackActionFormatTests(unittest.TestCase):
 class DiscretePolicyRoundTripTests(unittest.TestCase):
     def test_the_shared_network_builds_and_splits_with_no_continuous_head(self):
         import tensorflow as tf
-        from models import build_hybrid_actor_critic
-        from train_generic_ppo import split_model_outputs
+        from core.models import build_hybrid_actor_critic
+        from algorithms.ppo import split_model_outputs
 
         meta = build_action_metadata(BREAKOUT_SPEC)
         model = build_hybrid_actor_critic(
@@ -116,8 +116,8 @@ class TracedSamplerTests(unittest.TestCase):
 
     def build(self, spec, obs_dim=5):
         import tensorflow as tf
-        from models import build_hybrid_actor_critic
-        from train_generic_ppo import build_action_metadata, build_sample_action_fn, select_action
+        from core.models import build_hybrid_actor_critic
+        from algorithms.ppo import build_action_metadata, build_sample_action_fn, select_action
 
         meta = build_action_metadata(spec)
         model = build_hybrid_actor_critic(

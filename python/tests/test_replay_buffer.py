@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
-from replay_buffer import ReplayBuffer
+from core.replay_buffer import ReplayBuffer
 
 
 class ReplayBufferTests(unittest.TestCase):

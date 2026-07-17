@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from train_generic_dqn import (  # noqa: E402
+from algorithms.dqn import (  # noqa: E402
     EPSILON_DECAY_FLOOR,
     episodes_to_reach_epsilon,
     resolve_epsilon_decay,

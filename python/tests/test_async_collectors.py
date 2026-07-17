@@ -1,11 +1,15 @@
 import argparse
 import time
+import sys
 import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from itertools import islice
 
 import numpy as np
 
-from training_support import (
+from core.training import (
     AsyncCollectorPool,
     AsyncEventScheduler,
     AsyncEpisodeEvent,

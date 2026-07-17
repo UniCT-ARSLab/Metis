@@ -4,7 +4,8 @@ Piccolo framework sperimentale per addestrare agenti di reinforcement learning i
 
 Godot gestisce simulazione, agenti, sensori, reward locali e bridge TCP. Python interroga lo scenario, legge observation/action space esposti dagli agenti e avvia il trainer più adatto.
 
-Per creare un nuovo agente o scenario, vedi [Tutorial nuovo scenario/agente](docs/tutorial_nuovo_scenario_agente_rl.md).
+La documentazione completa parte da [Indice documentazione](docs/README.md). Per creare
+subito un nuovo agente o scenario, vedi [Tutorial nuovo scenario/agente](docs/tutorials/tutorial_nuovo_scenario_agente_rl.md).
 
 ## Architettura
 
@@ -31,7 +32,7 @@ Per creare un nuovo agente o scenario, vedi [Tutorial nuovo scenario/agente](doc
 - `Agent/ActionSpace` dichiara azioni discrete, continue o ibride da Inspector.
 - `Agent/ObservationSystem` registra observation source riusabili come metodi del corpo, raycast e sensori target.
 - Python usa `ScenarioGymEnv` come wrapper Gymnasium generico.
-- `train_generic.py` seleziona o inoltra al backend di training.
+- `train.py` seleziona o inoltra al backend di training.
 
 Il framework supporta scenari single-agent e multi-agent. In multi-agent il trainer salva transizioni per agente nel replay buffer, usando una policy condivisa quando gli agenti hanno observation/action space compatibili.
 
@@ -48,26 +49,23 @@ richiedono ancora `--collector-mode sync` quando il pool e' attivo.
 
 File principali:
 
-- `python/train_generic.py`: entrypoint unico per il training.
-- `python/train_generic_dqn.py`: azioni discrete.
-- `python/train_generic_ddpg.py`: DDPG per azioni continue.
-- `python/train_generic_ddpg_bc.py`: DDPG con behavior cloning.
-- `python/train_generic_ddpgfd.py`: DDPG from Demonstrations.
-- `python/train_generic_td3.py`: TD3 per azioni continue.
-- `python/train_generic_td3_bc.py`: TD3 con behavior cloning.
-- `python/deterministic_training.py`: infrastruttura condivisa dai cinque trainer deterministici.
-- `python/train_generic_sac.py`: azioni continue con SAC.
-- `python/train_generic_ppo.py`: azioni ibride.
-- `python/run_generic_policy.py`: esecuzione di un modello addestrato.
-- `python/record_demonstrations.py`: registrazione demo manuali.
-- `python/random_scenario_rollout.py`: rollout casuale per validare uno scenario.
-- `python/scenario_gym_env.py`: wrapper Gymnasium generico.
-- `python/godot_process_manager.py`: avvio/stop istanze Godot.
-- `python/models.py`: reti Keras condivise.
-- `python/replay_buffer.py`: replay buffer.
-- `python/opponent_pool.py`: snapshot storiche, sampling e maschere learner per self-play.
+- `python/train.py`: entrypoint unico per il training.
+- `python/algorithms/dqn.py`: DQN per azioni discrete.
+- `python/algorithms/ddpg.py`: DDPG per azioni continue.
+- `python/algorithms/ddpg_bc.py`: DDPG con behavior cloning.
+- `python/algorithms/ddpgfd.py`: DDPG from Demonstrations.
+- `python/algorithms/td3.py`: TD3 per azioni continue.
+- `python/algorithms/td3_bc.py`: TD3 con behavior cloning.
+- `python/algorithms/sac.py`: SAC per azioni continue.
+- `python/algorithms/ppo.py`: PPO per azioni discrete, continue o ibride.
+- `python/algorithms/common.py`: infrastruttura condivisa dalla famiglia DDPG/TD3.
+- `python/run.py`: esecuzione di un modello addestrato.
+- `python/recorder.py`: registrazione demo manuali.
+- `python/tools/random_rollout.py`: rollout casuale per validare uno scenario.
+- `python/envs/`: wrapper Gymnasium e gestione dei processi Godot.
+- `python/core/`: modelli, replay buffer, opponent pool e servizi condivisi di training.
+- `python/tools/`: strumenti diagnostici e rollout casuale.
 
-La vecchia linea TeamBattle/DQN è archiviata in `python/legacy/team_battle/`.
 La vecchia scena Godot TeamBattle è archiviata in `godot/legacy/team_battle/`.
 
 ## Installazione
@@ -102,7 +100,7 @@ compatibili con l'ABI dell'attuale plugin Metal e falliscono durante
 Esempio SAC per lo scenario Cars:
 
 ```bash
-python/.venv/bin/python python/train_generic.py \
+python/.venv/bin/python python/train.py \
   --algorithm sac \
   --godot-bin /home/fedyfausto/Godot/Godot_v4.6.2-stable_linux.x86_64 \
   --godot-project godot \
@@ -366,7 +364,7 @@ Le reward che dipendono dallo scenario stanno in un nodo `ScenarioRewardSystem` 
 Per provare lo scenario con azioni casuali:
 
 ```bash
-python/.venv/bin/python python/random_scenario_rollout.py \
+python/.venv/bin/python python/tools/random_rollout.py \
   --godot-bin /home/fedyfausto/Godot/Godot_v4.6.2-stable_linux.x86_64 \
   --godot-project godot \
   --godot-scene res://scenarios/cars/cars_scenario.tscn \
@@ -379,7 +377,7 @@ python/.venv/bin/python python/random_scenario_rollout.py \
 Esempio SAC:
 
 ```bash
-python/.venv/bin/python python/run_generic_policy.py \
+python/.venv/bin/python python/run.py \
   --algorithm sac \
   --godot-bin /home/fedyfausto/Godot/Godot_v4.6.2-stable_linux.x86_64 \
   --godot-project godot \
@@ -395,7 +393,7 @@ python/.venv/bin/python python/run_generic_policy.py \
 Per osservare a lungo:
 
 ```bash
-python/.venv/bin/python python/run_generic_policy.py \
+python/.venv/bin/python python/run.py \
   --algorithm sac \
   --godot-bin /home/fedyfausto/Godot/Godot_v4.6.2-stable_linux.x86_64 \
   --godot-project godot \
@@ -410,7 +408,7 @@ python/.venv/bin/python python/run_generic_policy.py \
   --no-headless
 ```
 
-`run_generic_policy.py` usa `--execution-mode auto`: seleziona `lockstep` quando e'
+`run.py` usa `--execution-mode auto`: seleziona `lockstep` quando e'
 headless e `realtime` quando la finestra Godot e' visibile. In lockstep Godot esegue
 un decision step per richiesta Python, soluzione deterministica adatta a confronti e
 test. In realtime Godot continua la simulazione tra due inferenze mantenendo l'ultima
@@ -422,7 +420,7 @@ VSync. Il parametro storico `--delay` viene applicato soltanto in lockstep.
 
 ## Demo Manuali
 
-Le demo si registrano con `record_demonstrations.py` e possono essere usate per prefill del replay buffer o behavior cloning. Vedi [Dimostrazioni Manuali](docs/manual_demonstrations.md).
+Le demo si registrano con `recorder.py` e possono essere usate per prefill del replay buffer o behavior cloning. Vedi [Dimostrazioni Manuali](docs/guides/manual_demonstrations.md).
 
 Per action space continui sono disponibili cinque trainer deterministici espliciti:
 
@@ -447,25 +445,30 @@ appartenere a traiettorie differenti.
 
 ## Tutorial Nuovi Scenari
 
+L'indice completo, con reference dell'architettura e guide di estensione, e' in
+[docs/README.md](docs/README.md). Per aggiungere funzionalita' al framework consulta
+[Aggiungere un algoritmo RL](docs/guides/aggiungere_algoritmo_rl.md) e
+[Estendere il framework Godot](docs/guides/estendere_framework_godot.md).
+
 Per costruire passo passo un agente 2D con azioni discrete, observation configurate
 dall'Inspector, eventi e reward di scenario, vedi
-[Breakout da zero](docs/tutorial_breakout_da_zero.md).
+[Breakout da zero](docs/tutorials/tutorial_breakout_da_zero.md).
 
 Per uno scenario competitivo con due istanze dello stesso agente, policy condivisa,
 observation simmetriche e self-play simultaneo, vedi
-[Pong multi-agent](docs/tutorial_pong_multi_agent.md).
+[Pong multi-agent](docs/tutorials/tutorial_pong_multi_agent.md).
 
 Per un'arena 3D a squadre con mappa sconosciuta, sensori locali, missili, reward
 cooperative e action space ibrido continuo/discreto, vedi
-[Tanks 2v2 hybrid multi-agent](docs/tutorial_tanks_hybrid_multi_agent.md).
+[Tanks 2v2 hybrid multi-agent](docs/tutorials/tutorial_tanks_hybrid_multi_agent.md).
 
 Per confrontare guida continua con percorso noto e guida generalizzabile basata
 soltanto su sensori locali, vedi
-[Guida autonoma: Path3D vs sensor-only](docs/tutorial_guida_autonoma_path_vs_sensori.md).
+[Guida autonoma: Path3D vs sensor-only](docs/tutorials/tutorial_guida_autonoma_path_vs_sensori.md).
 
 Per costruire un gioco di calcio arcade 3D con `CharacterBody3D`, palla fisica,
 calcio a intensita' continua, squadre e policy SAC condivisa, vedi
-[Soccer 3D multi-agent](docs/tutorial_soccer_continuous_multi_agent.md).
+[Soccer 3D multi-agent](docs/tutorials/tutorial_soccer_continuous_multi_agent.md).
 
 ## Note
 

@@ -2,21 +2,24 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import numpy as np
 import tensorflow as tf
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from models import build_continuous_actor, build_continuous_critic  # noqa: E402
-from replay_buffer import ReplayBuffer  # noqa: E402
-from deterministic_training import (  # noqa: E402
+from core.models import build_continuous_actor, build_continuous_critic  # noqa: E402
+from core.replay_buffer import ReplayBuffer  # noqa: E402
+from algorithms.common import (  # noqa: E402
     scheduled_bc_weight,
     train_deterministic_step,
     variant_uses_joint_bc,
     variant_uses_td3,
 )
-from train_generic import BACKENDS  # noqa: E402
+import train  # noqa: E402
+from train import BACKENDS  # noqa: E402
 
 
 def filled_buffer(count=32, obs_dim=3, action_size=2, **kwargs):
@@ -33,17 +36,17 @@ def filled_buffer(count=32, obs_dim=3, action_size=2, **kwargs):
 class VariantSelectionTests(unittest.TestCase):
     def test_unified_entrypoint_dispatches_all_deterministic_variants(self):
         expected = {
-            "ddpg": "train_generic_ddpg.py",
-            "ddpg_bc": "train_generic_ddpg_bc.py",
-            "ddpgfd": "train_generic_ddpgfd.py",
-            "td3": "train_generic_td3.py",
-            "td3_bc": "train_generic_td3_bc.py",
+            "ddpg": "algorithms.ddpg",
+            "ddpg_bc": "algorithms.ddpg_bc",
+            "ddpgfd": "algorithms.ddpgfd",
+            "td3": "algorithms.td3",
+            "td3_bc": "algorithms.td3_bc",
         }
         self.assertEqual({name: BACKENDS[name] for name in expected}, expected)
-        trainer_dir = Path(__file__).resolve().parents[1]
-        for variant, filename in expected.items():
-            source = (trainer_dir / filename).read_text()
-            self.assertIn(f'main("{variant}")', source)
+        trainer_dir = Path(__file__).resolve().parents[1] / "algorithms"
+        for variant in expected:
+            source = (trainer_dir / f"{variant}.py").read_text()
+            self.assertIn(f'run_training("{variant}")', source)
 
     def test_variant_families(self):
         self.assertTrue(variant_uses_td3("td3"))
@@ -52,6 +55,33 @@ class VariantSelectionTests(unittest.TestCase):
         self.assertTrue(variant_uses_joint_bc("ddpg_bc"))
         self.assertTrue(variant_uses_joint_bc("td3_bc"))
         self.assertFalse(variant_uses_joint_bc("ddpgfd"))
+
+
+class UnifiedEntrypointTests(unittest.TestCase):
+    def test_dispatch_imports_the_selected_backend_and_forwards_clean_arguments(self):
+        backend = SimpleNamespace(main=Mock())
+        original_argv = list(sys.argv)
+        try:
+            sys.argv = [
+                "python/train.py",
+                "--algorithm",
+                "td3",
+                "--num-episodes",
+                "10",
+                "--no-headless",
+            ]
+            with patch.object(train.importlib, "import_module", return_value=backend) as importer:
+                train.main()
+        finally:
+            forwarded_argv = list(sys.argv)
+            sys.argv = original_argv
+
+        importer.assert_called_once_with("algorithms.td3")
+        backend.main.assert_called_once_with()
+        self.assertEqual(
+            forwarded_argv,
+            ["python/train.py", "--num-episodes", "10", "--no-headless"],
+        )
 
     def test_bc_schedule_interpolates_and_clamps(self):
         self.assertEqual(scheduled_bc_weight(0, 1.0, 0.1, 100), 1.0)

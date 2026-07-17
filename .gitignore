@@ -3,6 +3,7 @@
 .vscode
 .claude
 checkpoints
+.runtime/
 
 *.h5
 *.log

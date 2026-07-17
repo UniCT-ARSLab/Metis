@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-from opponent_pool import OpponentPool, validate_team_layout
+from core.opponent_pool import OpponentPool, validate_team_layout
 
 
 class FakeModel:

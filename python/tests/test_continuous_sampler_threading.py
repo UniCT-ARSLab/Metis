@@ -41,8 +41,8 @@ def hammer(call, checker, threads=4, iterations=200):
 
 class SacSamplerTests(unittest.TestCase):
     def build(self):
-        from models import build_sac_actor
-        from train_generic_sac import build_sac_sample_fn, select_action_with
+        from core.models import build_sac_actor
+        from algorithms.sac import build_sac_sample_fn, select_action_with
 
         actor = build_sac_actor(obs_dim=OBS_DIM, action_size=ACTION_SIZE)
         fn = build_sac_sample_fn(actor, OBS_DIM, LOW, HIGH, log_std_min=-20.0, log_std_max=2.0)
@@ -68,7 +68,7 @@ class SacSamplerTests(unittest.TestCase):
 
 class DdpgActorForwardTests(unittest.TestCase):
     def build(self):
-        from models import build_actor_forward_fn, build_continuous_actor
+        from core.models import build_actor_forward_fn, build_continuous_actor
 
         actor = build_continuous_actor(obs_dim=OBS_DIM, action_size=ACTION_SIZE)
         return build_actor_forward_fn(actor, OBS_DIM)

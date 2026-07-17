@@ -3,9 +3,9 @@ import unittest
 import numpy as np
 import tensorflow as tf
 
-from replay_buffer import ReplayBuffer
-from train_generic_dqn import build_dqn_learner_step
-from training_support import configure_tensorflow_devices
+from core.replay_buffer import ReplayBuffer
+from algorithms.dqn import build_dqn_learner_step
+from core.training import configure_tensorflow_devices
 
 
 class TensorFlowLearnerTests(unittest.TestCase):

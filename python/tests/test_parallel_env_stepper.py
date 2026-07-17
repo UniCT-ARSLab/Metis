@@ -1,7 +1,7 @@
 import threading
 import unittest
 
-from training_support import ParallelEnvStepper
+from core.training import ParallelEnvStepper
 
 
 class CoordinatedEnv:

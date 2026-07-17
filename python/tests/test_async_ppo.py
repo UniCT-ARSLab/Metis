@@ -8,8 +8,8 @@ os.environ.setdefault("GODOT_GYM_TF_LD_READY", "1")
 import numpy as np
 import tensorflow as tf
 
-from models import build_hybrid_actor_critic
-from train_generic_ppo import build_action_metadata, run_async_ppo
+from core.models import build_hybrid_actor_critic
+from algorithms.ppo import build_action_metadata, run_async_ppo
 
 
 class FakeHybridEnv:

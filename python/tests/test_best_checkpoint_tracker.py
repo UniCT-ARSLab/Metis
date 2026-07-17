@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 
-from training_support import (
+from core.training import (
     BestCheckpointTracker,
     PolicyEvaluationResult,
     apply_ready_best_checkpoint,
@@ -229,10 +229,10 @@ class EveryTrainerDrainsBeforeExitTests(unittest.TestCase):
     """
 
     TRAINERS = ["dqn", "ppo", "sac", "ddpg"]
-    TRAINER_DIR = Path(__file__).resolve().parents[1]
+    TRAINER_DIR = Path(__file__).resolve().parents[1] / "algorithms"
 
     def trainer_source(self, trainer):
-        filename = "deterministic_training.py" if trainer == "ddpg" else f"train_generic_{trainer}.py"
+        filename = "common.py" if trainer == "ddpg" else f"{trainer}.py"
         return (self.TRAINER_DIR / filename).read_text()
 
     def test_every_trainer_drains_in_both_collector_modes(self):
@@ -242,7 +242,7 @@ class EveryTrainerDrainsBeforeExitTests(unittest.TestCase):
             # One for the async tail, one before the sync final save_weights.
             self.assertEqual(
                 drains, 2,
-                msg=f"train_generic_{trainer}.py has {drains} drain call(s), expected 2",
+                msg=f"algorithms/{trainer}.py has {drains} drain call(s), expected 2",
             )
 
     def test_no_trainer_kept_a_private_copy_of_the_helper(self):
@@ -251,11 +251,11 @@ class EveryTrainerDrainsBeforeExitTests(unittest.TestCase):
             source = self.trainer_source(trainer)
             self.assertNotIn(
                 "def apply_ready_best_checkpoint", source,
-                msg=f"train_generic_{trainer}.py redefines the shared helper",
+                msg=f"algorithms/{trainer}.py redefines the shared helper",
             )
             self.assertNotIn(
                 "best_checkpoint_manager", source,
-                msg=f"train_generic_{trainer}.py still drives a CheckpointManager over the best dir",
+                msg=f"algorithms/{trainer}.py still drives a CheckpointManager over the best dir",
             )
 
 
@@ -282,7 +282,7 @@ class DrainTimeoutValidationTests(unittest.TestCase):
 class CheckpointStateMetafileTests(unittest.TestCase):
     """The tracker now writes the CheckpointState metafile that CheckpointManager used to.
 
-    run_generic_policy.py falls back to tf.train.latest_checkpoint() when --checkpoint-path
+    run.py falls back to tf.train.latest_checkpoint() when --checkpoint-path
     is omitted, so `best/` must stay readable that way. This is the gate on hand-editing
     the proto -- TF deprecates doing so, and if it ever stops working the fallback is a
     CheckpointManager for the best directory.
@@ -383,7 +383,7 @@ class CloseStopsTheEvaluatorTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "posix", "process groups are posix-only")
     def test_close_reaps_the_grandchild_so_no_orphan_holds_the_port(self):
-        # run_generic_policy only stops Godot from a `finally`, which a bare kill() skips.
+        # run.py only stops Godot from a `finally`, which a bare kill() skips.
         # An orphan keeps --best-evaluation-port bound and breaks every later run.
         with tempfile.TemporaryDirectory() as temp_dir:
             pid_path = Path(temp_dir) / "grandchild.pid"

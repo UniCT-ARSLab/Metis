@@ -12,9 +12,9 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from training_support import validate_async_arguments  # noqa: E402
+from core.training import validate_async_arguments  # noqa: E402
 
-TRAINER_DIR = Path(__file__).resolve().parents[1]
+TRAINER_DIR = Path(__file__).resolve().parents[1] / "algorithms"
 
 
 def async_args(**overrides):
@@ -61,7 +61,7 @@ class TrainerWiringTests(unittest.TestCase):
     """Which trainers claim support must match which ones actually thread the pool."""
 
     def source(self, trainer):
-        filename = "deterministic_training.py" if trainer == "ddpg" else f"train_generic_{trainer}.py"
+        filename = "common.py" if trainer == "ddpg" else f"{trainer}.py"
         return (TRAINER_DIR / filename).read_text()
 
     def opts_in(self, trainer):
@@ -81,7 +81,7 @@ class TrainerWiringTests(unittest.TestCase):
                 self.opts_in(trainer),
                 self.threads_the_pool_through_async(trainer),
                 msg=(
-                    f"train_generic_{trainer}.py claims opponent-pool support "
+                    f"algorithms/{trainer}.py claims opponent-pool support "
                     f"({self.opts_in(trainer)}) but its async path wires it "
                     f"({self.threads_the_pool_through_async(trainer)})"
                 ),

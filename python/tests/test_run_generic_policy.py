@@ -6,7 +6,7 @@ from pathlib import Path
 
 os.environ.setdefault("GODOT_GYM_TF_LD_READY", "1")
 
-from run_generic_policy import (
+from run import (
     agent_succeeded,
     checkpoint_episode,
     normalize_checkpoint_path,
