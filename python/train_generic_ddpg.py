@@ -60,10 +60,12 @@ from training_support import (
     BestCheckpointTracker,
     add_best_checkpoint_arguments,
     add_collector_arguments,
+    add_lockstep_tuning_arguments,
     add_parallel_env_arguments,
     add_log_format_argument,
     add_tensorflow_runtime_arguments,
     build_async_worker,
+    build_lockstep_user_args,
     configure_tensorflow_devices,
     episode_step_indices,
     print_episode_metrics,
@@ -135,11 +137,21 @@ def parse_args():
     parser.add_argument("--godot-bin", default=os.environ.get("GODOT_BIN"))
     parser.add_argument("--godot-project", default=None)
     parser.add_argument("--godot-scene", default=None)
-    parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--headless",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Run Godot without a window. Rendering training instances contends with "
+            "TensorFlow for the GPU, and only headless instances get --fixed-fps, without "
+            "which physics stays gated to wall-clock 60Hz. Use --no-headless to watch."
+        ),
+    )
     parser.add_argument("--godot-debug", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--log-details", action=argparse.BooleanOptionalAction, default=False)
     add_collector_arguments(parser)
     add_parallel_env_arguments(parser)
+    add_lockstep_tuning_arguments(parser)
     add_opponent_pool_arguments(parser)
     add_best_checkpoint_arguments(parser)
     add_log_format_argument(parser)
@@ -488,6 +500,7 @@ def create_continuous_async_worker(
         scenario_config = {
             "training_episode": episode,
             "max_steps": args.max_steps_per_episode,
+            "physics_frames_per_step": args.physics_frames_per_step,
         }
         if reset_progress_max is not None:
             scenario_config.update(reset_progress_min=0.0, reset_progress_max=reset_progress_max)
@@ -549,6 +562,9 @@ def create_continuous_async_worker(
         if args.multi_agent:
             rewards = np.asarray(info.get("per_agent_rewards"), dtype=np.float32)
             done_mask = np.asarray(info.get("per_agent_done"), dtype=np.bool_)
+            terminated_mask = np.asarray(
+                info.get("per_agent_terminated", done_mask), dtype=np.bool_
+            )
             infos = list(info.get("per_agent_infos", []))
             for agent_idx in range(len(env.agent_ids)):
                 was_done = bool(state["done_mask"][agent_idx])
@@ -561,7 +577,7 @@ def create_continuous_async_worker(
                     np.asarray(action[agent_idx], dtype=np.float32),
                     float(rewards[agent_idx]),
                     next_obs[agent_idx],
-                    bool(done_mask[agent_idx] or done),
+                    bool(terminated_mask[agent_idx] or terminated),
                 ))
                 state["ep_reward"][agent_idx] += rewards[agent_idx]
                 state["action_sum"][agent_idx] += action[agent_idx]
@@ -574,7 +590,13 @@ def create_continuous_async_worker(
             state["done_mask"] = done_mask
         else:
             update_episode_diagnostics(state, info.get("agent_info", {}))
-            transitions.append((state["obs"], np.asarray(action, dtype=np.float32), float(reward), next_obs, done))
+            transitions.append((
+                state["obs"],
+                np.asarray(action, dtype=np.float32),
+                float(reward),
+                next_obs,
+                bool(terminated),
+            ))
             state["ep_reward"] += float(reward)
             state["action_sum"] += action
             state["action_count"] += 1.0
@@ -684,28 +706,29 @@ def save_training_checkpoint(
     return saved_path
 
 
-def maybe_update_best_checkpoint(
-    tracker,
-    best_checkpoint_manager,
-    checkpoint,
-    buffer,
-    candidate_path,
-    episode,
-    noise_std,
-    args,
-):
-    result = tracker.evaluate(candidate_path, episode)
+def request_best_checkpoint_evaluation(tracker, candidate_path, episode):
+    tracker.evaluate_async(candidate_path, episode)
+
+
+def apply_ready_best_checkpoint(tracker, best_checkpoint_manager, checkpoint, buffer, current_episode, noise_std, args):
+    result = tracker.poll_ready()
     if result is None or not tracker.is_improvement(result):
         return None
     best_path = save_training_checkpoint(
         checkpoint,
         best_checkpoint_manager,
         buffer,
-        episode,
+        current_episode,
         noise_std,
         args,
         save_replay=False,
     )
+    if int(current_episode) != int(result.episode):
+        print(
+            f"Best checkpoint applied using live weights at episode={current_episode} "
+            f"(background evaluation was requested for episode={result.episode})",
+            flush=True,
+        )
     tracker.record_best(result, best_path)
     return best_path
 
@@ -892,6 +915,9 @@ def run_async_ddpg(
     pool.start()
     try:
         while done_workers < len(envs):
+            apply_ready_best_checkpoint(
+                best_tracker, best_checkpoint_manager, checkpoint, buffer, completed, noise_for_episode(completed), args
+            )
             try:
                 event = scheduler.next_event(pool, timeout=0.2)
             except Empty:
@@ -1010,16 +1036,7 @@ def run_async_ddpg(
                         checkpoint, checkpoint_manager, buffer, completed, noise_std, args
                     )
                     last_saved_episode = completed
-                maybe_update_best_checkpoint(
-                    best_tracker,
-                    best_checkpoint_manager,
-                    checkpoint,
-                    buffer,
-                    saved_path,
-                    completed,
-                    noise_std,
-                    args,
-                )
+                request_best_checkpoint_evaluation(best_tracker, saved_path, completed)
     except KeyboardInterrupt:
         interrupted = True
         print("\nInterrupt received: stopping async DDPG collectors...", flush=True)
@@ -1107,6 +1124,7 @@ def main():
             headless=args.headless,
             debug=args.godot_debug,
             render_env_count=args.render_env_count,
+            user_args=build_lockstep_user_args(args),
         )
         print(f"Started Godot instances on ports {ports}", flush=True)
         envs = [
@@ -1319,6 +1337,7 @@ def main():
                 scenario_config = {
                     "training_episode": episode,
                     "max_steps": args.max_steps_per_episode,
+                    "physics_frames_per_step": args.physics_frames_per_step,
                 }
                 if reset_progress_max is not None:
                     scenario_config.update(reset_progress_min=0.0, reset_progress_max=reset_progress_max)
@@ -1485,6 +1504,9 @@ def main():
                     if args.multi_agent:
                         per_agent_rewards = np.asarray(info.get("per_agent_rewards"), dtype=np.float32)
                         per_agent_done = np.asarray(info.get("per_agent_done"), dtype=np.bool_)
+                        per_agent_terminated = np.asarray(
+                            info.get("per_agent_terminated", per_agent_done), dtype=np.bool_
+                        )
                         per_agent_infos = list(info.get("per_agent_infos", []))
                         for agent_idx in range(len(env.agent_ids)):
                             if state["done_mask"][agent_idx] and per_agent_done[agent_idx]:
@@ -1497,7 +1519,7 @@ def main():
                                     action[agent_idx],
                                     float(per_agent_rewards[agent_idx]),
                                     next_obs[agent_idx],
-                                    bool(per_agent_done[agent_idx] or done),
+                                    bool(per_agent_terminated[agent_idx] or terminated),
                                 )
                             state["ep_reward"][agent_idx] += per_agent_rewards[agent_idx]
                             state["action_sum"][agent_idx] += action[agent_idx]
@@ -1510,7 +1532,7 @@ def main():
                         state["done_mask"] = per_agent_done
                     else:
                         update_episode_diagnostics(state, info.get("agent_info", {}))
-                        buffer.add(state["obs"], action, float(reward), next_obs, done)
+                        buffer.add(state["obs"], action, float(reward), next_obs, bool(terminated))
                         state["ep_reward"] += float(reward)
                         state["action_sum"] += action
                         state["action_count"] += 1.0
@@ -1619,6 +1641,9 @@ def main():
             if snapshot_path is not None:
                 print(f"Saved opponent snapshot: {snapshot_path}", flush=True)
 
+            apply_ready_best_checkpoint(
+                best_tracker, best_checkpoint_manager, checkpoint, buffer, episode + 1, noise_std, args
+            )
             if args.checkpoint_every > 0 and (episode + 1) % args.checkpoint_every == 0:
                 saved_path = save_training_checkpoint(
                     checkpoint, checkpoint_manager, buffer, episode + 1, noise_std, args
@@ -1632,16 +1657,7 @@ def main():
                         checkpoint, checkpoint_manager, buffer, episode + 1, noise_std, args
                     )
                     last_saved_episode = episode + 1
-                maybe_update_best_checkpoint(
-                    best_tracker,
-                    best_checkpoint_manager,
-                    checkpoint,
-                    buffer,
-                    saved_path,
-                    episode + 1,
-                    noise_std,
-                    args,
-                )
+                request_best_checkpoint_evaluation(best_tracker, saved_path, episode + 1)
 
         if last_saved_episode != args.num_episodes:
             save_training_checkpoint(checkpoint, checkpoint_manager, buffer, args.num_episodes, noise_std, args, final=True)
@@ -1663,6 +1679,7 @@ def main():
         else:
             print("Training state was not initialized; no checkpoint was written.", flush=True)
     finally:
+        best_tracker.close()
         if stepper is not None:
             stepper.close()
         if buffer is not None:

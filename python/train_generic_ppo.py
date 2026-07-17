@@ -60,8 +60,10 @@ from training_support import (
     add_best_checkpoint_arguments,
     add_collector_arguments,
     add_log_format_argument,
+    add_lockstep_tuning_arguments,
     add_parallel_env_arguments,
     add_tensorflow_runtime_arguments,
+    build_lockstep_user_args,
     configure_tensorflow_devices,
     episode_step_indices,
     print_episode_metrics,
@@ -107,12 +109,22 @@ def parse_args():
     parser.add_argument("--godot-bin", default=os.environ.get("GODOT_BIN"))
     parser.add_argument("--godot-project", default=None)
     parser.add_argument("--godot-scene", default=None)
-    parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--headless",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Run Godot without a window. Rendering training instances contends with "
+            "TensorFlow for the GPU, and only headless instances get --fixed-fps, without "
+            "which physics stays gated to wall-clock 60Hz. Use --no-headless to watch."
+        ),
+    )
     parser.add_argument("--godot-debug", action=argparse.BooleanOptionalAction, default=False)
     add_collector_arguments(parser)
     add_opponent_pool_arguments(parser)
     add_best_checkpoint_arguments(parser)
     add_parallel_env_arguments(parser)
+    add_lockstep_tuning_arguments(parser)
     add_log_format_argument(parser)
     add_tensorflow_runtime_arguments(parser)
     return parser.parse_args()
@@ -125,17 +137,21 @@ def save_training_checkpoint(checkpoint, checkpoint_manager, episode, final=Fals
     return saved_path
 
 
-def maybe_update_best_checkpoint(
-    tracker,
-    best_checkpoint_manager,
-    checkpoint,
-    candidate_path,
-    episode,
-):
-    result = tracker.evaluate(candidate_path, episode)
+def request_best_checkpoint_evaluation(tracker, candidate_path, episode):
+    tracker.evaluate_async(candidate_path, episode)
+
+
+def apply_ready_best_checkpoint(tracker, best_checkpoint_manager, checkpoint, current_episode):
+    result = tracker.poll_ready()
     if result is None or not tracker.is_improvement(result):
         return None
-    best_path = save_training_checkpoint(checkpoint, best_checkpoint_manager, episode)
+    best_path = save_training_checkpoint(checkpoint, best_checkpoint_manager, current_episode)
+    if int(current_episode) != int(result.episode):
+        print(
+            f"Best checkpoint applied using live weights at episode={current_episode} "
+            f"(background evaluation was requested for episode={result.episode})",
+            flush=True,
+        )
     tracker.record_best(result, best_path)
     return best_path
 
@@ -235,6 +251,14 @@ def zero_env_action(action_meta):
     return pack_action(discrete_actions, continuous_action, action_meta)
 
 
+def value_of(model, obs, action_meta):
+    """V(obs) from the critic head, for bootstrapping a time-limit-truncated trajectory."""
+    obs_tensor = tf.convert_to_tensor(np.expand_dims(obs, axis=0), dtype=tf.float32)
+    outputs = model(obs_tensor, training=False)
+    _logits, _continuous_mean, value = split_model_outputs(outputs, action_meta)
+    return float(value.numpy()[0])
+
+
 def select_action(model, log_std, obs, action_meta):
     obs_tensor = tf.convert_to_tensor(np.expand_dims(obs, axis=0), dtype=tf.float32)
     outputs = model(obs_tensor, training=False)
@@ -318,14 +342,20 @@ def evaluate_actions(model, log_std, obs, discrete_actions, continuous_actions, 
     return log_probs, entropy, values
 
 
-def compute_returns_advantages(rewards, dones, values, gamma, gae_lambda):
+def compute_returns_advantages(rewards, dones, values, gamma, gae_lambda, bootstrap_value=0.0):
+    """GAE over one trajectory.
+
+    `dones` must mark real terminals only. `bootstrap_value` is V(s_T) for a trajectory
+    that was cut while still running (a time-limit truncation); it stays 0.0 for one that
+    ended terminally, where there genuinely is no future value.
+    """
     rewards = np.asarray(rewards, dtype=np.float32)
     dones = np.asarray(dones, dtype=np.float32)
     values = np.asarray(values, dtype=np.float32)
 
     advantages = np.zeros_like(rewards, dtype=np.float32)
     last_advantage = 0.0
-    next_value = 0.0
+    next_value = float(bootstrap_value)
     for idx in reversed(range(len(rewards))):
         nonterminal = 1.0 - dones[idx]
         delta = rewards[idx] + gamma * next_value * nonterminal - values[idx]
@@ -346,6 +376,8 @@ def new_trajectory():
         "values": [],
         "rewards": [],
         "dones": [],
+        # V(s_T), set only when the episode was cut by the step cap rather than ending.
+        "bootstrap_value": 0.0,
     }
 
 
@@ -381,6 +413,7 @@ def build_update_batch(trajectories, action_meta, gamma, gae_lambda):
             trajectory["values"],
             gamma,
             gae_lambda,
+            trajectory.get("bootstrap_value", 0.0),
         )
         obs_parts.append(np.asarray(trajectory["obs"], dtype=np.float32))
         discrete_parts.append(
@@ -505,6 +538,7 @@ def run_async_ppo(
             env.configure(
                 training_episode=episode,
                 max_steps=args.max_steps_per_episode,
+                physics_frames_per_step=args.physics_frames_per_step,
             )
             obs, info = env.reset(seed=args.episode_seed_multiplier * episode + worker_id)
 
@@ -550,10 +584,17 @@ def run_async_ppo(
                     step_result = env.step(selected["env_action"])
 
                 next_obs, reward, terminated, truncated, step_info = step_result
+                # `global_done` ends the rollout; only `terminated` cuts the GAE chain. A
+                # step-cap truncation leaves real future value behind, captured below as
+                # the trajectory's bootstrap value.
                 global_done = bool(terminated or truncated)
+                cut_short = bool(truncated and not terminated)
                 if args.multi_agent:
                     per_agent_rewards = np.asarray(step_info.get("per_agent_rewards"), dtype=np.float32)
                     per_agent_done = np.asarray(step_info.get("per_agent_done"), dtype=np.bool_)
+                    per_agent_terminated = np.asarray(
+                        step_info.get("per_agent_terminated", per_agent_done), dtype=np.bool_
+                    )
                     episode_reward += per_agent_rewards
                     for agent_id, (agent_idx, selected, agent_obs) in selected_by_agent.items():
                         append_transition(
@@ -561,8 +602,12 @@ def run_async_ppo(
                             agent_obs,
                             selected,
                             float(per_agent_rewards[agent_idx]),
-                            bool(global_done or per_agent_done[agent_idx]),
+                            bool(terminated or per_agent_terminated[agent_idx]),
                         )
+                        if cut_short and not per_agent_terminated[agent_idx]:
+                            trajectories[agent_id]["bootstrap_value"] = value_of(
+                                local_model, next_obs[agent_idx], action_meta
+                            )
                     done_mask = np.logical_or(done_mask, per_agent_done)
                     global_done = global_done or bool(np.all(done_mask))
                 else:
@@ -571,8 +616,10 @@ def run_async_ppo(
                         selected_obs,
                         selected,
                         float(reward),
-                        global_done,
+                        bool(terminated),
                     )
+                    if cut_short:
+                        trajectory["bootstrap_value"] = value_of(local_model, next_obs, action_meta)
                     episode_reward += float(reward)
                 obs = next_obs
 
@@ -619,6 +666,7 @@ def run_async_ppo(
     pool.start()
     try:
         while completed < args.num_episodes:
+            apply_ready_best_checkpoint(best_tracker, best_checkpoint_manager, checkpoint, completed)
             try:
                 event = pool.get(timeout=0.2)
             except Empty:
@@ -695,13 +743,7 @@ def run_async_ppo(
                 if saved_path is None:
                     saved_path = save_training_checkpoint(checkpoint, checkpoint_manager, completed)
                     last_saved_episode = completed
-                maybe_update_best_checkpoint(
-                    best_tracker,
-                    best_checkpoint_manager,
-                    checkpoint,
-                    saved_path,
-                    completed,
-                )
+                request_best_checkpoint_evaluation(best_tracker, saved_path, completed)
     except KeyboardInterrupt:
         interrupted = True
         print("\nInterrupt received: stopping async PPO collectors...", flush=True)
@@ -744,6 +786,7 @@ def main():
             headless=args.headless,
             debug=args.godot_debug,
             render_env_count=args.render_env_count,
+            user_args=build_lockstep_user_args(args),
         )
         print(f"Started Godot instances on ports {ports}", flush=True)
         envs = [
@@ -874,6 +917,7 @@ def main():
                 env.configure(
                     training_episode=episode,
                     max_steps=args.max_steps_per_episode,
+                    physics_frames_per_step=args.physics_frames_per_step,
                 )
                 obs, _ = env.reset(seed=args.episode_seed_multiplier * episode + env_idx)
                 if args.multi_agent:
@@ -1021,6 +1065,7 @@ def main():
             if snapshot_path is not None:
                 print(f"Saved opponent snapshot: {snapshot_path}", flush=True)
 
+            apply_ready_best_checkpoint(best_tracker, best_checkpoint_manager, checkpoint, episode + 1)
             if args.checkpoint_every > 0 and (episode + 1) % args.checkpoint_every == 0:
                 saved_path = save_training_checkpoint(checkpoint, checkpoint_manager, episode + 1)
                 last_saved_episode = episode + 1
@@ -1030,13 +1075,7 @@ def main():
                 if saved_path is None:
                     saved_path = save_training_checkpoint(checkpoint, checkpoint_manager, episode + 1)
                     last_saved_episode = episode + 1
-                maybe_update_best_checkpoint(
-                    best_tracker,
-                    best_checkpoint_manager,
-                    checkpoint,
-                    saved_path,
-                    episode + 1,
-                )
+                request_best_checkpoint_evaluation(best_tracker, saved_path, episode + 1)
 
         if last_saved_episode != args.num_episodes:
             save_training_checkpoint(checkpoint, checkpoint_manager, args.num_episodes, final=True)
@@ -1052,6 +1091,7 @@ def main():
         else:
             print("Training state was not initialized; no checkpoint was written.", flush=True)
     finally:
+        best_tracker.close()
         if stepper is not None:
             stepper.close()
         for env in envs:

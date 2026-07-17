@@ -95,9 +95,14 @@ def parse_args():
     parser.add_argument("--delay", type=float, default=0.0)
     parser.add_argument(
         "--execution-mode",
-        choices=["lockstep", "realtime"],
-        default="lockstep",
-        help="Lockstep is deterministic; realtime lets Godot continue between policy updates.",
+        choices=["auto", "lockstep", "realtime"],
+        default="auto",
+        help=(
+            "Lockstep is deterministic but pauses the scene between policy updates, which "
+            "reads as stuttering to a human watching. Realtime lets Godot run continuously "
+            "but paces the sim to wall-clock. 'auto' picks lockstep when --headless (nobody "
+            "is watching; keep it fast and reproducible) and realtime otherwise."
+        ),
     )
     parser.add_argument(
         "--realtime-action-hz",
@@ -380,6 +385,12 @@ def main():
         raise ValueError("--realtime-simulation-fps must be at least 1")
     if args.training_episode is not None and args.training_episode < 0:
         raise ValueError("--training-episode cannot be negative")
+    if args.execution_mode == "auto":
+        # Lockstep freezes the scene between policy updates, so a human watching sees the
+        # sim stutter. Nobody is watching a headless run, and automated checkpoint
+        # evaluation spawns this script headless without pinning the mode -- there,
+        # lockstep is what keeps eval fast and reproducible.
+        args.execution_mode = "lockstep" if args.headless else "realtime"
     random.seed(args.seed)
     np.random.seed(args.seed)
     tf.random.set_seed(args.seed)

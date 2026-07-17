@@ -1,0 +1,15 @@
+Using training backend: ppo (train_generic_ppo.py)
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+I0000 00:00:1784105815.968547   62283 port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+I0000 00:00:1784105816.006940   62283 cpu_feature_guard.cc:227] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX_VNNI FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+I0000 00:00:1784105816.809515   62283 port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+TensorFlow GPU devices: [PhysicalDevice(name='/physical_device:GPU:0', device_type='GPU')] memory_growth=enabled
+Started Godot instances on ports [6200, 6201, 6202, 6203]
+Traceback (most recent call last):
+  File "/home/fedyfausto/Lavoro/GodotAgents/godot-gymnasium-keras-marl/python/train_generic_ppo.py", line 1074, in <module>
+    main()
+  File "/home/fedyfausto/Lavoro/GodotAgents/godot-gymnasium-keras-marl/python/train_generic_ppo.py", line 772, in main
+    raise RuntimeError(f"train_generic_ppo.py requires action_type='hybrid', got {env0.action_type!r}")
+RuntimeError: train_generic_ppo.py requires action_type='hybrid', got 'discrete'

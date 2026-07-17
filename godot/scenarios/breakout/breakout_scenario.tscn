@@ -39,6 +39,7 @@ paddle_half_width = 112.0
 auto_start_manual = false
 
 [node name="BridgeServer" type="Node" parent="." unique_id=696486136]
+process_mode = 3
 script = ExtResource("1_14ifj")
 controller_path = NodePath("../ScenarioController")
 metadata/_custom_type_script = "uid://d38lybllmy6tq"
@@ -46,11 +47,13 @@ metadata/_custom_type_script = "uid://d38lybllmy6tq"
 [node name="ScenarioController" type="Node" parent="." unique_id=686207213 node_paths=PackedStringArray("controlled_agents")]
 script = ExtResource("2_hlvlh")
 controlled_agents = [NodePath("../BreakoutPaddle")]
+randomize_reset = true
+reset_position_jitter = Vector3(540, 0, 0)
 reset_yaw_jitter_degrees = 0.0
 max_steps = 0
 metadata/_custom_type_script = "uid://cun4ha1fidr8n"
 
-[node name="ProgressProvider" type="Node" parent="ScenarioController" node_paths=PackedStringArray("source_path")]
+[node name="ProgressProvider" type="Node" parent="ScenarioController" unique_id=284408121]
 script = ExtResource("11_progress_provider")
 source_path = NodePath("../..")
 method_name = &"get_brick_progress"
@@ -97,7 +100,7 @@ metadata/_custom_type_script = "uid://b0mpnu83er6il"
 [node name="LifeLostPenalty" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=573120190]
 script = ExtResource("6_xxy6r")
 event_name = "life_lost"
-reward = -10.0
+reward = -1.0
 metadata/_custom_type_script = "uid://b0mpnu83er6il"
 
 [node name="LevelReward" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=71465067]
@@ -112,13 +115,12 @@ event_name = "ball_hit"
 reward = 0.02
 metadata/_custom_type_script = "uid://b0mpnu83er6il"
 
-[node name="NoBrickProgress" type="Node" parent="ScenarioController/ScenarioRewardSystem"]
+[node name="NoBrickProgress" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=908191046]
 script = ExtResource("12_progress_stall")
-term_name = "no_brick_progress"
 terminate_on_stalled_progress = true
 stalled_progress_window_steps = 2500
-stalled_progress_min_delta = 0.01
 stalled_progress_penalty = -5.0
+term_name = "no_brick_progress"
 metadata/_custom_type_script = "uid://5rg0xs5vr24r"
 
 [node name="BreakoutPaddle" parent="." unique_id=100166131 node_paths=PackedStringArray("ball") instance=ExtResource("7_6rg13")]

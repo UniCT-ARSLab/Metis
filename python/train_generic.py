@@ -36,7 +36,17 @@ def parse_args(argv):
     parser.add_argument("--godot-bin", default=os.environ.get("GODOT_BIN"))
     parser.add_argument("--godot-project", default=None)
     parser.add_argument("--godot-scene", default=None)
-    parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--headless",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Run Godot without a window. Training instances otherwise spin up the full "
+            "renderer and contend with TensorFlow for the GPU, and only headless instances "
+            "get --fixed-fps, without which physics stays gated to wall-clock 60Hz. Use "
+            "--no-headless to watch, and expect a large throughput drop."
+        ),
+    )
     parser.add_argument("--godot-debug", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--collector-mode", choices=["sync", "async"], default="async")
     parser.add_argument("--async-queue-capacity", type=int, default=256)

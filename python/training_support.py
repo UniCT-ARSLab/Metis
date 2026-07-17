@@ -120,6 +120,8 @@ class BestCheckpointTracker:
         self.metadata_path = self.directory / "best_metrics.json"
         self.best_key = None
         self.best_summary = None
+        self._executor = None
+        self._pending = None  # (future, episode, checkpoint_path)
         if self.enabled:
             self._validate_arguments()
             self.directory.mkdir(parents=True, exist_ok=True)
@@ -264,6 +266,51 @@ class BestCheckpointTracker:
             )
             return PolicyEvaluationResult(int(episode), summary)
 
+    def evaluate_async(self, checkpoint_path, episode):
+        """Schedule evaluate() on a background thread so it never blocks the training loop.
+
+        Returns True if an evaluation was scheduled, False if one was already running
+        (in which case this evaluation request is skipped) or best-checkpoint tracking
+        is disabled.
+        """
+        if not self.enabled:
+            return False
+        if self._pending is not None:
+            print(
+                f"Skipping best-checkpoint evaluation for episode={episode}: "
+                "a previous evaluation is still running.",
+                flush=True,
+            )
+            return False
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="best-ckpt-eval")
+        future = self._executor.submit(self.evaluate, checkpoint_path, episode)
+        self._pending = (future, int(episode), checkpoint_path)
+        return True
+
+    def poll_ready(self):
+        """Non-blocking check for a completed background evaluation.
+
+        Returns the PolicyEvaluationResult if one just finished (or None if it failed/
+        timed out), or None immediately when nothing has completed yet.
+        """
+        if self._pending is None:
+            return None
+        future, _episode, _checkpoint_path = self._pending
+        if not future.done():
+            return None
+        self._pending = None
+        try:
+            return future.result()
+        except Exception as exc:  # pragma: no cover - defensive: evaluate() already catches its own errors
+            print(f"WARNING: best-policy evaluation raised an exception: {exc}", flush=True)
+            return None
+
+    def close(self):
+        if self._executor is not None:
+            self._executor.shutdown(wait=False)
+            self._executor = None
+
     def record_best(self, result, checkpoint_path):
         self.best_key = self.comparison_key(result.summary)
         metadata = {
@@ -317,6 +364,58 @@ def add_parallel_env_arguments(parser):
             "headless. When omitted, render all --num-envs instances."
         ),
     )
+    parser.add_argument(
+        "--physics-frames-per-step",
+        type=int,
+        default=1,
+        help=(
+            "Number of Godot physics ticks advanced per env.step() call (frame skip / "
+            "control-rate downsampling, e.g. 4 ticks at 60Hz physics = a 15Hz control rate). "
+            "Values above 1 reduce the number of TCP round-trips per simulated second, which "
+            "speeds up lockstep training. Forwarded to ScenarioController.configure()."
+        ),
+    )
+
+
+def add_lockstep_tuning_arguments(parser):
+    parser.add_argument(
+        "--lockstep-idle-sleep-usec",
+        type=int,
+        default=None,
+        help=(
+            "Override BridgeServer.lockstep_idle_sleep_usec via a Godot cmdline user arg. "
+            "This is the backoff the bridge sleeps for once a client has gone quiet for "
+            "--lockstep-spin-polls consecutive empty polls. In headless mode Godot clamps it to "
+            "lockstep_headless_idle_sleep_usec (2000us by default). Left unset to keep that "
+            "headless-safe default. See python/bench_lockstep.py to measure the effect."
+        ),
+    )
+    parser.add_argument(
+        "--lockstep-spin-polls",
+        type=int,
+        default=None,
+        help=(
+            "Empty TCP polls the BridgeServer tolerates at zero delay before backing off to "
+            "--lockstep-idle-sleep-usec. The bridge round-trip is ~0.3ms, so a short spin covers "
+            "the client's turnaround and skips the idle sleep entirely on the hot path. Higher "
+            "values cut latency at the cost of CPU while idle; 0 disables spinning and restores "
+            "pure sleep-based backoff. Measured on 20 cores with bench_lockstep.py: sleep=2000 "
+            "gives ~330 steps/s per instance at 0.4 cores each, sleep=0 gives ~2700 but burns "
+            "~3.2 cores per instance and stops scaling past 4 instances."
+        ),
+    )
+
+
+def build_lockstep_user_args(args):
+    """Build the list of Godot cmdline user args controlling lockstep pacing."""
+    user_args = []
+    lockstep_idle_sleep_usec = getattr(args, "lockstep_idle_sleep_usec", None)
+    if lockstep_idle_sleep_usec is not None:
+        user_args.append(f"--lockstep-idle-sleep-usec={int(lockstep_idle_sleep_usec)}")
+    lockstep_spin_polls = getattr(args, "lockstep_spin_polls", None)
+    if lockstep_spin_polls is not None:
+        user_args.append(f"--lockstep-spin-polls={int(lockstep_spin_polls)}")
+    return user_args
 
 
 def add_collector_arguments(parser):

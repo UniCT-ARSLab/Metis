@@ -1,4 +1,5 @@
 import argparse
+import math
 import os
 import platform
 import random
@@ -44,7 +45,7 @@ import numpy as np
 import tensorflow as tf
 
 from godot_process_manager import GodotProcessManager
-from models import build_shared_q_network
+from models import build_greedy_action_fn, build_shared_q_network
 from opponent_pool import OpponentPool, add_opponent_pool_arguments, validate_team_layout
 from replay_buffer import ReplayBuffer
 from scenario_gym_env import ScenarioGymEnv
@@ -60,10 +61,12 @@ from training_support import (
     BestCheckpointTracker,
     add_best_checkpoint_arguments,
     add_collector_arguments,
+    add_lockstep_tuning_arguments,
     add_parallel_env_arguments,
     add_log_format_argument,
     add_tensorflow_runtime_arguments,
     build_async_worker,
+    build_lockstep_user_args,
     configure_tensorflow_devices,
     episode_step_indices,
     print_episode_metrics,
@@ -76,6 +79,13 @@ from training_support import (
 
 SUCCESS_EVENTS = {"level_cleared", "target_reached", "finish_reached", "goal_scored", "success"}
 SUCCESS_TERMINAL_REASONS = {"level_cleared", "target_reached", "finish_reached", "goal_scored", "success"}
+
+# Share of the remaining episode budget a derived --epsilon-decay spends annealing down to
+# epsilon-min; the rest of the run then exploits at the floor.
+EPSILON_DECAY_HORIZON_FRACTION = 0.5
+# Effective target for a derived decay when --epsilon-min is 0: multiplicative decay is
+# asymptotic, so annealing to exactly 0 has no finite horizon.
+EPSILON_DECAY_FLOOR = 0.01
 
 
 def update_episode_diagnostics(state, agent_info, *, agent_idx=None, newly_done=False):
@@ -138,7 +148,27 @@ def parse_args():
     parser.add_argument("--replay-warmup", type=int, default=500)
     parser.add_argument("--epsilon-start", type=float, default=1.0)
     parser.add_argument("--epsilon-min", type=float, default=0.05)
-    parser.add_argument("--epsilon-decay", type=float, default=0.995)
+    parser.add_argument(
+        "--epsilon-decay",
+        type=float,
+        default=None,
+        help=(
+            "Per-episode multiplicative epsilon decay. When omitted it is derived from the "
+            "episode budget so exploration reaches epsilon-min at "
+            f"{int(EPSILON_DECAY_HORIZON_FRACTION * 100)}%% of the remaining run, which keeps "
+            "the schedule anchored to --num-episodes instead of to a hand-tuned constant. "
+            "Pass a value to pin it."
+        ),
+    )
+    parser.add_argument(
+        "--epsilon-decay-horizon-fraction",
+        type=float,
+        default=EPSILON_DECAY_HORIZON_FRACTION,
+        help=(
+            "Fraction of the remaining episodes over which a derived --epsilon-decay anneals "
+            "epsilon down to epsilon-min. Ignored when --epsilon-decay is given."
+        ),
+    )
     parser.add_argument("--replay-capacity", type=int, default=100000)
     parser.add_argument("--env-seed-base", type=int, default=100)
     parser.add_argument("--episode-seed-multiplier", type=int, default=1000)
@@ -165,10 +195,20 @@ def parse_args():
     parser.add_argument("--godot-bin", default=os.environ.get("GODOT_BIN"))
     parser.add_argument("--godot-project", default=None)
     parser.add_argument("--godot-scene", default=None)
-    parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--headless",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Run Godot without a window. Rendering training instances contends with "
+            "TensorFlow for the GPU, and only headless instances get --fixed-fps, without "
+            "which physics stays gated to wall-clock 60Hz. Use --no-headless to watch."
+        ),
+    )
     parser.add_argument("--godot-debug", action=argparse.BooleanOptionalAction, default= False)
     add_collector_arguments(parser)
     add_parallel_env_arguments(parser)
+    add_lockstep_tuning_arguments(parser)
     add_opponent_pool_arguments(parser)
     add_best_checkpoint_arguments(parser)
     add_log_format_argument(parser)
@@ -188,6 +228,41 @@ def describe_tensorflow_backend(args):
     )
     if platform.system() == "Darwin":
         print(f"macOS machine: {platform.machine()}", flush=True)
+
+
+def resolve_epsilon_decay(args, start_epsilon, start_episode):
+    """Return the per-episode epsilon decay, deriving it when not pinned on the CLI.
+
+    A hand-picked constant silently means different things as the episode budget or the
+    episode length changes. Anchoring the schedule to the remaining episode budget keeps
+    "epsilon is spent by X% of the run" true regardless of either.
+    """
+    if args.epsilon_decay is not None:
+        return float(args.epsilon_decay)
+
+    remaining = max(1, int(args.num_episodes) - int(start_episode))
+    horizon = max(1.0, remaining * float(args.epsilon_decay_horizon_fraction))
+    start = float(start_epsilon)
+    # A multiplicative decay approaches zero asymptotically and never reaches it, so an
+    # epsilon-min of 0 has no finite horizon. Anneal to a small floor instead; the caller
+    # still clamps to the real epsilon-min.
+    target = max(float(args.epsilon_min), EPSILON_DECAY_FLOOR)
+    if start <= target:
+        return 1.0
+    return (target / start) ** (1.0 / horizon)
+
+
+def episodes_to_reach_epsilon(start_epsilon, target, decay):
+    """Episodes for start_epsilon * decay**n to fall to target, or None if it never does."""
+    if start_epsilon <= target:
+        return 0
+    if decay >= 1.0 or decay <= 0.0:
+        return None
+    exact = math.log(target / start_epsilon) / math.log(decay)
+    # A derived decay is built as (target/start)**(1/horizon), so `exact` is horizon up to
+    # float error. Absorb that error before rounding up, or the reported episode overshoots
+    # the horizon it was derived from by one.
+    return int(math.ceil(exact - 1e-9))
 
 
 def select_action(model, obs, epsilon, num_actions):
@@ -301,6 +376,13 @@ def run_async_dqn(
             build_shared_q_network(obs_dim=obs_dim, num_actions=num_actions)
             for _env in envs
         ]
+    # One traced graph per collector, built once. sync_model only calls set_weights,
+    # which mutates the variables these graphs already close over, so the traces stay
+    # valid across policy syncs.
+    greedy_actions = [
+        build_greedy_action_fn(local_model, obs_dim)
+        for local_model in local_models
+    ]
     snapshot = PolicySnapshot(model.get_weights())
     rngs = [np.random.default_rng(args.env_seed_base + 100_003 * idx) for idx in range(len(envs))]
 
@@ -312,6 +394,7 @@ def run_async_dqn(
         env.configure(
             training_episode=episode,
             max_steps=args.max_steps_per_episode,
+            physics_frames_per_step=args.physics_frames_per_step,
         )
         obs, info = env.reset(seed=args.episode_seed_multiplier * episode + worker_id)
         if args.multi_agent:
@@ -368,19 +451,26 @@ def run_async_dqn(
         if rng.random() < epsilon:
             action = int(rng.integers(num_actions))
         else:
-            q_values = local_model(np.expand_dims(state["obs"], axis=0), training=False).numpy()[0]
-            action = int(np.argmax(q_values))
+            obs_batch = np.expand_dims(state["obs"], axis=0).astype(np.float32)
+            action = int(greedy_actions[worker_id](obs_batch).numpy()[0])
         state["action_counts"][action] += 1
         state["last_action"] = action
         return action
 
     def process_step(_worker_id, env, _episode, _step_idx, state, action, step_result):
         next_obs, reward, terminated, truncated, info = step_result
+        # `done` ends the episode loop; `terminated` is what the TD target keys off. A
+        # time-limit truncation cuts an episode that was still going, so bootstrapping
+        # must continue through it -- treating it as terminal teaches the agent that the
+        # world ends at the step cap.
         done = bool(terminated or truncated)
         transitions = []
         if args.multi_agent:
             rewards = np.asarray(info.get("per_agent_rewards"), dtype=np.float32)
             done_mask = np.asarray(info.get("per_agent_done"), dtype=np.bool_)
+            terminated_mask = np.asarray(
+                info.get("per_agent_terminated", done_mask), dtype=np.bool_
+            )
             infos = info.get("per_agent_infos", [{} for _agent in env.agent_ids])
             for agent_idx in range(len(env.agent_ids)):
                 agent_info = infos[agent_idx] if agent_idx < len(infos) else {}
@@ -401,7 +491,7 @@ def run_async_dqn(
                         int(action[agent_idx]),
                         float(rewards[agent_idx]),
                         next_obs[agent_idx],
-                        bool(done_mask[agent_idx] or done),
+                        bool(terminated_mask[agent_idx] or terminated),
                     ))
                     state["ep_reward"][agent_idx] += rewards[agent_idx]
             state["done_mask"] = done_mask
@@ -411,8 +501,12 @@ def run_async_dqn(
             update_episode_diagnostics(state, agent_info, newly_done=done)
             state["target_reached"] |= bool(agent_info.get("target_reached", False))
             state["target_seen"] |= bool(agent_info.get("target_first_seen", False))
-            transitions.append((state["obs"], int(action), float(reward), next_obs, done))
+            transitions.append((state["obs"], int(action), float(reward), next_obs, bool(terminated)))
             state["ep_reward"] += float(reward)
+            # Scenario progress (0..1). Logged because it is the only scale-invariant
+            # measure of how well the agent plays: episode reward cannot be compared
+            # across reward-tuning experiments, progress can.
+            state["progress"] = float(agent_info.get("progress", state.get("progress", 0.0)))
         state["obs"] = next_obs
         state["done"] = done
         return transitions
@@ -452,6 +546,9 @@ def run_async_dqn(
     pool.start()
     try:
         while done_workers < len(envs):
+            apply_ready_best_checkpoint(
+                best_tracker, best_checkpoint_manager, checkpoint, buffer, completed, epsilon_for_episode(completed), args
+            )
             try:
                 event = scheduler.next_event(pool, timeout=0.2)
             except Empty:
@@ -508,6 +605,7 @@ def run_async_dqn(
                 ("mode", [("collector", "async"), ("worker", event.worker_id), ("epsilon", f"{epsilon:.3f}")]),
                 ("outcome", [
                     ("reward", rewards),
+                    ("progress", f"{float(state.get('progress', 0.0)):.4f}"),
                     ("success", f"{success_total}/{metric_count} ({success_total / max(metric_count, 1):.2%})"),
                     ("steps", f"mean:{float(np.mean(episode_steps)):.1f} range:[{int(np.min(episode_steps))},{int(np.max(episode_steps))}]"),
                 ]),
@@ -542,16 +640,7 @@ def run_async_dqn(
                         checkpoint, checkpoint_manager, buffer, completed, epsilon, args
                     )
                     last_saved_episode = completed
-                maybe_update_best_checkpoint(
-                    best_tracker,
-                    best_checkpoint_manager,
-                    checkpoint,
-                    buffer,
-                    saved_path,
-                    completed,
-                    epsilon,
-                    args,
-                )
+                request_best_checkpoint_evaluation(best_tracker, saved_path, completed)
     except KeyboardInterrupt:
         interrupted = True
         print("\nInterrupt received: stopping async DQN collectors...", flush=True)
@@ -596,28 +685,29 @@ def save_training_checkpoint(
     return saved_path
 
 
-def maybe_update_best_checkpoint(
-    tracker,
-    best_checkpoint_manager,
-    checkpoint,
-    buffer,
-    candidate_path,
-    episode,
-    epsilon,
-    args,
-):
-    result = tracker.evaluate(candidate_path, episode)
+def request_best_checkpoint_evaluation(tracker, candidate_path, episode):
+    tracker.evaluate_async(candidate_path, episode)
+
+
+def apply_ready_best_checkpoint(tracker, best_checkpoint_manager, checkpoint, buffer, current_episode, epsilon, args):
+    result = tracker.poll_ready()
     if result is None or not tracker.is_improvement(result):
         return None
     best_path = save_training_checkpoint(
         checkpoint,
         best_checkpoint_manager,
         buffer,
-        episode,
+        current_episode,
         epsilon,
         args,
         save_replay=False,
     )
+    if int(current_episode) != int(result.episode):
+        print(
+            f"Best checkpoint applied using live weights at episode={current_episode} "
+            f"(background evaluation was requested for episode={result.episode})",
+            flush=True,
+        )
     tracker.record_best(result, best_path)
     return best_path
 
@@ -743,6 +833,7 @@ def main():
             headless=args.headless,
             debug=args.godot_debug,
             render_env_count=args.render_env_count,
+            user_args=build_lockstep_user_args(args),
         )
         print(f"Started Godot instances on ports {ports}", flush=True)
         envs = [
@@ -839,6 +930,20 @@ def main():
             )
         optimizer.learning_rate.assign(args.learning_rate)
 
+        # Resolved here, not at parse time: on --resume the horizon must span the episodes
+        # that are actually left, starting from the epsilon the checkpoint carried.
+        derived_epsilon_decay = args.epsilon_decay is None
+        args.epsilon_decay = resolve_epsilon_decay(args, epsilon, start_episode)
+        origin = "derived" if derived_epsilon_decay else "pinned via --epsilon-decay"
+        floor = max(float(args.epsilon_min), EPSILON_DECAY_FLOOR)
+        reached = episodes_to_reach_epsilon(epsilon, floor, args.epsilon_decay)
+        horizon = "never" if reached is None else f"episode {start_episode + reached}/{args.num_episodes}"
+        print(
+            f"Epsilon schedule: start={epsilon:.3f} min={args.epsilon_min:.3f} "
+            f"decay={args.epsilon_decay:.6f} ({origin}); reaches {floor:.3f} at {horizon}",
+            flush=True,
+        )
+
         demo_data = None
         if args.demo_path:
             demo_data = load_demonstration_arrays(
@@ -932,6 +1037,7 @@ def main():
                 env.configure(
                     training_episode=episode,
                     max_steps=args.max_steps_per_episode,
+                    physics_frames_per_step=args.physics_frames_per_step,
                 )
                 obs, info = env.reset(seed=args.episode_seed_multiplier * episode + env_idx)
                 if args.multi_agent:
@@ -1018,6 +1124,9 @@ def main():
                     if args.multi_agent:
                         per_agent_rewards = np.asarray(info.get("per_agent_rewards"), dtype=np.float32)
                         per_agent_done = np.asarray(info.get("per_agent_done"), dtype=np.bool_)
+                        per_agent_terminated = np.asarray(
+                            info.get("per_agent_terminated", per_agent_done), dtype=np.bool_
+                        )
                         per_agent_infos = info.get("per_agent_infos", [{} for _ in env.agent_ids])
 
                         for agent_idx in range(len(env.agent_ids)):
@@ -1044,7 +1153,7 @@ def main():
                                     int(action[agent_idx]),
                                     float(per_agent_rewards[agent_idx]),
                                     next_obs[agent_idx],
-                                    bool(per_agent_done[agent_idx] or done),
+                                    bool(per_agent_terminated[agent_idx] or terminated),
                                 )
                             state["ep_reward"][agent_idx] += per_agent_rewards[agent_idx]
 
@@ -1063,7 +1172,7 @@ def main():
                             int(action),
                             float(reward),
                             next_obs,
-                            done,
+                            bool(terminated),
                         )
                         state["ep_reward"] += float(reward)
 
@@ -1164,6 +1273,9 @@ def main():
             if snapshot_path is not None:
                 print(f"Saved opponent snapshot: {snapshot_path}", flush=True)
 
+            apply_ready_best_checkpoint(
+                best_tracker, best_checkpoint_manager, checkpoint, buffer, episode + 1, epsilon, args
+            )
             if args.checkpoint_every > 0 and (episode + 1) % args.checkpoint_every == 0:
                 saved_path = save_training_checkpoint(
                     checkpoint, checkpoint_manager, buffer, episode + 1, epsilon, args
@@ -1177,16 +1289,7 @@ def main():
                         checkpoint, checkpoint_manager, buffer, episode + 1, epsilon, args
                     )
                     last_saved_episode = episode + 1
-                maybe_update_best_checkpoint(
-                    best_tracker,
-                    best_checkpoint_manager,
-                    checkpoint,
-                    buffer,
-                    saved_path,
-                    episode + 1,
-                    epsilon,
-                    args,
-                )
+                request_best_checkpoint_evaluation(best_tracker, saved_path, episode + 1)
 
         if last_saved_episode != args.num_episodes:
             save_training_checkpoint(checkpoint, checkpoint_manager, buffer, args.num_episodes, epsilon, args, final=True)
@@ -1204,6 +1307,7 @@ def main():
         else:
             print("Training state was not initialized; no checkpoint was written.", flush=True)
     finally:
+        best_tracker.close()
         if stepper is not None:
             stepper.close()
         if buffer is not None:

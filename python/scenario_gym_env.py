@@ -35,6 +35,7 @@ class ScenarioGymEnv(gym.Env):
         self.multi_agent = bool(multi_agent)
 
         self.sock = socket.create_connection((host, self.port), timeout=self.timeout)
+        self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.file = self.sock.makefile("rwb")
 
         self._send({"cmd": "hello", "version": 1})
@@ -208,6 +209,9 @@ class ScenarioGymEnv(gym.Env):
         obs = np.zeros((len(self.agent_specs), self.obs_dim), dtype=np.float32)
         rewards = np.zeros((len(self.agent_specs),), dtype=np.float32)
         done = np.zeros((len(self.agent_specs),), dtype=np.bool_)
+        # Kept apart from `done`: a value estimator must bootstrap through a time-limit
+        # truncation but not through a real terminal, so the two cannot be fused.
+        terminated = np.zeros((len(self.agent_specs),), dtype=np.bool_)
         infos = []
 
         for idx, agent_id in enumerate(self.agent_ids):
@@ -218,8 +222,11 @@ class ScenarioGymEnv(gym.Env):
             obs[idx] = np.asarray(item.get("obs", [0.0] * self.obs_dim), dtype=np.float32)
             rewards[idx] = np.float32(item.get("reward", 0.0))
             done[idx] = bool(item.get("done", False))
+            # Older bridges only sent "done"; fall back to it so they degrade to the
+            # previous behaviour instead of silently reporting nothing as terminal.
+            terminated[idx] = bool(item.get("terminated", item.get("done", False)))
             infos.append(dict(item.get("info", {})))
-        return obs, rewards, done, infos
+        return obs, rewards, done, terminated, infos
 
     def reset(self, *, seed=None, options=None):
         if seed is not None:
@@ -228,10 +235,11 @@ class ScenarioGymEnv(gym.Env):
         msg = self._recv()
 
         if self.multi_agent:
-            obs, _, done, agent_infos = self._multi_obs_from_msg(msg)
+            obs, _, done, terminated, agent_infos = self._multi_obs_from_msg(msg)
             info = msg.get("info", {})
             info["agent_ids"] = list(self.agent_ids)
             info["per_agent_done"] = done
+            info["per_agent_terminated"] = terminated
             info["per_agent_infos"] = agent_infos
             return obs, info
 
@@ -317,10 +325,11 @@ class ScenarioGymEnv(gym.Env):
         if self.multi_agent:
             terminated = bool(msg.get("terminated", msg.get("done", False)))
             truncated = bool(msg.get("truncated", False))
-            obs, rewards, done, agent_infos = self._multi_obs_from_msg(msg)
+            obs, rewards, done, per_agent_terminated, agent_infos = self._multi_obs_from_msg(msg)
             info["agent_ids"] = list(self.agent_ids)
             info["per_agent_rewards"] = rewards
             info["per_agent_done"] = done
+            info["per_agent_terminated"] = per_agent_terminated
             info["per_agent_infos"] = agent_infos
             return obs, float(np.mean(rewards)), terminated, truncated, info
 

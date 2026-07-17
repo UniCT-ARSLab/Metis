@@ -1,0 +1,442 @@
+Using training backend: dqn (train_generic_dqn.py)
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+I0000 00:00:1784112260.211031  129854 port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+I0000 00:00:1784112260.249077  129854 cpu_feature_guard.cc:227] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX_VNNI FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+I0000 00:00:1784112261.054280  129854 port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+TensorFlow GPU devices: [PhysicalDevice(name='/physical_device:GPU:0', device_type='GPU')] memory_growth=enabled
+Started Godot instances on ports [6200, 6201, 6202, 6203]
+Scenario spec: agent_id=BreakoutPaddle agent_count=1 agents=['BreakoutPaddle'] multi_agent=False teams=[] unassigned=1 obs_dim=5 num_actions=3 actions=['idle', 'move_left', 'move_right']
+I0000 00:00:1784112266.928524  129854 gpu_device.cc:2043] Created device /job:localhost/replica:0/task:0/device:GPU:0 with 5525 MB memory:  -> device: 0, name: NVIDIA GeForce RTX 4060 Laptop GPU, pci bus id: 0000:01:00.0, compute capability: 8.9
+DQN learner: compiled batched graph
+Collector mode: async workers=4 queue=256 policy_sync_steps=100 update_basis=transitions update_every=4 updates_per_interval=1 max_updates_per_env_step=1
+episode=0000
+  mode      collector=async  worker=0  epsilon=0.999
+  outcome   reward=-10.003  success=0/1 (0.00%)  steps=mean:30.0 range:[30,30]
+  training  completed=1/2500  queue=0/256 (0%)  replay=120/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=76.2  transitions_s=76.2  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0001
+  mode      collector=async  worker=1  epsilon=0.997
+  outcome   reward=-10.0032  success=0/1 (0.00%)  steps=mean:32.0 range:[32,32]
+  training  completed=2/2500  queue=0/256 (0%)  replay=129/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=103.6  transitions_s=103.6  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0003
+  mode      collector=async  worker=2  epsilon=0.996
+  outcome   reward=-7.989500000000007  success=0/1 (0.00%)  steps=mean:95.0 range:[95,95]
+  training  completed=3/2500  queue=0/256 (0%)  replay=364/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=87.0  transitions_s=87.0  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0005
+  mode      collector=async  worker=1  epsilon=0.994
+  outcome   reward=-8.988399999999999  success=0/1 (0.00%)  steps=mean:84.0 range:[84,84]
+  training  completed=4/2500  queue=0/256 (0%)  replay=451/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=82.0  transitions_s=82.0  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0002
+  mode      collector=async  worker=3  epsilon=0.993
+  outcome   reward=-8.9923  success=0/1 (0.00%)  steps=mean:123.0 range:[123,123]
+  training  completed=5/2500  queue=0/256 (0%)  replay=475/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=131.6  transitions_s=131.6  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0004
+  mode      collector=async  worker=0  epsilon=0.991
+  outcome   reward=-8.9911  success=0/1 (0.00%)  steps=mean:111.0 range:[111,111]
+  training  completed=6/2500  queue=0/256 (0%)  replay=590/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=96.2  transitions_s=96.2  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0008
+  mode      collector=async  worker=3  epsilon=0.990
+  outcome   reward=-10.003499999999999  success=0/1 (0.00%)  steps=mean:35.0 range:[35,35]
+  training  completed=7/2500  queue=0/256 (0%)  replay=610/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=146.9  transitions_s=146.9  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0006
+  mode      collector=async  worker=2  epsilon=0.988
+  outcome   reward=-8.9927  success=0/1 (0.00%)  steps=mean:127.0 range:[127,127]
+  training  completed=8/2500  queue=0/256 (0%)  replay=870/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=124.8  transitions_s=124.8  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0007
+  mode      collector=async  worker=1  epsilon=0.987
+  outcome   reward=-8.990499999999999  success=0/1 (0.00%)  steps=mean:105.0 range:[105,105]
+  training  completed=9/2500  queue=0/256 (0%)  replay=873/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=88.0  transitions_s=88.0  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0009
+  mode      collector=async  worker=0  epsilon=0.985
+  outcome   reward=-7.991600000000009  success=0/1 (0.00%)  steps=mean:116.0 range:[116,116]
+  training  completed=10/2500  queue=0/256 (0%)  replay=1045/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=129.6  transitions_s=129.6  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0013
+  mode      collector=async  worker=0  epsilon=0.984
+  outcome   reward=-10.0038  success=0/1 (0.00%)  steps=mean:38.0 range:[38,38]
+  training  completed=11/2500  queue=0/256 (0%)  replay=1202/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=123.4  transitions_s=123.4  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0011
+  mode      collector=async  worker=2  epsilon=0.982
+  outcome   reward=-8.991299999999999  success=0/1 (0.00%)  steps=mean:113.0 range:[113,113]
+  training  completed=12/2500  queue=0/256 (0%)  replay=1317/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=132.0  transitions_s=132.0  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0012
+  mode      collector=async  worker=1  epsilon=0.981
+  outcome   reward=-8.994599999999998  success=0/1 (0.00%)  steps=mean:146.0 range:[146,146]
+  training  completed=13/2500  queue=0/256 (0%)  replay=1447/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=132.2  transitions_s=132.2  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0016
+  mode      collector=async  worker=1  epsilon=0.979
+  outcome   reward=-10.0036  success=0/1 (0.00%)  steps=mean:36.0 range:[36,36]
+  training  completed=14/2500  queue=0/256 (0%)  replay=1600/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=123.0  transitions_s=123.0  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0014
+  mode      collector=async  worker=0  epsilon=0.978
+  outcome   reward=-8.9911  success=0/1 (0.00%)  steps=mean:111.0 range:[111,111]
+  training  completed=15/2500  queue=0/256 (0%)  replay=1634/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=112.3  transitions_s=112.3  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0015
+  mode      collector=async  worker=2  epsilon=0.976
+  outcome   reward=-8.9912  success=0/1 (0.00%)  steps=mean:112.0 range:[112,112]
+  training  completed=16/2500  queue=0/256 (0%)  replay=1781/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=133.2  transitions_s=133.2  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0017
+  mode      collector=async  worker=1  epsilon=0.975
+  outcome   reward=-8.9919  success=0/1 (0.00%)  steps=mean:119.0 range:[119,119]
+  training  completed=17/2500  queue=0/256 (0%)  replay=2101/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=129.8  transitions_s=129.8  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0018
+  mode      collector=async  worker=0  epsilon=0.973
+  outcome   reward=-8.9924  success=0/1 (0.00%)  steps=mean:124.0 range:[124,124]
+  training  completed=18/2500  queue=0/256 (0%)  replay=2145/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=152.8  transitions_s=152.8  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0019
+  mode      collector=async  worker=2  epsilon=0.972
+  outcome   reward=-7.9921000000000095  success=0/1 (0.00%)  steps=mean:121.0 range:[121,121]
+  training  completed=19/2500  queue=0/256 (0%)  replay=2270/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=110.3  transitions_s=110.3  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0020
+  mode      collector=async  worker=1  epsilon=0.970
+  outcome   reward=-7.9910000000000085  success=0/1 (0.00%)  steps=mean:110.0 range:[110,110]
+  training  completed=20/2500  queue=0/256 (0%)  replay=2526/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=119.3  transitions_s=119.3  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0021
+  mode      collector=async  worker=0  epsilon=0.969
+  outcome   reward=-8.990499999999999  success=0/1 (0.00%)  steps=mean:105.0 range:[105,105]
+  training  completed=21/2500  queue=0/256 (0%)  replay=2578/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=147.5  transitions_s=147.5  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0010
+  mode      collector=async  worker=3  epsilon=0.968
+  outcome   reward=-4.030099999999998  success=0/1 (0.00%)  steps=mean:501.0 range:[501,501]
+  training  completed=22/2500  queue=0/256 (0%)  replay=2582/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=157.5  transitions_s=157.5  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0022
+  mode      collector=async  worker=2  epsilon=0.966
+  outcome   reward=-7.993000000000011  success=0/1 (0.00%)  steps=mean:130.0 range:[130,130]
+  training  completed=23/2500  queue=0/256 (0%)  replay=2792/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=113.8  transitions_s=113.8  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0025
+  mode      collector=async  worker=3  epsilon=0.965
+  outcome   reward=-8.9903  success=0/1 (0.00%)  steps=mean:103.0 range:[103,103]
+  training  completed=24/2500  queue=0/256 (0%)  replay=3000/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=126.7  transitions_s=126.7  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0024
+  mode      collector=async  worker=0  epsilon=0.963
+  outcome   reward=-8.991399999999999  success=0/1 (0.00%)  steps=mean:114.0 range:[114,114]
+  training  completed=25/2500  queue=0/256 (0%)  replay=3039/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=103.3  transitions_s=103.3  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+Saved checkpoint: checkpoints/breakout_27bricks_v1/ckpt-25
+Scheduled replay buffer save: checkpoints/breakout_27bricks_v1/replay-25.npz transitions=3039
+Saved replay buffer: checkpoints/breakout_27bricks_v1/replay-25.npz transitions=3039
+episode=0023
+  mode      collector=async  worker=1  epsilon=0.962
+  outcome   reward=-8.995099999999999  success=0/1 (0.00%)  steps=mean:151.0 range:[151,151]
+  training  completed=26/2500  queue=0/256 (0%)  replay=3120/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=142.9  transitions_s=142.9  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0026
+  mode      collector=async  worker=2  epsilon=0.960
+  outcome   reward=-8.992999999999999  success=0/1 (0.00%)  steps=mean:130.0 range:[130,130]
+  training  completed=27/2500  queue=0/256 (0%)  replay=3311/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=119.9  transitions_s=119.9  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0027
+  mode      collector=async  worker=3  epsilon=0.959
+  outcome   reward=-8.9908  success=0/1 (0.00%)  steps=mean:108.0 range:[108,108]
+  training  completed=28/2500  queue=0/256 (0%)  replay=3426/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=110.0  transitions_s=110.0  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0029
+  mode      collector=async  worker=1  epsilon=0.957
+  outcome   reward=-8.9908  success=0/1 (0.00%)  steps=mean:108.0 range:[108,108]
+  training  completed=29/2500  queue=0/256 (0%)  replay=3552/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=129.7  transitions_s=129.7  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0031
+  mode      collector=async  worker=3  epsilon=0.956
+  outcome   reward=-10.0039  success=0/1 (0.00%)  steps=mean:39.0 range:[39,39]
+  training  completed=30/2500  queue=0/256 (0%)  replay=3589/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=125.3  transitions_s=125.3  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0028
+  mode      collector=async  worker=0  epsilon=0.955
+  outcome   reward=-7.9950000000000125  success=0/1 (0.00%)  steps=mean:150.0 range:[150,150]
+  training  completed=31/2500  queue=0/256 (0%)  replay=3629/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=157.0  transitions_s=157.0  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0033
+  mode      collector=async  worker=3  epsilon=0.953
+  outcome   reward=-10.004199999999999  success=0/1 (0.00%)  steps=mean:42.0 range:[42,42]
+  training  completed=32/2500  queue=0/256 (0%)  replay=3746/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=115.8  transitions_s=115.8  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0034
+  mode      collector=async  worker=0  epsilon=0.952
+  outcome   reward=-10.0037  success=0/1 (0.00%)  steps=mean:37.0 range:[37,37]
+  training  completed=33/2500  queue=0/256 (0%)  replay=3791/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=113.7  transitions_s=113.7  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0030
+  mode      collector=async  worker=2  epsilon=0.950
+  outcome   reward=-7.99230000000001  success=0/1 (0.00%)  steps=mean:123.0 range:[123,123]
+  training  completed=34/2500  queue=0/256 (0%)  replay=3827/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=163.0  transitions_s=163.0  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0037
+  mode      collector=async  worker=2  epsilon=0.949
+  outcome   reward=-10.0038  success=0/1 (0.00%)  steps=mean:38.0 range:[38,38]
+  training  completed=35/2500  queue=0/256 (0%)  replay=3986/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=120.7  transitions_s=120.7  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0032
+  mode      collector=async  worker=1  epsilon=0.947
+  outcome   reward=-7.99200000000001  success=0/1 (0.00%)  steps=mean:120.0 range:[120,120]
+  training  completed=36/2500  queue=0/256 (0%)  replay=4019/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=130.1  transitions_s=130.1  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0035
+  mode      collector=async  worker=3  epsilon=0.946
+  outcome   reward=-8.9925  success=0/1 (0.00%)  steps=mean:125.0 range:[125,125]
+  training  completed=37/2500  queue=0/256 (0%)  replay=4220/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=110.5  transitions_s=110.5  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0036
+  mode      collector=async  worker=0  epsilon=0.945
+  outcome   reward=-8.994  success=0/1 (0.00%)  steps=mean:140.0 range:[140,140]
+  training  completed=38/2500  queue=0/256 (0%)  replay=4366/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=124.4  transitions_s=124.4  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0040
+  mode      collector=async  worker=3  epsilon=0.943
+  outcome   reward=-10.0041  success=0/1 (0.00%)  steps=mean:41.0 range:[41,41]
+  training  completed=39/2500  queue=0/256 (0%)  replay=4389/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=101.4  transitions_s=101.4  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0041
+  mode      collector=async  worker=0  epsilon=0.942
+  outcome   reward=-10.0037  success=0/1 (0.00%)  steps=mean:37.0 range:[37,37]
+  training  completed=40/2500  queue=1/256 (0%)  replay=4515/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=118.4  transitions_s=118.4  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0038
+  mode      collector=async  worker=2  epsilon=0.940
+  outcome   reward=-8.994299999999999  success=0/1 (0.00%)  steps=mean:143.0 range:[143,143]
+  training  completed=41/2500  queue=0/256 (0%)  replay=4555/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=153.2  transitions_s=153.2  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0039
+  mode      collector=async  worker=1  epsilon=0.939
+  outcome   reward=-8.994499999999999  success=0/1 (0.00%)  steps=mean:145.0 range:[145,145]
+  training  completed=42/2500  queue=0/256 (0%)  replay=4587/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=101.5  transitions_s=101.5  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0042
+  mode      collector=async  worker=3  epsilon=0.937
+  outcome   reward=-8.991999999999999  success=0/1 (0.00%)  steps=mean:120.0 range:[120,120]
+  training  completed=43/2500  queue=0/256 (0%)  replay=4872/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=122.0  transitions_s=122.0  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0043
+  mode      collector=async  worker=0  epsilon=0.936
+  outcome   reward=-7.99260000000001  success=0/1 (0.00%)  steps=mean:126.0 range:[126,126]
+  training  completed=44/2500  queue=0/256 (0%)  replay=5032/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=118.3  transitions_s=118.3  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0045
+  mode      collector=async  worker=1  epsilon=0.935
+  outcome   reward=-8.991  success=0/1 (0.00%)  steps=mean:110.0 range:[110,110]
+  training  completed=45/2500  queue=0/256 (0%)  replay=5033/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=163.6  transitions_s=163.6  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0044
+  mode      collector=async  worker=2  epsilon=0.933
+  outcome   reward=-7.998000000000008  success=0/1 (0.00%)  steps=mean:180.0 range:[180,180]
+  training  completed=46/2500  queue=0/256 (0%)  replay=5278/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=122.9  transitions_s=122.9  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0046
+  mode      collector=async  worker=3  epsilon=0.932
+  outcome   reward=-8.9908  success=0/1 (0.00%)  steps=mean:108.0 range:[108,108]
+  training  completed=47/2500  queue=0/256 (0%)  replay=5290/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=90.9  transitions_s=90.9  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0047
+  mode      collector=async  worker=0  epsilon=0.930
+  outcome   reward=-8.9912  success=0/1 (0.00%)  steps=mean:112.0 range:[112,112]
+  training  completed=48/2500  queue=0/256 (0%)  replay=5486/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=126.0  transitions_s=126.0  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0048
+  mode      collector=async  worker=1  epsilon=0.929
+  outcome   reward=-8.992199999999999  success=0/1 (0.00%)  steps=mean:122.0 range:[122,122]
+  training  completed=49/2500  queue=0/256 (0%)  replay=5518/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=129.0  transitions_s=129.0  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0052
+  mode      collector=async  worker=1  epsilon=0.928
+  outcome   reward=-10.0039  success=0/1 (0.00%)  steps=mean:39.0 range:[39,39]
+  training  completed=50/2500  queue=0/256 (0%)  replay=5677/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=116.0  transitions_s=116.0  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+Saved checkpoint: checkpoints/breakout_27bricks_v1/ckpt-50
+Scheduled replay buffer save: checkpoints/breakout_27bricks_v1/replay-50.npz transitions=5677
+Saved replay buffer: checkpoints/breakout_27bricks_v1/replay-50.npz transitions=5677
+episode=0049
+  mode      collector=async  worker=2  epsilon=0.926
+  outcome   reward=-8.9919  success=0/1 (0.00%)  steps=mean:119.0 range:[119,119]
+  training  completed=51/2500  queue=0/256 (0%)  replay=5747/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=122.1  transitions_s=122.1  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0050
+  mode      collector=async  worker=3  epsilon=0.925
+  outcome   reward=-8.9942  success=0/1 (0.00%)  steps=mean:142.0 range:[142,142]
+  training  completed=52/2500  queue=0/256 (0%)  replay=5837/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=121.1  transitions_s=121.1  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0053
+  mode      collector=async  worker=1  epsilon=0.924
+  outcome   reward=-10.004  success=0/1 (0.00%)  steps=mean:40.0 range:[40,40]
+  training  completed=53/2500  queue=0/256 (0%)  replay=5842/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=122.7  transitions_s=122.7  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0054
+  mode      collector=async  worker=2  epsilon=0.922
+  outcome   reward=-10.0039  success=0/1 (0.00%)  steps=mean:39.0 range:[39,39]
+  training  completed=54/2500  queue=0/256 (0%)  replay=5925/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=111.6  transitions_s=111.6  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0051
+  mode      collector=async  worker=0  epsilon=0.921
+  outcome   reward=-8.9912  success=0/1 (0.00%)  steps=mean:112.0 range:[112,112]
+  training  completed=55/2500  queue=0/256 (0%)  replay=5935/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=86.4  transitions_s=86.4  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0055
+  mode      collector=async  worker=3  epsilon=0.919
+  outcome   reward=-10.004199999999999  success=0/1 (0.00%)  steps=mean:42.0 range:[42,42]
+  training  completed=56/2500  queue=0/256 (0%)  replay=5998/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=123.3  transitions_s=123.3  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0057
+  mode      collector=async  worker=2  epsilon=0.918
+  outcome   reward=-10.0041  success=0/1 (0.00%)  steps=mean:41.0 range:[41,41]
+  training  completed=57/2500  queue=0/256 (0%)  replay=6104/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=127.1  transitions_s=127.1  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0060
+  mode      collector=async  worker=2  epsilon=0.917
+  outcome   reward=-10.0036  success=0/1 (0.00%)  steps=mean:36.0 range:[36,36]
+  training  completed=58/2500  queue=0/256 (0%)  replay=6256/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=104.0  transitions_s=104.0  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0056
+  mode      collector=async  worker=1  epsilon=0.915
+  outcome   reward=-8.995199999999999  success=0/1 (0.00%)  steps=mean:152.0 range:[152,152]
+  training  completed=59/2500  queue=0/256 (0%)  replay=6422/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=107.1  transitions_s=107.1  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0058
+  mode      collector=async  worker=0  epsilon=0.914
+  outcome   reward=-7.002200000000027  success=0/1 (0.00%)  steps=mean:222.0 range:[222,222]
+  training  completed=60/2500  queue=1/256 (0%)  replay=6849/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=101.7  transitions_s=101.7  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0062
+  mode      collector=async  worker=1  epsilon=0.912
+  outcome   reward=-8.991  success=0/1 (0.00%)  steps=mean:110.0 range:[110,110]
+  training  completed=61/2500  queue=0/256 (0%)  replay=6858/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=97.1  transitions_s=97.1  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0059
+  mode      collector=async  worker=3  epsilon=0.911
+  outcome   reward=-7.00210000000003  success=0/1 (0.00%)  steps=mean:221.0 range:[221,221]
+  training  completed=62/2500  queue=0/256 (0%)  replay=6877/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=171.8  transitions_s=171.8  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0063
+  mode      collector=async  worker=0  epsilon=0.910
+  outcome   reward=-10.0039  success=0/1 (0.00%)  steps=mean:39.0 range:[39,39]
+  training  completed=63/2500  queue=0/256 (0%)  replay=7008/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=124.9  transitions_s=124.9  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0061
+  mode      collector=async  worker=2  epsilon=0.908
+  outcome   reward=-7.006600000000015  success=0/1 (0.00%)  steps=mean:266.0 range:[266,266]
+  training  completed=64/2500  queue=0/256 (0%)  replay=7315/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=124.0  transitions_s=124.0  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0064
+  mode      collector=async  worker=1  epsilon=0.907
+  outcome   reward=-7.993100000000009  success=0/1 (0.00%)  steps=mean:131.0 range:[131,131]
+  training  completed=65/2500  queue=0/256 (0%)  replay=7366/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=148.6  transitions_s=148.6  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0066
+  mode      collector=async  worker=0  epsilon=0.906
+  outcome   reward=-8.9923  success=0/1 (0.00%)  steps=mean:123.0 range:[123,123]
+  training  completed=66/2500  queue=0/256 (0%)  replay=7501/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=147.6  transitions_s=147.6  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0069
+  mode      collector=async  worker=0  epsilon=0.904
+  outcome   reward=-10.0037  success=0/1 (0.00%)  steps=mean:37.0 range:[37,37]
+  training  completed=67/2500  queue=0/256 (0%)  replay=7652/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=119.0  transitions_s=119.0  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0068
+  mode      collector=async  worker=1  epsilon=0.903
+  outcome   reward=-8.9979  success=0/1 (0.00%)  steps=mean:179.0 range:[179,179]
+  training  completed=68/2500  queue=0/256 (0%)  replay=8073/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=150.8  transitions_s=150.8  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0065
+  mode      collector=async  worker=3  epsilon=0.902
+  outcome   reward=-6.011600000000017  success=0/1 (0.00%)  steps=mean:316.0 range:[316,316]
+  training  completed=69/2500  queue=0/256 (0%)  replay=8124/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=128.6  transitions_s=128.6  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0067
+  mode      collector=async  worker=2  epsilon=0.900
+  outcome   reward=-7.001500000000027  success=0/1 (0.00%)  steps=mean:215.0 range:[215,215]
+  training  completed=70/2500  queue=0/256 (0%)  replay=8197/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=143.0  transitions_s=143.0  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0070
+  mode      collector=async  worker=0  epsilon=0.899
+  outcome   reward=-8.997  success=0/1 (0.00%)  steps=mean:170.0 range:[170,170]
+  training  completed=71/2500  queue=0/256 (0%)  replay=8328/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=138.3  transitions_s=138.3  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0072
+  mode      collector=async  worker=3  epsilon=0.898
+  outcome   reward=-8.9923  success=0/1 (0.00%)  steps=mean:123.0 range:[123,123]
+  training  completed=72/2500  queue=0/256 (0%)  replay=8598/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=126.5  transitions_s=126.5  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0071
+  mode      collector=async  worker=1  epsilon=0.896
+  outcome   reward=-8.993799999999998  success=0/1 (0.00%)  steps=mean:138.0 range:[138,138]
+  training  completed=73/2500  queue=0/256 (0%)  replay=8632/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=138.1  transitions_s=138.1  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0076
+  mode      collector=async  worker=1  epsilon=0.895
+  outcome   reward=-10.0039  success=0/1 (0.00%)  steps=mean:39.0 range:[39,39]
+  training  completed=74/2500  queue=0/256 (0%)  replay=8788/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=101.8  transitions_s=101.8  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0077
+  mode      collector=async  worker=1  epsilon=0.894
+  outcome   reward=-10.004199999999999  success=0/1 (0.00%)  steps=mean:42.0 range:[42,42]
+  training  completed=75/2500  queue=0/256 (0%)  replay=8950/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=131.2  transitions_s=131.2  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+Saved checkpoint: checkpoints/breakout_27bricks_v1/ckpt-75
+Scheduled replay buffer save: checkpoints/breakout_27bricks_v1/replay-75.npz transitions=8950
+Saved replay buffer: checkpoints/breakout_27bricks_v1/replay-75.npz transitions=8950
+episode=0078
+  mode      collector=async  worker=1  epsilon=0.892
+  outcome   reward=-8.991999999999999  success=0/1 (0.00%)  steps=mean:120.0 range:[120,120]
+  training  completed=76/2500  queue=0/256 (0%)  replay=9440/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=116.4  transitions_s=116.4  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0079
+  mode      collector=async  worker=1  epsilon=0.891
+  outcome   reward=-10.0041  success=0/1 (0.00%)  steps=mean:41.0 range:[41,41]
+  training  completed=77/2500  queue=0/256 (0%)  replay=9602/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=122.3  transitions_s=122.3  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0080
+  mode      collector=async  worker=1  epsilon=0.890
+  outcome   reward=-10.0046  success=0/1 (0.00%)  steps=mean:46.0 range:[46,46]
+  training  completed=78/2500  queue=0/256 (0%)  replay=9790/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=126.2  transitions_s=126.2  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0073
+  mode      collector=async  worker=2  epsilon=0.888
+  outcome   reward=-6.019800000000034  success=0/1 (0.00%)  steps=mean:398.0 range:[398,398]
+  training  completed=79/2500  queue=0/256 (0%)  replay=9792/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=222.9  transitions_s=222.9  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0075
+  mode      collector=async  worker=3  epsilon=0.887
+  outcome   reward=-7.01460000000001  success=0/1 (0.00%)  steps=mean:346.0 range:[346,346]
+  training  completed=80/2500  queue=0/256 (0%)  replay=9925/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=123.3  transitions_s=123.3  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0082
+  mode      collector=async  worker=2  epsilon=0.886
+  outcome   reward=-10.004  success=0/1 (0.00%)  steps=mean:40.0 range:[40,40]
+  training  completed=81/2500  queue=0/256 (0%)  replay=9951/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=76.7  transitions_s=76.7  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0074
+  mode      collector=async  worker=0  epsilon=0.884
+  outcome   reward=-4.018900000000018  success=0/1 (0.00%)  steps=mean:389.0 range:[389,389]
+  training  completed=82/2500  queue=0/256 (0%)  replay=9954/200000  updates=0  loss=0.00000  policy_version=0
+  throughput env_steps_s=70.8  transitions_s=70.8  transitions_step=1.0  updates_s=0.0  updates_throttled=0
+episode=0084
+  mode      collector=async  worker=2  epsilon=0.883
+  outcome   reward=-10.004  success=0/1 (0.00%)  steps=mean:40.0 range:[40,40]
+  training  completed=83/2500  queue=125/256 (49%)  replay=10128/200000  updates=33  loss=0.70627  policy_version=0
+  throughput env_steps_s=70.4  transitions_s=70.4  transitions_step=1.0  updates_s=13.4  updates_throttled=0
+episode=0086
+  mode      collector=async  worker=2  epsilon=0.882
+  outcome   reward=-10.0047  success=0/1 (0.00%)  steps=mean:47.0 range:[47,47]
+  training  completed=84/2500  queue=0/256 (0%)  replay=10307/200000  updates=44  loss=0.84445  policy_version=0
+  throughput env_steps_s=447.3  transitions_s=447.3  transitions_step=1.0  updates_s=109.9  updates_throttled=0
