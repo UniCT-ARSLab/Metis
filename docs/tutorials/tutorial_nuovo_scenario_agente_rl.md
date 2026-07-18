@@ -1,1053 +1,642 @@
-# Tutorial Metis: creare un nuovo agente e un nuovo scenario RL
+# Creare un nuovo agente e un nuovo scenario con Metis
 
-Questa guida spiega come aggiungere un nuovo scenario di reinforcement learning al progetto, mantenendo la separazione attuale:
+Questo tutorial mostra il percorso normale per aggiungere un ambiente di reinforcement
+learning a Metis. Non costruiremo un bridge o un trainer dedicato: useremo i nodi del
+framework e scriveremo soltanto la fisica e le regole che appartengono al nostro gioco.
 
-- **Godot** simula mondo, fisica, agenti, osservazioni e reward.
-- **Python/Gymnasium** avvia gli ambienti, sceglie azioni, allena la rete e salva checkpoint.
-- **TCP JSON** e' il contratto tra Godot e Python.
+Come esempio realizzeremo un piccolo agente 3D che deve raggiungere un target. E' un
+compito semplice, ma contiene tutti i pezzi che ritornano negli scenari piu' grandi:
 
-L'idea fondamentale e': se il nuovo scenario rispetta lo stesso protocollo, puoi riusare quasi tutto il codice Python.
+- action space dichiarato in Godot;
+- observation componibili;
+- reward locale e reward di scenario;
+- evento terminale;
+- progress indipendente dal modo in cui viene misurato;
+- validazione, training, checkpoint ed esecuzione della policy.
 
----
+## Il modello mentale
 
-## 1. Prima decisione: cosa vuoi addestrare?
-
-Prima di scrivere codice, definisci queste cose su carta.
-
-### Scenario
-
-Esempi:
-
-- carri che combattono in arena;
-- droni che raccolgono risorse;
-- robot che raggiungono un target;
-- squadre che conquistano una zona;
-- auto che completano un circuito;
-- agenti che difendono una base.
-
-### Agenti
-
-Devi sapere:
-
-- quanti agenti ci sono;
-- quali sono controllati da Python;
-- quali sono scripted;
-- se il training e' cooperativo, competitivo o misto;
-- se tutti condividono la stessa rete o se hanno policy diverse.
-
-Esempio:
+Metis divide il lavoro in questo modo:
 
 ```text
-Scenario: capture point
-Agenti: A0, A1, B0, B1
-Team controllati da Python: Team A e Team B
-Obiettivo: stare nella zona centrale piu' a lungo degli avversari
-Training: self-play competitivo
-Policy: condivisa tra tutti gli agenti
+Godot                                Python
+---------------------------------    --------------------------------
+fisica e collisioni                  selezione dell'algoritmo
+azioni disponibili                   raccolta delle transizioni
+costruzione delle observation        learner TensorFlow/Keras
+reward ed eventi terminali           replay o rollout
+reset e randomizzazione              checkpoint e valutazione
 ```
+
+Il `BridgeServer` collega i due lati. Il `ScenarioController` standard implementa gia'
+`spec`, `configure`, `reset` e `step`: in un nuovo scenario non devi riscrivere questo
+protocollo.
+
+## 1. Definisci prima il problema
+
+Prima di aprire l'editor, scrivi quattro cose.
+
+### Obiettivo
+
+Una frase osservabile, per esempio:
+
+> L'agente deve entrare nell'area del target senza impiegare passi inutili.
+
+Evita obiettivi vaghi come "deve muoversi bene". Una condizione precisa rende piu'
+semplice progettare reward e terminalita'.
 
 ### Azioni
 
-Definisci un action space discreto.
-
-Esempio:
+Per il primo prototipo useremo quattro azioni discrete:
 
 ```text
 0 idle
 1 forward
-2 backward
-3 turn_left
-4 turn_right
-5 forward_left
-6 forward_right
-7 interact
-8 shoot
+2 forward_left
+3 forward_right
 ```
 
-Questo significa:
+L'ordine sara' determinato dai nodi figli di `DiscreteActionSet`, non da una costante
+scritta in Python.
 
-```bash
---num-actions 9
-```
+### Observation
 
-### Osservazioni
-
-Definisci cosa ogni agente vede.
-
-Esempio:
+L'agente vedra':
 
 ```text
-1. alive
-2. hp_norm
-3. self_x_norm
-4. self_z_norm
-5. target_x_local
-6. target_z_local
-7. target_distance
-8. nearest_enemy_x_local
-9. nearest_enemy_z_local
-10. nearest_enemy_distance
-11. nearest_ally_x_local
-12. nearest_ally_z_local
-13. ray_front
-14. ray_left
-15. ray_right
-16. can_interact
-17. reload_norm
-18. speed_norm
+target_local_x       [-1, 1]
+target_local_forward [-1, 1]
+target_distance      [ 0, 1]
+speed                [ 0, 1]
 ```
 
-Qui hai 18 feature:
+Le coordinate sono relative all'agente. In questo modo la policy non deve imparare una
+mappa di coordinate assolute e puo' essere riutilizzata dopo aver spostato lo scenario.
 
-```bash
---obs-dim 18
-```
+### Reward e fine episodio
 
-Se Godot restituisce 18 valori, Python deve costruire la rete con `obs_dim=18`.
+Useremo:
 
----
+- una piccola penalita' per decision step;
+- una reward proporzionale al progresso verso il target;
+- un bonus quando il target viene raggiunto;
+- `terminated` quando l'agente entra nell'area;
+- `truncated` se supera il limite di step.
 
-## 2. Struttura consigliata dei file
+Il bonus descrive il risultato. Il progresso aiuta l'esplorazione. La penalita' rende
+preferibile una soluzione breve, ma non deve essere tanto forte da rendere conveniente
+non provare.
 
-Per un nuovo scenario, non modificare tutto il vecchio scenario. Crea file nuovi.
+## 2. Prepara file e scena dell'agente
 
-Esempio per uno scenario `capture_point`:
+Una struttura ordinata puo' essere:
 
 ```text
-godot/scenes/capture_point.tscn
-godot/scripts/capture_point_controller.gd
-godot/scripts/capture_point_sensor_system.gd
-godot/scripts/capture_point_reward_system.gd
-godot/scripts/capture_point_unit.gd
+godot/agents/TargetSeeker/
+    target_seeker.gd
+    target_seeker.tscn
+
+godot/scenarios/target_seeker/
+    target_scenario.gd
+    target_scenario.tscn
 ```
 
-Puoi riusare:
+Crea `target_seeker.tscn` con questo albero:
 
 ```text
-godot/scripts/bridge_server.gd
-python/envs/scenario.py
-python/train.py
-python/run.py
-python/envs/process_manager.py
-python/core/replay_buffer.py
-python/core/models.py
+TargetSeeker                 CharacterBody3D
+├── MeshInstance3D
+├── CollisionShape3D
+└── Agent                    script Agent.gd
+    ├── ActionSpace          script ActionSpace.gd
+    ├── ObservationSystem    script ObservationSystem.gd
+    └── RewardSystem         script RewardSystem.gd
 ```
 
-La vecchia scena TeamBattle in `godot/legacy/team_battle/` resta soltanto come riferimento storico.
+I nomi predefiniti sono utili: il nodo `Agent` cerca proprio `ActionSpace`,
+`ObservationSystem` e `RewardSystem` se non imposti altri `NodePath`.
 
----
+## 3. Scrivi soltanto il comportamento del corpo
 
-## 3. Contratto che Godot deve rispettare
-
-Il `BridgeServer` parla con un controller Godot. Il controller del nuovo scenario deve implementare questi metodi:
-
-```gdscript
-func reset_episode(seed: int, observed_teams: Array = [0]) -> Dictionary
-
-func step_episode(
-	action_map: Dictionary,
-	controlled_teams: Array = [0],
-	observed_teams: Array = [0]
-) -> Dictionary
-
-func configure(config: Dictionary) -> Dictionary
-```
-
-### `reset_episode`
-
-Resetta il mondo e restituisce osservazioni iniziali.
-
-Formato atteso:
-
-```gdscript
-return {
-	"agents": [
-		{
-			"id": "A0",
-			"obs": [...]
-		},
-		{
-			"id": "A1",
-			"obs": [...]
-		}
-	],
-	"info": {
-		"episode_step": 0
-	}
-}
-```
-
-### `step_episode`
-
-Riceve azioni da Python, avanza la simulazione e restituisce nuove osservazioni, reward e done.
-
-Formato atteso:
-
-```gdscript
-return {
-	"agents": [
-		{
-			"id": "A0",
-			"obs": [...],
-			"reward": 0.12,
-			"done": false,
-			"alive": true
-		}
-	],
-	"terminated": false,
-	"truncated": false,
-	"info": {
-		"episode_step": step_count,
-		"winner": -1
-	}
-}
-```
-
-### `configure`
-
-Serve per curriculum e parametri runtime.
-
-Esempio:
-
-```gdscript
-func configure(config: Dictionary) -> Dictionary:
-	if config.has("max_steps"):
-		max_steps = int(config.max_steps)
-	if config.has("obstacle_count"):
-		obstacle_count = int(config.obstacle_count)
-	if config.has("spawn_randomness"):
-		spawn_randomness = float(config.spawn_randomness)
-
-	return {
-		"ok": true,
-		"max_steps": max_steps,
-		"obstacle_count": obstacle_count,
-		"spawn_randomness": spawn_randomness
-	}
-```
-
----
-
-## 4. Creare un nuovo agente Godot
-
-Un agente deve avere almeno:
+Collega questo script al `CharacterBody3D`:
 
 ```gdscript
 extends CharacterBody3D
+class_name TargetSeeker
 
 @export var move_speed := 5.0
-@export var turn_speed := 2.0
-@export var max_hp := 100.0
-@export var team_id := 0
+@export var turn_speed := 2.5
+@export var target: Node3D
+@export var target_distance_scale := 20.0
 
-var hp := 100.0
-var alive := true
-var current_action := 0
+@onready var agent: Agent = $Agent
 
-func reset_unit(new_transform: Transform3D, new_team_id: int) -> void:
-	team_id = new_team_id
-	global_transform = new_transform
-	velocity = Vector3.ZERO
-	hp = max_hp
-	alive = true
-	current_action = 0
-	visible = true
-	if has_node("CollisionShape3D"):
-		$CollisionShape3D.disabled = false
+var _drive_input := 0.0
+var _turn_input := 0.0
+var _training_active := true
 
-func apply_action(action: int) -> void:
-	current_action = action
 
-func sim_step(delta: float) -> void:
-	if not alive:
+func _physics_process(delta:float) -> void:
+	if not _training_active:
 		return
 
-	match current_action:
-		0:
-			velocity = Vector3.ZERO
-		1:
-			velocity = -global_transform.basis.z * move_speed
-		2:
-			velocity = global_transform.basis.z * move_speed
-		3:
-			rotate_y(-turn_speed * delta)
-		4:
-			rotate_y(turn_speed * delta)
-		_:
-			velocity = Vector3.ZERO
-
+	rotate_y(_turn_input * turn_speed * delta)
+	var forward := -global_transform.basis.z
+	var vertical_speed := velocity.y
+	velocity = forward * (_drive_input * move_speed)
+	velocity.y = vertical_speed
+	if not is_on_floor():
+		velocity += get_gravity() * delta
 	move_and_slide()
 
-func take_damage(amount: float) -> bool:
-	if not alive:
-		return false
-	hp -= amount
-	if hp <= 0.0:
-		hp = 0.0
-		alive = false
-		visible = false
-		velocity = Vector3.ZERO
-		if has_node("CollisionShape3D"):
-			$CollisionShape3D.disabled = true
-		return true
+
+func apply_action(action:Variant) -> Variant:
+	clear_control()
+	var action_id := int(action)
+	if agent.act(action_id) != OK:
+		return 0
+	return action_id
+
+
+func set_control(drive:float, turn:float) -> void:
+	_drive_input = clampf(drive, -1.0, 1.0)
+	_turn_input = clampf(turn, -1.0, 1.0)
+
+
+func clear_control() -> void:
+	_drive_input = 0.0
+	_turn_input = 0.0
+
+
+func get_target_local_observation() -> Vector2:
+	if target == null:
+		return Vector2.ZERO
+	var local_offset := global_transform.basis.inverse() * (target.global_position - global_position)
+	var scale := maxf(target_distance_scale, 0.001)
+	return Vector2(
+		clampf(local_offset.x / scale, -1.0, 1.0),
+		clampf(-local_offset.z / scale, -1.0, 1.0)
+	)
+
+
+func get_target_distance_observation() -> float:
+	if target == null:
+		return 1.0
+	return clampf(global_position.distance_to(target.global_position) / maxf(target_distance_scale, 0.001), 0.0, 1.0)
+
+
+func get_speed_observation() -> float:
+	var horizontal_velocity := Vector2(velocity.x, velocity.z)
+	return clampf(horizontal_velocity.length() / maxf(move_speed, 0.001), 0.0, 1.0)
+
+
+func reset_all(original_transform:Variant, reset_rewards := true) -> void:
+	set_training_active(true)
+	clear_control()
+	velocity = Vector3.ZERO
+	if typeof(original_transform) == TYPE_TRANSFORM3D:
+		transform = original_transform
+	if has_method("reset_physics_interpolation"):
+		reset_physics_interpolation()
+	agent.reset_observation_sources()
+	if reset_rewards:
+		agent.refresh_observation_sources()
+		agent.reset_reward({"body": self})
+
+
+func is_terminal() -> bool:
 	return false
 
-func hp_norm() -> float:
-	return hp / max_hp
+
+func set_training_active(enabled:bool) -> void:
+	_training_active = enabled
+	set_physics_process(enabled)
+	if not enabled:
+		clear_control()
+		velocity = Vector3.ZERO
 ```
 
-Importante:
+Il corpo implementa le parti concrete richieste dal controller:
 
-- `apply_action()` non deve simulare il mondo da sola: deve solo impostare intenzioni.
-- `sim_step()` applica davvero movimento/fisica.
-- Il controller chiama `sim_step()` per tutti gli agenti.
+- `apply_action()` applica l'azione ricevuta;
+- `reset_all()` ripristina fisica e componenti RL;
+- `is_terminal()` puo' segnalare una fine locale, come una collisione fatale;
+- `set_training_active()` permette di fermare un agente gia' concluso.
 
----
+Non abbiamo scritto `get_action_space()` o assemblato manualmente il vettore delle
+observation: se ne occupa il figlio `Agent` leggendo i propri componenti.
 
-## 5. Creare il sensor system
+## 4. Dichiara le azioni dall'Inspector
 
-Il sensor system trasforma lo stato Godot in vettori numerici.
+Sotto `Agent/ActionSpace` aggiungi:
 
-Template:
+```text
+Movement                    DiscreteActionSet.gd
+├── Idle                    DiscreteAction.gd
+├── Forward                 DiscreteAction.gd
+├── ForwardLeft             DiscreteAction.gd
+└── ForwardRight            DiscreteAction.gd
+```
+
+Configura `Movement.action_name = "movement"`. Per ogni `DiscreteAction` lascia vuoto
+`target_path`, cosi' il target predefinito sara' il corpo `TargetSeeker`, e imposta:
+
+| Nodo | `action_name` | `method_name` | `arguments` |
+|---|---|---|---|
+| Idle | `idle` | `set_control` | `[0.0, 0.0]` |
+| Forward | `forward` | `set_control` | `[1.0, 0.0]` |
+| ForwardLeft | `forward_left` | `set_control` | `[1.0, 1.0]` |
+| ForwardRight | `forward_right` | `set_control` | `[1.0, -1.0]` |
+
+`DiscreteActionSet.names` e' il campo legacy: lascialo vuoto quando usi i figli
+`DiscreteAction`. Non chiamare anche `agent.add_action()` per le stesse azioni, altrimenti
+avresti due fonti di configurazione.
+
+## 5. Componi le observation
+
+Sotto `Agent/ObservationSystem` aggiungi tre `MethodObservationSource`:
+
+| Nodo | `observation_name` | `method_name` | Dimensione |
+|---|---|---|---|
+| TargetLocal | `target_local` | `get_target_local_observation` | 2 |
+| TargetDistance | `target_distance` | `get_target_distance_observation` | 1 |
+| Speed | `speed` | `get_speed_observation` | 1 |
+
+Lascia vuoto `source_path`: i metodi si trovano sul corpo padre dell'`Agent`.
+
+Il plugin Metis Inspector aggiunge `Select...` ai campi dei metodi e delle property. Se
+un metodo appena scritto non compare, salva lo script e la scena, assicurati che non ci
+siano errori di parsing e riseleziona il nodo. Il nome puo' comunque essere inserito a
+mano.
+
+Un `Vector2` viene appiattito automaticamente. La spec risultante avra' quindi
+`obs_dim=4`; non devi passare `--obs-dim` a Python. L'ordine e' quello dei figli dentro
+`ObservationSystem`, quindi non riordinarli quando vuoi riprendere un modello esistente.
+
+Per altri scenari puoi combinare anche:
+
+- `PropertyObservationSource` per leggere una property e normalizzarla;
+- `BodySpeedObservationSource` e `BodyKinematicsObservationSource`;
+- `RaycastObservationSource` e `RaycastClearanceObservationSource`;
+- source per target, team e navigazione `Path3D`;
+- un nuovo `ObservationSource` quando la misura e' davvero specifica.
+
+Inserisci solo informazioni disponibili all'agente nel mondo reale o simulato. Il
+progresso usato per una reward non deve diventare automaticamente una observation.
+
+## 6. Aggiungi la reward locale
+
+Sotto `Agent/RewardSystem` aggiungi uno `StepPenaltyReward`:
+
+```text
+term_name = time
+penalty = -0.001
+weight = 1.0
+```
+
+Questa e' una reward locale perche' dipende soltanto dal passare di un decision step.
+Non aggiungiamo una reward generica per il movimento: in questo compito muoversi in
+cerchio non e' progresso e non merita un premio.
+
+## 7. Costruisci lo scenario con i sistemi standard
+
+Crea `target_scenario.tscn`:
+
+```text
+TargetScenario                     Node3D, script target_scenario.gd
+├── World
+│   ├── Floor                      StaticBody3D
+│   └── Target                     Area3D
+│       ├── MeshInstance3D
+│       └── CollisionShape3D
+├── Agents
+│   └── TargetSeeker               istanza di target_seeker.tscn
+├── ScenarioController             script ScenarioController.gd
+│   ├── ScenarioRewardSystem       script ScenarioRewardSystem.gd
+│   │   ├── Progress               ProgressDeltaScenarioReward.gd
+│   │   └── Goal                   EventScenarioReward.gd
+│   ├── ProgressProvider           MethodProgressProvider.gd
+│   └── ScenarioEventSystem        script ScenarioEventSystem.gd
+│       └── GoalReached            AreaReachedEventSource.gd
+└── BridgeServer                   script bridge_server.gd
+```
+
+Collega nell'Inspector:
+
+- `TargetSeeker.target` a `World/Target`;
+- `ScenarioController.controlled_agents` a `Agents/TargetSeeker`;
+- `BridgeServer.controller_path` a `../ScenarioController`;
+- `GoalReached.area` a `World/Target`;
+- `ProgressProvider.source_path` al nodo radice `TargetScenario`.
+
+I path di reward, progress ed eventi del controller hanno gia' i nomi mostrati
+nell'albero. Se cambi quei nomi, aggiorna i relativi `NodePath` esportati.
+
+Controlla collision layer e mask dell'`Area3D`: il segnale `body_entered` deve vedere il
+`CharacterBody3D`.
+
+## 8. Definisci progress, evento e reward di scenario
+
+Collega questo script al nodo radice:
 
 ```gdscript
 extends Node3D
 
-@export var controller_path: NodePath
-@export var ray_length := 7.0
+@export var target: Node3D
+@export var max_target_distance := 20.0
 
-var controller
 
-func _ready() -> void:
-	controller = get_node(controller_path)
-
-func get_team_channels(team_id: int) -> Array:
-	var channels: Array = []
-	var idx := 0
-	for unit in controller.get_team_units(team_id):
-		channels.append({
-			"id": unit.name,
-			"obs": _agent_observation(unit, team_id, idx)
-		})
-		idx += 1
-	return channels
-
-func get_teams_channels(team_ids: Array) -> Array:
-	var channels: Array = []
-	for team_id in team_ids:
-		channels.append_array(get_team_channels(int(team_id)))
-	return channels
-
-func _agent_observation(agent, team_id: int, agent_index: int) -> Array:
-	var obs: Array = []
-
-	obs.append(float(agent_index))
-	obs.append(1.0 if agent.alive else 0.0)
-	obs.append(agent.hp_norm())
-	obs.append(clampf(agent.global_position.x / 20.0, -1.0, 1.0))
-	obs.append(clampf(agent.global_position.z / 20.0, -1.0, 1.0))
-
-	var nearest_enemy = controller.nearest_enemy(agent, team_id)
-	if nearest_enemy != null:
-		var enemy_vec = nearest_enemy.global_position - agent.global_position
-		var enemy_local = agent.global_transform.basis.inverse() * enemy_vec
-		obs.append(clampf(enemy_local.x / 20.0, -1.0, 1.0))
-		obs.append(clampf(enemy_local.z / 20.0, -1.0, 1.0))
-		obs.append(clampf(enemy_vec.length() / 20.0, 0.0, 1.0))
-	else:
-		obs.append(0.0)
-		obs.append(0.0)
-		obs.append(1.0)
-
-	obs.append(_ray_distance_normalized(agent, Vector3(0, 0, -1)))
-	obs.append(_ray_distance_normalized(agent, Vector3(-1, 0, 0)))
-	obs.append(_ray_distance_normalized(agent, Vector3(1, 0, 0)))
-
-	return obs
-
-func _ray_distance_normalized(agent, local_dir: Vector3) -> float:
-	var space_state = get_world_3d().direct_space_state
-	var from = agent.global_position + Vector3.UP * 0.6
-	var world_dir = agent.global_transform.basis * local_dir.normalized()
-	var to = from + world_dir * ray_length
-	var query := PhysicsRayQueryParameters3D.create(from, to)
-	query.exclude = [agent]
-	var hit := space_state.intersect_ray(query)
-	if hit.is_empty():
-		return 1.0
-	return clamp(from.distance_to(hit.position) / ray_length, 0.0, 1.0)
+func get_progress(agent:Node) -> float:
+	if target == null or not agent is Node3D:
+		return 0.0
+	var distance := (agent as Node3D).global_position.distance_to(target.global_position)
+	return 1.0 - clampf(distance / maxf(max_target_distance, 0.001), 0.0, 1.0)
 ```
 
-Regola d'oro: tutte le feature devono essere numeri ragionevolmente normalizzati, spesso tra `-1` e `1` oppure tra `0` e `1`.
+Nel `MethodProgressProvider` configura:
 
----
+```text
+method_name = get_progress
+pass_agent_to_source = true
+```
 
-## 6. Creare il reward system
+Il provider espone un numero fra `0` e `1`. Il controller e le reward non hanno bisogno
+di sapere se quel numero rappresenta distanza, percentuale di pista, blocchi distrutti
+o salute di un boss.
 
-Il reward system assegna un numero a ogni agente.
+Configura `ProgressDeltaScenarioReward`:
 
-Template:
+```text
+term_name = progress
+progress_reward_scale = 2.0
+backward_penalty_scale = 2.0
+```
+
+Configura `GoalReached`:
+
+```text
+event_name = goal_reached
+terminal_reason = goal_reached
+only_once = true
+```
+
+Configura `EventScenarioReward`:
+
+```text
+term_name = goal
+event_name = goal_reached
+reward = 5.0
+only_once = true
+```
+
+L'evento descrive il fatto; la reward decide quanto vale. `terminal_reason` fa terminare
+il canale dell'agente senza dover aggiungere logica al `BridgeServer`.
+
+Il totale inviato a Python sara':
+
+```text
+local RewardSystem + ScenarioRewardSystem
+```
+
+I termini restano separati in `info.local_term_rewards` e `info.scenario_terms`, che e'
+molto piu' utile di un unico numero durante il debug.
+
+## 9. Configura reset e durata
+
+Sul `ScenarioController` parti con:
+
+```text
+max_steps = 500
+physics_frames_per_step = 1
+randomize_reset = false
+deactivate_done_agents = true
+```
+
+`max_steps` produce una truncation, non una terminalita' naturale. Impostarlo a `0`
+disabilita il limite, ma fallo soltanto quando lo scenario possiede una conclusione o
+una stall detection affidabile.
+
+`physics_frames_per_step` indica per quanti tick fisici resta attiva la stessa azione.
+A `60 Hz`, un valore `4` fa decidere la policy a `15 Hz`. Cambiarlo modifica anche la
+durata fisica di penalita' per step, timeout e finestre di stall.
+
+Per randomizzare il target a ogni episodio puoi usare il segnale del controller invece
+di riscrivere `reset_episode()`:
 
 ```gdscript
-extends Node
+@export var target_spawn_half_extent := Vector2(7.0, 7.0)
+@onready var scenario_controller: ScenarioController = $ScenarioController
 
-@export var controller_path: NodePath
-
-var controller
-var prev_hp := {}
-var prev_distance_to_target := {}
 
 func _ready() -> void:
-	controller = get_node(controller_path)
-	reset_reward()
+	scenario_controller.episode_reset_started.connect(_on_episode_reset_started)
 
-func reset_reward() -> void:
-	prev_hp.clear()
-	prev_distance_to_target.clear()
-	for unit in controller.get_all_units():
-		prev_hp[unit.name] = unit.hp
-		prev_distance_to_target[unit.name] = controller.distance_to_objective(unit)
 
-func compute_per_agent_rewards(step_events: Dictionary, winner: int) -> Dictionary:
-	var rewards := {}
-
-	for unit in controller.get_all_units():
-		rewards[unit.name] = -0.002
-
-		var old_dist := float(prev_distance_to_target.get(unit.name, controller.distance_to_objective(unit)))
-		var new_dist := controller.distance_to_objective(unit)
-		rewards[unit.name] += (old_dist - new_dist) * 0.01
-		prev_distance_to_target[unit.name] = new_dist
-
-		var old_hp := float(prev_hp.get(unit.name, unit.max_hp))
-		if unit.hp < old_hp:
-			rewards[unit.name] -= (old_hp - unit.hp) * 0.015
-		prev_hp[unit.name] = unit.hp
-
-	for agent_name in step_events.get("objective_ticks", {}).keys():
-		rewards[agent_name] += float(step_events.objective_ticks[agent_name]) * 0.02
-
-	for agent_name in step_events.get("kills", {}).keys():
-		rewards[agent_name] += float(step_events.kills[agent_name]) * 1.0
-
-	if winner != -1:
-		for unit in controller.get_all_units():
-			if unit.team_id == winner:
-				rewards[unit.name] += 3.0
-			else:
-				rewards[unit.name] -= 3.0
-
-	return rewards
+func _on_episode_reset_started(episode_seed:int) -> void:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = episode_seed
+	target.position.x = rng.randf_range(-target_spawn_half_extent.x, target_spawn_half_extent.x)
+	target.position.z = rng.randf_range(-target_spawn_half_extent.y, target_spawn_half_extent.y)
 ```
 
-Consigli:
+Usa il seed ricevuto: due run con lo stesso seed devono poter ricreare lo stesso reset.
+Prima verifica il problema con target fisso, poi abilita la randomizzazione.
 
-- Usa reward dense all'inizio.
-- Penalizza morte, bordi, stallo, collisioni inutili.
-- Premia progressi intermedi, non solo vittoria finale.
-- Tieni le reward in range moderati: valori enormi rendono DQN instabile.
+## 10. Valida prima di allenare
 
----
+Esporta il percorso di Godot una volta:
 
-## 7. Creare il controller dello scenario
-
-Il controller coordina tutto.
-
-Responsabilita':
-
-- reset degli agenti;
-- applicare azioni;
-- avanzare la simulazione;
-- calcolare eventi;
-- calcolare reward;
-- costruire risposta per Python.
-
-Template:
-
-```gdscript
-extends Node
-
-@export var agents_root_path: NodePath
-@export var sensors_path: NodePath
-@export var reward_system_path: NodePath
-@export var max_steps := 400
-
-var agents_root
-var sensors
-var reward_system
-var step_count := 0
-
-func _ready() -> void:
-	agents_root = get_node(agents_root_path)
-	sensors = get_node(sensors_path)
-	reward_system = get_node(reward_system_path)
-
-func get_team_units(team_id: int) -> Array:
-	var result: Array = []
-	for unit in agents_root.get_children():
-		if unit.team_id == team_id:
-			result.append(unit)
-	return result
-
-func get_all_units() -> Array:
-	return agents_root.get_children()
-
-func reset_episode(seed: int, observed_teams: Array = [0]) -> Dictionary:
-	step_count = 0
-	seed(seed)
-
-	_reset_spawns()
-	reward_system.reset_reward()
-
-	return {
-		"agents": sensors.get_teams_channels(observed_teams),
-		"info": {
-			"episode_step": step_count,
-			"winner": -1
-		}
-	}
-
-func configure(config: Dictionary) -> Dictionary:
-	if config.has("max_steps"):
-		max_steps = int(config.max_steps)
-	return {"ok": true, "max_steps": max_steps}
-
-func step_episode(action_map: Dictionary, controlled_teams: Array = [0], observed_teams: Array = [0]) -> Dictionary:
-	step_count += 1
-
-	for unit in get_all_units():
-		if unit.alive and _team_is_controlled(unit.team_id, controlled_teams):
-			unit.apply_action(int(action_map.get(unit.name, 0)))
-		else:
-			unit.apply_action(_scripted_action(unit))
-
-	for _i in range(4):
-		for unit in get_all_units():
-			unit.sim_step(1.0 / 30.0)
-
-	var step_events := _collect_step_events()
-	var winner := _winner_team_id()
-	var truncated := step_count >= max_steps
-	var per_agent_rewards = reward_system.compute_per_agent_rewards(step_events, winner)
-
-	var channels: Array = []
-	for ch in sensors.get_teams_channels(observed_teams):
-		var unit = _find_unit(ch.id)
-		channels.append({
-			"id": ch.id,
-			"obs": ch.obs,
-			"reward": float(per_agent_rewards.get(ch.id, 0.0)),
-			"done": winner != -1 or truncated or not unit.alive,
-			"alive": unit.alive
-		})
-
-	return {
-		"agents": channels,
-		"terminated": winner != -1,
-		"truncated": truncated,
-		"info": {
-			"episode_step": step_count,
-			"winner": winner
-		}
-	}
-
-func _team_is_controlled(team_id: int, controlled_teams: Array) -> bool:
-	for item in controlled_teams:
-		if int(item) == team_id:
-			return true
-	return false
+```bash
+export GODOT_BIN=/percorso/del/eseguibile/Godot
 ```
 
-Questo e' lo scheletro. Poi devi implementare:
+Poi esegui un rollout casuale:
 
-```gdscript
-func _reset_spawns()
-func _scripted_action(unit)
-func _collect_step_events()
-func _winner_team_id()
-func _find_unit(unit_name: String)
+```bash
+python/.venv/bin/python python/tools/random_rollout.py \
+  --godot-project godot \
+  --godot-scene res://scenarios/target_seeker/target_scenario.tscn \
+  --steps 500 \
+  --print-reward-terms \
+  --no-headless
 ```
 
----
+Prima del training verifica che:
 
-## 8. Creare la scena Godot
+- la spec riporti un agente, `obs_dim=4`, action type `discrete` e quattro azioni;
+- ogni azione produca il movimento atteso;
+- le observation siano finite e cambino mentre il corpo si muove;
+- `progress` cresca avvicinandosi e diminuisca allontanandosi;
+- `goal_reached` assegni il bonus una volta sola;
+- l'episodio termini entrando nell'area;
+- il reset azzeri velocita', input e reward state.
 
-Nella nuova scena devi collegare i NodePath.
+Se Godot si disconnette, guarda `.runtime/godot_logs/godot_<porta>.log`: quasi sempre
+troverai li' l'errore GDScript reale.
 
-Struttura consigliata:
+## 11. Avvia il training generico
+
+Non servono `--obs-dim`, `--num-actions` o un file Python per questo scenario. Metis
+legge la spec da Godot:
+
+```bash
+python/.venv/bin/python python/train.py \
+  --algorithm auto \
+  --godot-project godot \
+  --godot-scene res://scenarios/target_seeker/target_scenario.tscn \
+  --num-envs 4 \
+  --num-episodes 1500 \
+  --max-steps-per-episode 500 \
+  --checkpoint-dir checkpoints/target_seeker_dqn_v1 \
+  --headless
+```
+
+Con questo action space, `auto` sceglie DQN. Per le azioni continue sceglie DDPG; per
+le ibride sceglie PPO. SAC, TD3 e le varianti con dimostrazioni si selezionano
+esplicitamente.
+
+Il training usa collector asincrono e modalita' headless per default. Per osservare una
+sola istanza senza renderizzare tutte le altre:
 
 ```text
-CapturePointMain
-├── Agents
-│   ├── A0
-│   ├── A1
-│   ├── B0
-│   └── B1
-├── ObjectiveArea
-├── Obstacles
-├── SensorSystem
-├── RewardSystem
-├── ScenarioController
-└── BridgeServer
+--no-headless --render-env-count 1 --render-mode light-gpu
 ```
 
-Nel `BridgeServer` imposta:
+Non giudicare il training soltanto dalla loss. Guarda reward, successo, durata degli
+episodi e comportamento reale con una valutazione senza esplorazione.
 
-```text
-controller_path = ../ScenarioController
-```
+## 12. Multi-agent senza cambiare trainer
 
-Nel `SensorSystem` imposta:
+Per allenare piu' copie dello stesso agente:
 
-```text
-controller_path = ../ScenarioController
-```
-
-Nel `RewardSystem` imposta:
-
-```text
-controller_path = ../ScenarioController
-```
-
-Nel `ScenarioController` imposta:
-
-```text
-agents_root_path = ../Agents
-sensors_path = ../SensorSystem
-reward_system_path = ../RewardSystem
-```
-
----
-
-## 9. Avviare il trainer Python
-
-Per nuovi scenari non creare un trainer specifico. Fai esporre agli agenti Godot `get_observations()` e `get_action_space()`, poi usa `train.py`.
-
-Esempio per azioni discrete:
+1. aggiungi altre istanze sotto `Agents`, oppure usa la replica del controller;
+2. assegna nomi unici;
+3. inseriscile in `controlled_agents`;
+4. mantieni observation e action space compatibili;
+5. aggiungi `--multi-agent` al rollout, al training e al runner.
 
 ```bash
 python/.venv/bin/python python/train.py \
   --algorithm dqn \
-  --godot-bin /percorso/a/Godot \
   --godot-project godot \
-  --godot-scene res://scenarios/capture_point/capture_point.tscn \
+  --godot-scene res://scenarios/target_seeker/target_scenario.tscn \
   --num-envs 4 \
   --multi-agent \
-  --headless
+  --checkpoint-dir checkpoints/target_seeker_multi_v1
 ```
 
-Esempio per azioni continue:
+Le copie producono transizioni separate ma condividono la stessa policy. Non vengono
+creati quattro modelli e non viene scelto il migliore fra gli agenti. Reward,
+terminalita' e diagnostica restano personali.
 
-```bash
-python/.venv/bin/python python/train.py \
-  --algorithm sac \
-  --godot-bin /percorso/a/Godot \
-  --godot-project godot \
-  --godot-scene res://scenarios/cars/cars_scenario.tscn \
-  --num-envs 4 \
-  --multi-agent \
-  --headless
+Se servono policy indipendenti per ruoli diversi, il flusso multi-policy non e' ancora
+automatico: non nascondere ruoli incompatibili dentro un unico parameter sharing.
+
+## 13. Passare ad azioni continue o ibride
+
+Per un controllo continuo sostituisci `DiscreteActionSet` con, per esempio:
+
+```text
+ActionSpace
+├── Drive       ContinuousAction, size=1, low=-1, high=1
+└── Steering    ContinuousAction, size=1, low=-1, high=1
 ```
 
-Con `--algorithm auto`, Python legge lo scenario e sceglie DQN per azioni discrete, DDPG per azioni continue e PPO per azioni ibride. SAC, TD3, DDPG+BC, DDPGfD e TD3+BC vanno selezionati esplicitamente. Le varianti BC e DDPGfD richiedono dimostrazioni compatibili registrate con `recorder.py`.
-
-Il training e' headless per default. Aggiungi `--no-headless` per osservare tutte le
-istanze oppure `--no-headless --render-env-count 1` per mostrare una sola preview. Il
-collector asincrono e' il default; usa `--collector-mode sync` quando serve una barriera
-fra gli environment o quando abiliti l'opponent pool storico.
-
-Per ridurre il numero di round trip puoi aggiungere `--physics-frames-per-step N`: la
-stessa azione rimane attiva per `N` tick fisici prima della observation successiva. Parti
-da `1`; valori come `2` o `4` hanno senso solo se l'agente non richiede controlli rapidi.
-Reward per step, finestre di stall e limite di step misurano decision step, quindi vanno
-rivalutati quando cambi questo parametro.
-
-Mantieni distinta la fine reale dell'episodio (`terminated`) da un limite esterno
-(`truncated`). Il framework azzera il bootstrap del valore soltanto sui terminali reali;
-usare `terminated` per un semplice timeout insegna quindi un valore finale artificiale.
-
-Per azioni continue puoi guidare l'esplorazione casuale iniziale direttamente da Godot:
+Nel corpo, `apply_action()` usa:
 
 ```gdscript
-func get_action_space() -> Dictionary:
-	return {
-		"move_input": {
-			"size": 1,
-			"action_type": "continuous",
-			"low": 0.0,
-			"high": 1.0,
-			"exploration_low": 0.55,
-			"exploration_high": 1.0
-		},
-		"rotation_input": {
-			"size": 1,
-			"action_type": "continuous",
-			"low": -1.0,
-			"high": 1.0,
-			"exploration_low": -0.25,
-			"exploration_high": 0.25
-		}
-	}
+var values := agent.decode_continuous_action(action)
+_drive_input = float(values[0])
+_turn_input = float(values[1])
+return values
 ```
 
-Se `exploration_low` e `exploration_high` non sono presenti, Python campiona casualmente tra `low` e `high`.
+Per un agente ibrido mantieni sia i `ContinuousAction` sia un `DiscreteActionSet`, per
+esempio movimento continuo e `shoot/reload` discreti. La spec diventera' `hybrid` e PPO
+ricevera' il dictionary dei componenti. Il corpo deve applicare entrambi senza assumere
+che l'azione sia un singolo intero.
 
-Nelle scene nuove, preferisci dichiarare questo sotto l'agente:
+## 14. Curriculum e dimostrazioni
 
-```text
-Agent
-  ActionSpace
-    ContinuousAction move_input
-    ContinuousAction rotation_input
-  ObservationSystem
-    MethodObservationSource
-    RaycastObservationSource
-    TargetRaycastObservationSource
-  RewardSystem
-    RewardComponent...
-```
+Un curriculum dovrebbe cambiare la difficolta', non aggiungere informazioni segrete
+alla policy. Puoi usare:
 
-Il corpo concreto, ad esempio `Car` o `Tank`, dovrebbe restare responsabile soprattutto di fisica, input applicati e metodi domain-specific come `get_signed_forward_speed()` o `get_control_input()`.
+- `scenario_configured` e `training_episode` per ostacoli, velocita' o dimensioni;
+- reset progressivo con un provider che implementa `build_reset_transform()`;
+- `Path3DProgressProvider` per spawn lungo un percorso;
+- randomizzazione crescente di target, spawn e fisica.
 
----
+Avanza la difficolta' soltanto dopo aver validato la fase precedente. Se cambi
+continuamente distribuzione prima che la policy impari, il curriculum diventa rumore.
 
-## 9.1 Reward locali e reward di scenario
-
-Usa due livelli:
-
-- `Agent/RewardSystem`: reward che riguardano il singolo corpo o i suoi sensori, ad esempio collisione, velocita', input troppo bruschi, raycast vicini.
-- `ScenarioController/ScenarioRewardSystem`: reward che richiedono conoscenza dello scenario, ad esempio progresso, target raggiunto, regole di episodio, stall o pace penalty.
-
-I componenti di scenario gia' disponibili sono:
-
-- `ProgressDeltaScenarioReward`: premia l'aumento del progresso e penalizza la sua diminuzione, senza conoscere come viene misurato.
-- `EventScenarioReward`: assegna un bonus quando un evento configurabile diventa vero.
-- `ProgressStallScenarioReward`: rileva agenti che non migliorano il proprio progresso.
-- `ProgressPaceScenarioReward`: penalizza chi non copre una soglia minima di progresso entro una finestra di step.
-
-Il controller invia a Python:
-
-```text
-reward = local_reward + scenario_reward
-info.local_term_rewards
-info.scenario_reward
-info.scenario_terms
-```
-
-Quindi durante il debug puoi capire se l'agente sta guadagnando per comportamento locale o per avanzamento nello scenario.
-
-Il progresso viene fornito dal nodo `ScenarioController/ProgressProvider`. Il controller e le reward vedono soltanto un valore numerico; la sorgente puo' essere sostituita dall'Inspector:
-
-- `Path3DProgressProvider`: percentuale lungo una curva e, facoltativamente, spawn del curriculum sulla curva.
-- `MethodProgressProvider`: chiama un metodo dell'agente o di un nodo dello scenario.
-- uno script personalizzato derivato da `ProgressProvider`: puo' misurare distanza da un obiettivo, percentuale di oggetti raccolti, punteggio, fasi completate o qualsiasi altra metrica.
-
-Per Cars viene usato `Path3DProgressProvider`, ma la progressione non entra nelle observations: serve soltanto a reward, diagnostica e curriculum. La policy continua quindi a guidare usando sensori e dinamica del veicolo, senza conoscere la posizione sulla pista.
-
-Gli eventi dello scenario sono configurati nello stesso modo sotto `ScenarioEventSystem`:
-
-- `AreaReachedEventSource`: attiva un evento quando un agente entra in una `Area3D` e puo' terminare l'episodio dell'agente.
-- `ObservationThresholdEventSource`: attiva un evento quando una observation supera una soglia, con latch facoltativo.
-- uno script derivato da `ScenarioEventSource`: puo' rappresentare raccolta oggetti, timer, punteggi, fasi o condizioni personalizzate.
-
-Cars usa gli eventi `finish_reached` e `target_first_seen`. `EventScenarioReward` legge `finish_reached` dal contesto senza conoscere l'`Area3D` che lo ha generato.
-
----
-
-## 10. Curriculum
-
-Il curriculum serve a partire facile e aumentare difficolta'.
-
-Esempi:
-
-```text
-Episodi 0-200: arena piccola, niente ostacoli
-Episodi 200-500: arena media, pochi ostacoli
-Episodi 500-1000: arena completa, ostacoli normali
-Episodi 1000+: spawn random e match lunghi
-```
-
-In Python:
-
-```python
-def curriculum_config(episode, args):
-	progress = min(1.0, episode / 1000.0)
-	return {
-		"max_steps": int(120 + progress * 280),
-		"obstacle_count": int(progress * 8),
-		"spawn_randomness": progress,
-	}
-```
-
-Nel loop:
-
-```python
-config = curriculum_config(episode, args)
-for env in envs:
-	env.configure(**config)
-```
-
-In Godot:
-
-```gdscript
-func configure(config: Dictionary) -> Dictionary:
-	if config.has("max_steps"):
-		max_steps = int(config.max_steps)
-	if config.has("obstacle_count"):
-		obstacle_count = int(config.obstacle_count)
-		_rebuild_obstacles()
-	if config.has("spawn_randomness"):
-		spawn_randomness = float(config.spawn_randomness)
-	return {"ok": true}
-```
-
----
-
-## 11. Debug prima del training
-
-Non partire subito col training. Prima fai tre test.
-
-### Test 1: avvio Godot
-
-Avvia la scena e controlla log:
-
-```text
-[BridgeServer] Listening on port 5555
-```
-
-### Test 2: reset e step random
-
-Crea uno script tipo o usa `tools/random_rollout.py`:
-
-```python
-from envs.scenario import ScenarioGymEnv
-
-env = ScenarioGymEnv(
-	port=5555,
-	multi_agent=True,
-)
-
-obs, info = env.reset()
-print(obs.shape, info)
-
-for i in range(20):
-	action = env.action_space.sample()
-	obs, reward, terminated, truncated, info = env.step(action)
-	print(i, reward, info["per_agent_rewards"], terminated, truncated)
-	if terminated or truncated:
-		break
-
-env.close()
-```
-
-Verifica:
-
-- `obs.shape` deve essere `(num_agents, obs_dim)`;
-- le reward devono cambiare;
-- `terminated` e `truncated` devono avere senso;
-- nessun agente deve produrre `NaN`.
-
-### Test 3: rollout con policy non addestrata
-
-Usa lo script di run o un modello random. Serve solo a vedere che tutto si muove.
-
----
-
-## 12. Training consigliato
-
-Per scenario nuovo:
+Per raccogliere dimostrazioni il corpo deve supportare l'azione speciale `"manual"` e
+restituire l'azione effettivamente applicata. Poi usa:
 
 ```bash
-python/.venv/bin/python python/train.py \
-  --algorithm dqn \
-  --godot-bin /percorso/a/Godot \
+python/.venv/bin/python python/recorder.py \
   --godot-project godot \
-  --godot-scene res://scenarios/capture_point/capture_point.tscn \
-  --num-envs 4 \
-  --num-episodes 2000 \
-  --batch-size 128 \
-  --learning-rate 0.0005 \
-  --replay-warmup 4000 \
-  --checkpoint-dir checkpoints/capture_point_dqn \
-  --weights-path capture_point_dqn_weights.weights.h5
+  --godot-scene res://scenarios/target_seeker/target_scenario.tscn \
+  --output demonstrations/target_seeker_demo.npz \
+  --episodes 20 \
+  --no-headless
 ```
 
-Il trainer e' gia' headless e asincrono con questi argomenti. Omettendo
-`--epsilon-decay`, DQN ricava automaticamente una discesa coerente con gli episodi
-rimanenti, anche dopo un resume.
+La guida [Dimostrazioni manuali](../guides/manual_demonstrations.md) spiega prefill,
+behavior cloning, DDPGfD e TD3+BC.
 
-Se il training e' instabile:
+## 15. Esegui la policy addestrata
 
-```bash
---learning-rate 0.00025
-```
-
-Se esplora troppo poco:
-
-```bash
---epsilon-decay 0.999
-```
-
-Se non impara nulla:
-
-- controlla che le osservazioni contengano davvero le informazioni necessarie;
-- controlla che le reward siano dense;
-- riduci la difficolta';
-- guarda il comportamento con `--no-headless`;
-- stampa reward separate per agente.
-
----
-
-## 13. Usare il modello addestrato
-
-Durante il training vengono salvati checkpoint cronologici:
-
-```text
-checkpoints/capture_point_dqn/
-```
-
-e pesi finali:
-
-```text
-capture_point_dqn_weights.weights.h5
-```
-
-Per osservare la policy migliore selezionata dalle valutazioni automatiche:
+Per osservare il bundle Keras finale:
 
 ```bash
 python/.venv/bin/python python/run.py \
-  --algorithm dqn \
-  --load-from checkpoint \
-  --checkpoint-dir checkpoints/capture_point_dqn/best \
-  --godot-bin /percorso/a/Godot \
+  --policy-path checkpoints/target_seeker_dqn_v1 \
   --godot-project godot \
-  --godot-scene res://scenarios/capture_point/capture_point.tscn \
+  --godot-scene res://scenarios/target_seeker/target_scenario.tscn \
   --episodes 20 \
   --epsilon 0.0 \
   --no-headless
 ```
 
-Il runner visibile usa automaticamente la modalita' realtime; in headless usa lockstep.
-Per riprendere l'allenamento usa invece `--resume` con la directory cronologica
-principale, che contiene anche il replay buffer. La directory `best` e' pensata per
-valutazione e produzione.
-
-Se integri il modello in uno script personalizzato, puoi anche caricare i pesi
-ricostruendo la stessa rete:
-
-```python
-from core.models import build_shared_q_network
-
-model = build_shared_q_network(obs_dim=18, num_actions=9)
-model.load_weights("capture_point_dqn_weights.weights.h5")
-```
-
-Per usare checkpoint:
-
-```python
-import tensorflow as tf
-
-model = build_shared_q_network(obs_dim=18, num_actions=9)
-checkpoint = tf.train.Checkpoint(model=model)
-checkpoint.restore(tf.train.latest_checkpoint("checkpoints/capture_point_dqn")).expect_partial()
-```
-
-Attenzione:
-
-- se cambi `obs_dim`, i vecchi pesi non sono compatibili;
-- se cambi `num_actions`, i vecchi pesi non sono compatibili;
-- se cambi architettura della rete in `models.py`, i vecchi pesi possono non essere compatibili.
-
----
-
-## 14. Errori tipici
-
-### Il training parte ma non impara
-
-Possibili cause:
-
-- reward troppo sparse;
-- osservazioni insufficienti;
-- azioni non applicate correttamente;
-- agenti bloccati da fisica/collisioni;
-- epsilon cala troppo velocemente;
-- learning rate troppo alto.
-
-### `obs_dim` mismatch
-
-Sintomo:
+Con `policy.json` non devi ripetere l'algoritmo: il runner legge il contratto salvato.
+Per riprendere davvero il training usa invece la directory cronologica:
 
 ```text
-ValueError: could not broadcast input array
+--checkpoint-dir checkpoints/target_seeker_dqn_v1 --resume
 ```
 
-Soluzione:
+Un warm start da `policy.keras` carica la policy, ma non ripristina optimizer, target
+network, contatori e replay. Resume e warm start non sono la stessa cosa.
 
-- conta le feature restituite da Godot;
-- aggiorna `--obs-dim`;
-- aggiorna default nel trainer.
+## 16. Quando un vecchio training resta compatibile
 
-### Agenti fermi
+| Modifica | Pesi | Replay | Indicazione pratica |
+|---|---|---|---|
+| ordine/dimensione observation | incompatibili | incompatibile | riparti da zero |
+| significato o scala observation | caricabili ma incoerenti | incoerente | normalmente riparti |
+| dimensione o ordine azioni | incompatibili | incompatibile | riparti da zero |
+| reward soltanto | caricabili | contiene vecchi ritorni | evita il vecchio replay |
+| fisica o dinamica moderate | caricabili | distribuzione precedente | valuta un warm start prudente |
+| soli elementi visivi | compatibili | compatibile | puoi riprendere |
 
-Controlla:
+Il fatto che un file venga caricato senza errore non significa che il suo contenuto sia
+ancora semanticamente corretto.
 
-- `apply_action()` riceve azioni giuste?
-- `sim_step()` viene chiamato?
-- la fisica ha collisioni valide?
-- i team controllati sono corretti?
+## Checklist finale
 
-### Godot si disconnette
+- [ ] Il corpo ha un figlio `Agent` configurato.
+- [ ] Le azioni sono dichiarate una sola volta nell'`ActionSpace`.
+- [ ] Le observation sono finite, normalizzate e di dimensione stabile.
+- [ ] Il `RewardSystem` contiene soltanto termini locali.
+- [ ] Eventi e reward globali stanno nei sistemi dello scenario.
+- [ ] `controlled_agents` contiene tutti e soli i corpi allenati.
+- [ ] Il bridge punta al `ScenarioController` standard.
+- [ ] Reset casuali usano il seed ricevuto.
+- [ ] `terminated` e `truncated` rappresentano cause diverse.
+- [ ] Il rollout casuale passa prima del training.
+- [ ] `run.py` riesce a caricare il bundle prodotto.
 
-Guarda:
-
-```text
-.runtime/godot_logs/godot_<porta>.log
-```
-
-Quasi sempre e' un errore GDScript runtime o parse.
-
-### Reward sempre negative
-
-Non e' sempre un problema. All'inizio e' normale. Diventa un problema se dopo molte migliaia di step:
-
-- non aumenta il danno;
-- non migliora la distanza dagli obiettivi;
-- gli agenti ripetono azioni senza senso.
-
----
-
-## 15. Checklist finale
-
-Prima di lanciare un training lungo:
-
-- [ ] La scena Godot parte.
-- [ ] Il `BridgeServer` stampa `Listening`.
-- [ ] `reset_episode()` restituisce osservazioni.
-- [ ] `step_episode()` applica azioni.
-- [ ] `obs_dim` in Python combacia con Godot.
-- [ ] `num_actions` in Python combacia con `apply_action()`.
-- [ ] Le reward cambiano durante un rollout random.
-- [ ] `terminated` e `truncated` funzionano.
-- [ ] Il curriculum non crea configurazioni impossibili.
-- [ ] Il checkpoint viene salvato.
-- [ ] `run.py` riesce a caricare il modello.
-
----
-
-## 16. Regola pratica
-
-Non cercare subito scenario complesso.
-
-Progressione consigliata:
-
-```text
-1 agente, target fermo
-1 agente, target random
-1v1 senza ostacoli
-1v1 con ostacoli
-2v2 scripted
-2v2 self-play
-curriculum completo
-```
-
-Ogni passaggio deve essere osservabile e debuggabile. Se un agente non impara una versione semplice, quasi mai impara quella complessa.
+Quando qualcosa non impara, riduci il problema: un agente, un obiettivo fisso, poche
+azioni e reward leggibili. Aggiungi randomizzazione, multi-agent e curriculum soltanto
+dopo che quella versione funziona. E' piu' veloce correggere un contratto piccolo che
+interpretare migliaia di episodi di un ambiente ambiguo.

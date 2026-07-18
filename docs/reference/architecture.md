@@ -57,14 +57,17 @@ Il controller espone al bridge almeno:
 Il controller generico implementa gia' questo contratto. Lo scenario dovrebbe
 specializzare composizione, reset ed eventi, non duplicare il protocollo TCP.
 
-Ogni corpo controllato deve essere registrato in `controlled_agents` e fornire i metodi
-richiamati dal controller, normalmente delegando al figlio `Agent`:
+Ogni corpo controllato deve essere registrato in `controlled_agents` e contenere
+normalmente un figlio `Agent`. Il figlio espone observation, action space e reward;
+il corpo conserva soltanto il comportamento concreto richiesto dal controller:
 
-- `get_observations()`;
-- `get_action_space()`;
 - `apply_action(action)`;
-- `get_reward(context)`;
-- reset dello stato fisico e dell'agente.
+- `reset_all(original_transform, reset_rewards)`;
+- facoltativamente `is_terminal()`, `set_training_active()` e `get_team_id()`.
+
+Le API imperative sul corpo restano possibili per compatibilita', ma una nuova scena
+non deve duplicare `get_observations()` o `get_action_space()` quando usa i componenti
+del nodo `Agent`.
 
 ## Spazi di azione
 

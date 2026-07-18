@@ -110,4 +110,5 @@ dedotta solo dal fatto che il modello accetti batch.
 - Un resume di training off-policy deve poter ripristinare anche il replay.
 - Le metriche multi-agent contano agenti e transizioni, non soltanto step di ambiente.
 - I moduli interni non sono nuovi entrypoint pubblici: i comandi documentati usano le
-  tre CLI nella radice di `python/`.
+  quattro CLI nella radice di `python/`: `train.py`, `run.py`, `recorder.py` ed
+  `export.py`.

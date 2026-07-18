@@ -454,10 +454,11 @@ Oggi restano questi confini:
 - agenti che condividono una policy devono avere lo stesso contratto;
 - il multi-policy indipendente non e' ancora un flusso generico;
 - l'opponent pool asincrono e' disponibile soltanto per DQN;
-- cambiare observation, azioni, reward o fisica invalida spesso replay e checkpoint;
-- episodi senza limite richiedono terminalita' o stall detection affidabili;
-- un modello Keras non incorpora da solo sensori e preprocessing Godot;
-- gli algoritmi inclusi sono implementazioni del progetto, non wrapper SB3 certificati.
+- una policy Keras contiene la trasformazione da observation ad azioni, ma non esporta
+  la scena, i sensori o il preprocessing implementato in Godot: fuori da Metis bisogna
+  riprodurre lo stesso contratto di input e output;
+- i trainer sono implementati direttamente in Metis con TensorFlow/Keras. Il progetto
+  non usa Stable-Baselines3 e i suoi modelli PyTorch non sono caricabili direttamente.
 
 Queste limitazioni non impediscono di estendere il framework. Le guide
 [Aggiungere un algoritmo RL](docs/guides/aggiungere_algoritmo_rl.md) e

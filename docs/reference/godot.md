@@ -79,7 +79,7 @@ stantii dopo un teletrasporto.
 - `body`: corpo controllato;
 - `observations`: dictionary corrente;
 - `events`: eventi locali accumulati;
-- dati aggiunti dal controller, come step e action applicata.
+- dati aggiunti dal controller, come step, progress e stato terminale.
 
 Ogni componente restituisce il valore gia' pesato e puo' implementare
 `reset_reward(context)`. I valori sono esposti separatamente nei log come reward terms.
