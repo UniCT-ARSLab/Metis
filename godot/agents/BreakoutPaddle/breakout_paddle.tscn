@@ -58,6 +58,7 @@ metadata/_custom_type_script = "uid://d1xuba84xevcv"
 
 [node name="TimePenalty" type="Node" parent="Agent/RewardSystem" unique_id=1513122641]
 script = ExtResource("6_cmbfi")
+term_name = "time"
 penalty = -0.0001
 term_name = "time"
 metadata/_custom_type_script = "uid://dyq1fjgcu1wqu"

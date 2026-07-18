@@ -10,6 +10,7 @@ from run import (
     agent_succeeded,
     checkpoint_episode,
     normalize_checkpoint_path,
+    resolve_algorithm,
     summarize_episode_outcome,
     wait_for_realtime_tick,
 )
@@ -68,6 +69,16 @@ class RunGenericPolicyTests(unittest.TestCase):
         )
         self.assertAlmostEqual(recovered, 0.05)
         self.assertEqual(len(sleeps), 1)
+
+    def test_manifest_algorithm_wins_over_action_space_heuristic(self):
+        env = type("Env", (), {"action_type": "discrete"})()
+        manifest = {"algorithm": "ppo"}
+        self.assertEqual(resolve_algorithm("auto", env, "legacy.weights.h5", manifest), "ppo")
+
+    def test_explicit_algorithm_must_match_manifest(self):
+        env = type("Env", (), {"action_type": "discrete"})()
+        with self.assertRaisesRegex(RuntimeError, "does not match policy manifest"):
+            resolve_algorithm("dqn", env, "legacy.weights.h5", {"algorithm": "ppo"})
 
 
 if __name__ == "__main__":

@@ -1,6 +1,9 @@
-# Architettura del framework
+# Architettura di Metis
 
-Il progetto separa la simulazione dal training:
+Metis, **Modular Environment for Training Intelligent Systems**, separa la simulazione
+dal processo di apprendimento mantenendo un contratto comune tra Godot e Python.
+
+Il progetto e' diviso in tre responsabilita':
 
 - Godot possiede mondo, fisica, agenti, observation, reward ed eventi terminali;
 - Python possiede ambiente Gymnasium, raccolta delle transizioni, replay o rollout,

@@ -1,4 +1,4 @@
-# Dimostrazioni Manuali per gli Agenti
+# Dimostrazioni manuali in Metis
 
 Questa funzione permette di guidare manualmente un agente in Godot e salvare le transizioni in un dataset `.npz` riusabile dal trainer. Con azioni discrete viene usato dal DQN; con azioni continue puo' essere usato da DDPG, DDPG+BC, DDPGfD, TD3+BC o SAC.
 

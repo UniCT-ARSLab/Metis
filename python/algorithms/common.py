@@ -45,6 +45,7 @@ import numpy as np
 import tensorflow as tf
 
 from core.models import build_actor_forward_fn, build_continuous_actor, build_continuous_critic
+from core.policy_artifact import PolicyArtifactSaver, build_policy_metadata, load_policy_into_model
 from core.opponent_pool import OpponentPool, add_opponent_pool_arguments, validate_team_layout
 from core.replay_buffer import ReplayBuffer
 from core.training import (
@@ -132,6 +133,11 @@ def parse_args(trainer_variant):
     parser.add_argument("--agent-id", default=None)
     parser.add_argument("--multi-agent", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--actor-weights-path", default="generic_ddpg_actor.weights.h5")
+    parser.add_argument(
+        "--policy-path",
+        default=None,
+        help="Warm-start the actor from a .keras model, full .h5 model, or .weights.h5 file.",
+    )
     parser.add_argument("--critic-weights-path", default="generic_ddpg_critic.weights.h5")
     parser.add_argument("--checkpoint-dir", default="checkpoints/generic_ddpg")
     parser.add_argument("--resume-checkpoint", default=None)
@@ -880,6 +886,9 @@ def save_training_checkpoint(
     checkpoint.noise_std.assign(noise_std)
     saved_path = checkpoint_manager.save(checkpoint_number=episode)
     print(f"Saved {'final checkpoint' if final else 'checkpoint'}: {saved_path}", flush=True)
+    policy_artifact = getattr(args, "policy_artifact", None)
+    if policy_artifact is not None:
+        policy_artifact.save(episode)
     if save_replay and args.save_replay_buffer and len(buffer) > 0:
         save_replay_snapshot(
             saved_path,
@@ -1427,6 +1436,11 @@ def main(trainer_variant):
                 raise RuntimeError("All parallel environments must expose the same obs_dim and continuous action_size")
 
         actor = build_continuous_actor(obs_dim=obs_dim, action_size=action_size)
+        args.policy_artifact = PolicyArtifactSaver(
+            actor,
+            args.checkpoint_dir,
+            build_policy_metadata(args.trainer_variant, env0),
+        )
         critic = build_continuous_critic(obs_dim=obs_dim, action_size=action_size)
         target_actor = build_continuous_actor(obs_dim=obs_dim, action_size=action_size)
         target_critic = build_continuous_critic(obs_dim=obs_dim, action_size=action_size)
@@ -1498,6 +1512,8 @@ def main(trainer_variant):
         )
         resume_checkpoint = resolve_resume_checkpoint(args, checkpoint_manager)
         restored_replay_count = 0
+        if resume_checkpoint and args.policy_path:
+            raise RuntimeError("--policy-path cannot be combined with --resume or --resume-checkpoint")
         if resume_checkpoint:
             checkpoint_names = {name for name, _shape in tf.train.list_variables(resume_checkpoint)}
             if variant_uses_td3(args.trainer_variant) and not any(
@@ -1523,6 +1539,18 @@ def main(trainer_variant):
                 flush=True,
             )
             restored_replay_count = restore_replay_buffer(args, resume_checkpoint, buffer)
+        elif args.policy_path:
+            loaded_policy = load_policy_into_model(
+                actor,
+                args.policy_path,
+                expected_algorithm=args.trainer_variant,
+            )
+            target_actor.set_weights(actor.get_weights())
+            print(
+                f"Warm-started {args.trainer_variant} actor from {loaded_policy['source_kind']}: "
+                f"{loaded_policy['path']} (fresh critics, optimizers and replay, episode=0)",
+                flush=True,
+            )
 
         actor_optimizer.learning_rate.assign(args.actor_learning_rate)
         critic_optimizer.learning_rate.assign(args.critic_learning_rate)

@@ -1,4 +1,8 @@
-# Framework Godot
+# Metis in Godot
+
+Il lato Godot di Metis descrive agenti e scenari attraverso nodi componibili configurati
+dall'Inspector. Godot resta la fonte di verita' per fisica, observation, action, reward
+ed eventi terminali.
 
 ## Albero consigliato
 
@@ -49,7 +53,19 @@ Ogni `ObservationSource` registra una o piu' callable nell'Agent. Fonti esistent
 - raycast normalizzati e clearance frontale;
 - target e appartenenza a team;
 - navigazione rispetto a un Path3D;
-- chiamata di un metodo personalizzato.
+- chiamata di un metodo personalizzato con `MethodObservationSource`;
+- lettura diretta di una property con `PropertyObservationSource`.
+
+`MethodObservationSource` e `PropertyObservationSource` espongono un `source_path`
+opzionale relativo al corpo agente. Se resta vuoto leggono direttamente il corpo.
+Il plugin `Metis Inspector`, abilitato nel progetto, aggiunge al campo testuale un
+menu `Select...` che elenca soltanto metodi o property compatibili. Il valore resta
+comunque modificabile manualmente e viene serializzato nella scena come `StringName` o
+`NodePath`: il runtime non dipende dal plugin editor.
+
+`PropertyObservationSource` puo' leggere anche sottoproprieta' tramite un percorso come
+`velocity:x`. Per valori numerici offre una trasformazione opzionale tra intervalli con
+clamp, utile per normalizzare una property senza aggiungere un metodo al corpo.
 
 Le observation devono essere numeriche, finite, normalizzate quando possibile e con
 dimensione stabile. Lo scenario chiama reset/refresh delle source per evitare dati fisici

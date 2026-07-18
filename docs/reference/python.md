@@ -1,4 +1,7 @@
-# Struttura Python
+# Metis Python Runtime
+
+Il runtime Python di Metis scopre il contratto dichiarato dallo scenario Godot e lo
+collega al backend RL selezionato, senza introdurre trainer specifici per scenario.
 
 ## Entry point pubblici
 
@@ -7,12 +10,19 @@
 Legge gli argomenti comuni, rileva eventualmente lo spazio di azione e carica in modo
 lazy un modulo in `python/algorithms`. Con `--algorithm auto` sceglie DQN per discrete,
 DDPG per continue e PPO per ibride. Gli algoritmi alternativi si selezionano per nome.
+`--policy-path` esegue un warm start della sola policy da `.keras`, modello `.h5` o
+`.weights.h5`; non sostituisce il resume dello stato completo.
 
 ### `python/run.py`
 
-Carica pesi o checkpoint, costruisce il modello coerente con la spec Godot e applica la
-policy senza training. Supporta esecuzione lockstep per valutazioni riproducibili e
+Carica per default `policy.keras` e `policy.json`, oppure un modello `.h5`, i vecchi pesi/checkpoint,
+e applica la policy senza training. Supporta esecuzione lockstep per valutazioni riproducibili e
 realtime per osservare il comportamento a velocita' naturale.
+
+### `python/export.py`
+
+Converte il bundle Keras prodotto dai trainer in TensorFlow Lite e/o ONNX. TFLite usa
+TensorFlow; ONNX richiede le dipendenze opzionali in `requirements-export.txt`.
 
 ### `python/recorder.py`
 
@@ -36,6 +46,7 @@ Ogni backend espone `main()` e possiede parser, ciclo sync/async, checkpoint e l
 ### `python/core/`
 
 - `models.py`: factory Keras e funzioni di inferenza compilate;
+- `policy_artifact.py`: salvataggio atomico di `policy.keras` e relativo manifest;
 - `replay_buffer.py`: replay uniforme/prioritizzato, demo protette e snapshot;
 - `opponent_pool.py`: snapshot storiche e sampling degli avversari;
 - `training.py`: collector async, parallel stepper, TensorFlow runtime, best checkpoint,
@@ -94,6 +105,7 @@ dedotta solo dal fatto che il modello accetti batch.
 
 - Gli argomenti comuni devono mantenere lo stesso nome tra backend.
 - `0` per `max_steps` significa nessun limite di step, se supportato dallo scenario.
+- Ogni checkpoint deve aggiornare il bundle Keras portabile della policy.
 - Un checkpoint deve poter essere caricato da `run.py` senza dipendere dal replay.
 - Un resume di training off-policy deve poter ripristinare anche il replay.
 - Le metriche multi-agent contano agenti e transizioni, non soltanto step di ambiente.

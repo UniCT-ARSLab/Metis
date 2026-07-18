@@ -24,6 +24,7 @@ from algorithms.common import (
 import tensorflow as tf
 
 from core.models import build_continuous_critic, build_sac_actor
+from core.policy_artifact import PolicyArtifactSaver, build_policy_metadata, load_policy_into_model
 from core.opponent_pool import OpponentPool, add_opponent_pool_arguments, validate_team_layout
 from core.replay_buffer import ReplayBuffer
 from core.training import (
@@ -126,6 +127,11 @@ def parse_args():
     parser.add_argument("--agent-id", default=None)
     parser.add_argument("--multi-agent", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--actor-weights-path", default="generic_sac_actor.weights.h5")
+    parser.add_argument(
+        "--policy-path",
+        default=None,
+        help="Warm-start the actor from a .keras model, full .h5 model, or .weights.h5 file.",
+    )
     parser.add_argument("--critic-weights-path", default=None)
     parser.add_argument("--critic1-weights-path", default="generic_sac_critic1.weights.h5")
     parser.add_argument("--critic2-weights-path", default="generic_sac_critic2.weights.h5")
@@ -460,6 +466,9 @@ def save_training_checkpoint(
     saved_path = checkpoint_manager.save(checkpoint_number=checkpoint_number_value)
     label = "final checkpoint" if final else "checkpoint"
     print(f"Saved {label}: {saved_path}", flush=True)
+    policy_artifact = getattr(args, "policy_artifact", None)
+    if policy_artifact is not None:
+        policy_artifact.save(checkpoint_number_value)
     if save_replay and args.save_replay_buffer and len(buffer) > 0:
         save_replay_snapshot(
             saved_path,
@@ -859,6 +868,11 @@ def main():
                 raise RuntimeError("All parallel environments must expose the same obs_dim and continuous action_size")
 
         actor = build_sac_actor(obs_dim=obs_dim, action_size=action_size)
+        args.policy_artifact = PolicyArtifactSaver(
+            actor,
+            args.checkpoint_dir,
+            build_policy_metadata("sac", env0),
+        )
         critic1 = build_continuous_critic(obs_dim=obs_dim, action_size=action_size)
         critic2 = build_continuous_critic(obs_dim=obs_dim, action_size=action_size)
         target_critic1 = build_continuous_critic(obs_dim=obs_dim, action_size=action_size)
@@ -894,6 +908,8 @@ def main():
         )
         resume_checkpoint = resolve_resume_checkpoint(args, checkpoint_manager)
         restored_replay_count = 0
+        if resume_checkpoint and args.policy_path:
+            raise RuntimeError("--policy-path cannot be combined with --resume or --resume-checkpoint")
         if resume_checkpoint:
             checkpoint.restore(resume_checkpoint).expect_partial()
             start_episode = int(checkpoint.episode.numpy())
@@ -903,6 +919,13 @@ def main():
                 flush=True,
             )
             restored_replay_count = restore_replay_buffer(args, resume_checkpoint, buffer)
+        elif args.policy_path:
+            loaded_policy = load_policy_into_model(actor, args.policy_path, expected_algorithm="sac")
+            print(
+                f"Warm-started SAC actor from {loaded_policy['source_kind']}: "
+                f"{loaded_policy['path']} (fresh critics, optimizers, replay and alpha, episode=0)",
+                flush=True,
+            )
 
         apply_optimizer_learning_rates(
             actor_optimizer,

@@ -390,6 +390,7 @@ func get_spec() -> Dictionary:
 			"id": _agent_id(agent),
 			"team_id": _agent_team_id(agent),
 			"obs_dim": _agent_observation_size(agent),
+			"observation_names": _agent_observation_names(agent),
 			"action_names": action_names,
 			"action_type": action_type,
 			"action_space": action_space
@@ -939,6 +940,13 @@ func _agent_observation_size(agent_body:Node) -> int:
 	if interface != null:
 		return int(interface.get_observation_size())
 	return 0
+
+
+func _agent_observation_names(agent_body:Node) -> Array:
+	var interface := _agent_interface(agent_body)
+	if interface != null and interface.has_method("get_observation_names"):
+		return interface.get_observation_names()
+	return []
 
 
 func _agent_reward(agent_body:Node, context:Dictionary = {}) -> float:

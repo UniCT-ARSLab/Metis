@@ -1,4 +1,4 @@
-# Tutorial: Soccer 3D multi-agent con calcio continuo
+# Tutorial Metis: Soccer 3D multi-agent con calcio continuo
 
 Questo tutorial costruisce uno scenario di calcio arcade in 3D. Due
 `CharacterBody3D`, uno rosso e uno blu, cercano di spingere e calciare una palla

@@ -1,4 +1,4 @@
-# Tutorial: creare Breakout come nuovo scenario RL
+# Tutorial Metis: creare Breakout come nuovo scenario RL
 
 Questo tutorial costruisce un nuovo scenario 2D senza modificare Python. L'obiettivo
 e' allenare un Paddle a muoversi a sinistra, restare fermo o muoversi a destra per
@@ -63,9 +63,11 @@ mattone: per la prima versione non sono necessarie.
 
 | Evento | Reward | Terminale |
 |---|---:|---|
-| ogni step | `-0.001` | no |
+| ogni step | `-0.0001` | no |
+| Paddle colpisce la pallina | `+0.02` | no |
 | mattone distrutto | `+1.0` | no |
-| pallina persa | `-5.0` | si |
+| pallina persa | `-1.0` | si |
+| nessun mattone distrutto per 2500 step | `-5.0` | si |
 | tutti i mattoni distrutti | `+20.0` | si |
 
 La piccola penalita' temporale evita una policy che si limita a tenere in vita la
@@ -352,6 +354,7 @@ Crea `res://scenarios/breakout/breakout_scenario.tscn`:
 BreakoutScenario (Node2D) [breakout_scenario.gd]
 ├── BridgeServer          [bridge_server.gd]
 ├── ScenarioController    [ScenarioController.gd]
+│   ├── ProgressProvider    [MethodProgressProvider.gd]
 │   ├── ScenarioEventSystem [ScenarioEventSystem.gd]
 │   │   ├── BrickDestroyed  [ManualScenarioEventSource.gd]
 │   │   ├── LifeLost        [ManualScenarioEventSource.gd]
@@ -361,7 +364,8 @@ BreakoutScenario (Node2D) [breakout_scenario.gd]
 │       ├── BrickReward     [EventScenarioReward.gd]
 │       ├── LifeLostPenalty [EventScenarioReward.gd]
 │       ├── LevelReward     [EventScenarioReward.gd]
-│       └── HitBall         [EventScenarioReward.gd]
+│       ├── HitBall         [EventScenarioReward.gd]
+│       └── NoBrickProgress [ProgressStallScenarioReward.gd]
 ├── BreakoutPaddle (istanza di breakout_paddle.tscn)
 ├── Ball (RigidBody2D) [breakout_ball.gd]
 │   ├── Sprite2D
@@ -411,8 +415,12 @@ La Paddle parte inizialmente al centro. La casualita' viene applicata alla Ball 
 script dello scenario e cresce con il curriculum: in questo modo i primi lanci sono
 raggiungibili, senza addestrare sempre la stessa traiettoria.
 
-Non aggiungere un `ProgressProvider`: in Breakout il progresso lungo un percorso non
-esiste. Il provider e' facoltativo.
+Qui `ProgressProvider` non rappresenta una posizione su un percorso. Espone una misura
+generica compresa fra zero e uno: la frazione di mattoni distrutti. Configuralo con
+`source_path = "../.."`, `method_name = "get_brick_progress"` e
+`pass_agent_to_source = false`. `NoBrickProgress` usa questa misura per chiudere episodi
+bloccati dopo 2500 step senza avanzamento, assegnando `-5.0`. Il provider resta
+facoltativo negli scenari che possiedono gia' una condizione terminale temporale sicura.
 
 ### Configurare correttamente Ball
 
@@ -550,7 +558,7 @@ BrickReward:
 
 LifeLostPenalty:
   event_name = "life_lost"
-  reward = -10.0
+  reward = -1.0
   only_once = true
 
 LevelReward:
@@ -560,12 +568,53 @@ LevelReward:
 
 HitBall:
   event_name = "ball_hit"
-  reward = 0.2
+  reward = 0.02
   only_once = false
+
+NoBrickProgress:
+  terminate_on_stalled_progress = true
+  stalled_progress_window_steps = 2500
+  stalled_progress_penalty = -5.0
+  term_name = "no_brick_progress"
 ```
 
 Il codice del gioco emette soltanto eventi semantici. I numeri delle reward rimangono
 visibili e modificabili dall'Inspector.
+
+### Shaping di allineamento opzionale
+
+Se la reward sparsa non basta a far apprendere i primi salvataggi, puoi aggiungere un
+`FunctionRewardComponent` chiamato `AlignmentReward` sotto il `RewardSystem` del
+Paddle. Usa `weight = 0.05`, `evaluation_mode = CONTINUOUS`,
+`method_name = "get_horizontal_alignment_reward"` e `node_caller = "../../.."`.
+
+Nel Paddle aggiungi `_prev_abs_rel_x := -1.0`, azzeralo in `reset_all()` e implementa:
+
+```gdscript
+func get_horizontal_alignment_reward() -> float:
+	if ball == null:
+		return 0.0
+	if ball.linear_velocity.y <= 0.0:
+		_prev_abs_rel_x = -1.0
+		return 0.0
+
+	var abs_rel_x := clampf(
+		absf(ball.global_position.x - global_position.x) / maxf(horizontal_limit, 0.001),
+		0.0,
+		1.0
+	)
+	if _prev_abs_rel_x < 0.0:
+		_prev_abs_rel_x = abs_rel_x
+		return 0.0
+	var delta := _prev_abs_rel_x - abs_rel_x
+	_prev_abs_rel_x = abs_rel_x
+	return delta
+```
+
+La condizione `linear_velocity.y > 0` limita lo shaping alla discesa verso il Paddle.
+Tienilo opzionale: premiare troppo il centraggio rende piu' difficile scoprire colpi
+decentrati che indirizzano la palla verso mattoni specifici. Se lo abiliti o lo togli,
+avvia un training nuovo perche' hai cambiato la funzione di reward.
 
 ## 7. Scrivere breakout_scenario.gd
 
@@ -659,6 +708,16 @@ func _current_ball_position_jitter_x() -> float:
 		1.0
 	)
 	return lerpf(ball_position_jitter_x, curriculum_final_ball_jitter_x, ratio)
+
+
+func get_brick_progress() -> float:
+	if _bricks.is_empty():
+		return 0.0
+	return clampf(
+		float(_bricks.size() - _remaining_bricks) / float(_bricks.size()),
+		0.0,
+		1.0
+	)
 
 
 func _on_ball_body_entered(body:Node) -> void:
@@ -874,9 +933,9 @@ python/.venv/bin/python python/train.py \
   --headless
 ```
 
-DQN e' il backend adatto a questo action space discreto. Nel framework attuale PPO e'
-riservato agli action space ibridi, quindi non sostituire semplicemente `dqn` con `ppo`
-in questo esempio.
+DQN e' la baseline piu' semplice per questo action space discreto. Metis supporta anche
+PPO discreto, ma usa rollout on-policy e parametri diversi: non cambiare soltanto il
+nome dell'algoritmo lasciando opzioni DQN come replay, epsilon e target network.
 
 Il default `--physics-frames-per-step 1` produce una decisione a ogni tick fisico. Puoi
 provare `2` o `4` per ridurre socket e inferenze, ma la Paddle reagira' meno spesso. In

@@ -47,6 +47,7 @@ import numpy as np
 import tensorflow as tf
 
 from core.models import build_hybrid_actor_critic
+from core.policy_artifact import PolicyArtifactSaver, build_policy_metadata, load_policy_into_model
 from core.opponent_pool import OpponentPool, add_opponent_pool_arguments, validate_team_layout
 from core.training import (
     AsyncCollectorPool,
@@ -107,6 +108,11 @@ def parse_args():
     parser.add_argument("--agent-id", default=None)
     parser.add_argument("--multi-agent", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--weights-path", default="generic_ppo_hybrid.weights.h5")
+    parser.add_argument(
+        "--policy-path",
+        default=None,
+        help="Warm-start the policy from a .keras model, full .h5 model, or .weights.h5 file.",
+    )
     parser.add_argument("--checkpoint-dir", default="checkpoints/generic_ppo_hybrid")
     parser.add_argument("--resume-checkpoint", default=None)
     parser.add_argument("--checkpoint-every", type=int, default=25)
@@ -136,10 +142,13 @@ def parse_args():
     return parser.parse_args()
 
 
-def save_training_checkpoint(checkpoint, checkpoint_manager, episode, final=False):
+def save_training_checkpoint(checkpoint, checkpoint_manager, episode, args, final=False):
     checkpoint.episode.assign(episode)
     saved_path = checkpoint_manager.save(checkpoint_number=episode)
     print(f"Saved {'final checkpoint' if final else 'checkpoint'}: {saved_path}", flush=True)
+    policy_artifact = getattr(args, "policy_artifact", None)
+    if policy_artifact is not None:
+        policy_artifact.save(episode)
     return saved_path
 
 
@@ -780,13 +789,13 @@ def run_async_ppo(
             pending.pop(event.episode, None)
 
             if args.checkpoint_every > 0 and completed % args.checkpoint_every == 0:
-                saved_path = save_training_checkpoint(checkpoint, checkpoint_manager, completed)
+                saved_path = save_training_checkpoint(checkpoint, checkpoint_manager, completed, args)
                 last_saved_episode = completed
             else:
                 saved_path = None
             if best_tracker.should_evaluate(completed):
                 if saved_path is None:
-                    saved_path = save_training_checkpoint(checkpoint, checkpoint_manager, completed)
+                    saved_path = save_training_checkpoint(checkpoint, checkpoint_manager, completed, args)
                     last_saved_episode = completed
                 request_best_checkpoint_evaluation(best_tracker, saved_path, completed)
     except KeyboardInterrupt:
@@ -796,7 +805,7 @@ def run_async_ppo(
         pool.close()
 
     if last_saved_episode != completed:
-        save_training_checkpoint(checkpoint, checkpoint_manager, completed, final=True)
+        save_training_checkpoint(checkpoint, checkpoint_manager, completed, args, final=True)
     if interrupted:
         print(f"Interrupted async PPO training saved at episode={completed}", flush=True)
     else:
@@ -889,6 +898,11 @@ def main():
             continuous_size=action_meta["continuous_size"],
         )
         model(np.zeros((1, obs_dim), dtype=np.float32), training=False)
+        args.policy_artifact = PolicyArtifactSaver(
+            model,
+            args.checkpoint_dir,
+            build_policy_metadata("ppo", env0),
+        )
         log_std = tf.Variable(
             np.full((action_meta["continuous_size"],), args.initial_log_std, dtype=np.float32),
             name="continuous_log_std",
@@ -909,10 +923,19 @@ def main():
             max_to_keep=args.keep_checkpoints,
         )
         resume_checkpoint = resolve_resume_checkpoint(args, checkpoint_manager)
+        if resume_checkpoint and args.policy_path:
+            raise RuntimeError("--policy-path cannot be combined with --resume or --resume-checkpoint")
         if resume_checkpoint:
             checkpoint.restore(resume_checkpoint).expect_partial()
             start_episode = int(checkpoint.episode.numpy())
             print(f"Resumed checkpoint {resume_checkpoint} from episode={start_episode}", flush=True)
+        elif args.policy_path:
+            loaded_policy = load_policy_into_model(model, args.policy_path, expected_algorithm="ppo")
+            print(
+                f"Warm-started PPO policy from {loaded_policy['source_kind']}: "
+                f"{loaded_policy['path']} (fresh optimizer and rollout state, episode=0)",
+                flush=True,
+            )
         optimizer.learning_rate.assign(args.learning_rate)
 
         opponent_teams = validate_team_layout(envs, args.opponent_pool)
@@ -1143,18 +1166,18 @@ def main():
 
             apply_ready_best_checkpoint(best_tracker)
             if args.checkpoint_every > 0 and (episode + 1) % args.checkpoint_every == 0:
-                saved_path = save_training_checkpoint(checkpoint, checkpoint_manager, episode + 1)
+                saved_path = save_training_checkpoint(checkpoint, checkpoint_manager, episode + 1, args)
                 last_saved_episode = episode + 1
             else:
                 saved_path = None
             if best_tracker.should_evaluate(episode + 1):
                 if saved_path is None:
-                    saved_path = save_training_checkpoint(checkpoint, checkpoint_manager, episode + 1)
+                    saved_path = save_training_checkpoint(checkpoint, checkpoint_manager, episode + 1, args)
                     last_saved_episode = episode + 1
                 request_best_checkpoint_evaluation(best_tracker, saved_path, episode + 1)
 
         if last_saved_episode != args.num_episodes:
-            save_training_checkpoint(checkpoint, checkpoint_manager, args.num_episodes, final=True)
+            save_training_checkpoint(checkpoint, checkpoint_manager, args.num_episodes, args, final=True)
         # The evaluation requested on the last episode is still running; without this the
         # finally-block's close() cancels it and a final best can never be promoted.
         apply_ready_best_checkpoint(best_tracker, wait_timeout=args.best_final_drain_timeout)
@@ -1164,7 +1187,7 @@ def main():
         print("\nInterrupt received: saving the last consistent PPO state...", flush=True)
         if checkpoint is not None and checkpoint_manager is not None and model is not None:
             interrupted_episode = last_completed_episode if last_completed_episode is not None else start_episode
-            save_training_checkpoint(checkpoint, checkpoint_manager, interrupted_episode)
+            save_training_checkpoint(checkpoint, checkpoint_manager, interrupted_episode, args)
             model.save_weights(args.weights_path)
             print(f"Interrupted training saved at episode={interrupted_episode}", flush=True)
         else:

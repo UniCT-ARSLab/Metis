@@ -1,4 +1,4 @@
-# Estendere il framework Godot
+# Estendere Metis in Godot
 
 Questa guida mostra come aggiungere componenti riusabili e configurabili da Inspector.
 Gli script del framework stanno in `godot/scripts/agent/`; il codice specifico di un
@@ -21,6 +21,28 @@ Una collisione non dovrebbe essere contemporaneamente rilevata dentro tre reward
 un evento, poi fai dipendere da quell'evento reward e terminalita'.
 
 ## Nuova observation source
+
+Prima di scrivere codice, verifica se basta uno dei due adattatori generici:
+
+```text
+MethodObservationSource:
+  source_path = ""              # Vuoto: corpo agente
+  method_name = Select...        # Solo metodi compatibili
+
+PropertyObservationSource:
+  observation_name = "health"
+  source_path = ""              # Oppure un figlio relativo al corpo
+  property_path = Select...      # Per esempio health o velocity:x
+  normalize_numeric = true
+  input_min = 0.0
+  input_max = 100.0
+  output_min = 0.0
+  output_max = 1.0
+```
+
+Il campo accanto a `Select...` resta editabile, quindi puoi indicare manualmente una
+sottoproprieta' che il menu delle property dirette non mostra. Usa una source nuova
+soltanto quando la observation richiede calcoli, query fisiche o stato proprio.
 
 Esempio: distanza normalizzata da un target.
 

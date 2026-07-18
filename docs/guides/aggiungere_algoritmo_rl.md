@@ -1,4 +1,4 @@
-# Aggiungere un algoritmo RL
+# Aggiungere un algoritmo RL a Metis
 
 Questa guida descrive come integrare un backend senza creare una seconda pipeline di
 socket, processi Godot o checkpoint. Prima di iniziare, verifica che l'algoritmo non sia

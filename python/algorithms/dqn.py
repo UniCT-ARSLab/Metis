@@ -46,6 +46,7 @@ import numpy as np
 import tensorflow as tf
 
 from core.models import build_greedy_action_fn, build_shared_q_network
+from core.policy_artifact import PolicyArtifactSaver, build_policy_metadata, load_policy_into_model
 from core.opponent_pool import (
     OpponentMatch,
     OpponentPool,
@@ -184,7 +185,12 @@ def parse_args():
     parser.add_argument("--multi-agent", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--log-action-every", type=int, default=1)
     parser.add_argument("--weights-path", default="generic_dqn_weights.weights.h5")
-    parser.add_argument("--initial-weights-path", default=None)
+    parser.add_argument(
+        "--policy-path",
+        default=None,
+        help="Warm-start the policy from a .keras model, full .h5 model, or .weights.h5 file.",
+    )
+    parser.add_argument("--initial-weights-path", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--checkpoint-dir", default="checkpoints/generic_dqn")
     parser.add_argument("--resume-checkpoint", default=None)
     parser.add_argument("--checkpoint-every", type=int, default=25)
@@ -742,6 +748,9 @@ def save_training_checkpoint(
     checkpoint.epsilon.assign(epsilon)
     saved_path = checkpoint_manager.save(checkpoint_number=episode)
     print(f"Saved {'final checkpoint' if final else 'checkpoint'}: {saved_path}", flush=True)
+    policy_artifact = getattr(args, "policy_artifact", None)
+    if policy_artifact is not None:
+        policy_artifact.save(episode)
     if save_replay and args.save_replay_buffer and len(buffer) > 0:
         save_replay_snapshot(
             saved_path,
@@ -917,6 +926,11 @@ def main():
 
         model = build_shared_q_network(obs_dim=obs_dim, num_actions=num_actions)
         target_model = build_shared_q_network(obs_dim=obs_dim, num_actions=num_actions)
+        args.policy_artifact = PolicyArtifactSaver(
+            model,
+            args.checkpoint_dir,
+            build_policy_metadata("dqn", envs[0]),
+        )
         target_model.set_weights(model.get_weights())
         optimizer = tf.keras.optimizers.Adam(learning_rate=args.learning_rate)
         buffer = ReplayBuffer(capacity=args.replay_capacity)
@@ -938,8 +952,11 @@ def main():
         )
         resume_checkpoint = resolve_resume_checkpoint(args, checkpoint_manager)
         restored_replay_count = 0
-        if resume_checkpoint and args.initial_weights_path:
-            raise RuntimeError("--initial-weights-path cannot be combined with --resume or --resume-checkpoint")
+        if args.policy_path and args.initial_weights_path:
+            raise RuntimeError("Use either --policy-path or the legacy --initial-weights-path, not both")
+        initial_policy_path = args.policy_path or args.initial_weights_path
+        if resume_checkpoint and initial_policy_path:
+            raise RuntimeError("--policy-path cannot be combined with --resume or --resume-checkpoint")
         if resume_checkpoint:
             checkpoint.restore(resume_checkpoint).expect_partial()
             start_episode = int(checkpoint.episode.numpy())
@@ -950,20 +967,12 @@ def main():
                 flush=True,
             )
             restored_replay_count = restore_replay_buffer(args, resume_checkpoint, buffer)
-        elif args.initial_weights_path:
-            initial_weights_path = Path(args.initial_weights_path)
-            if not initial_weights_path.is_file():
-                raise RuntimeError(f"Initial DQN weights not found: {initial_weights_path}")
-            try:
-                model.load_weights(str(initial_weights_path))
-            except ValueError as exc:
-                raise RuntimeError(
-                    f"Initial DQN weights are incompatible with the current scenario "
-                    f"(obs_dim={obs_dim}, num_actions={num_actions}): {initial_weights_path}"
-                ) from exc
+        elif initial_policy_path:
+            loaded_policy = load_policy_into_model(model, initial_policy_path, expected_algorithm="dqn")
             target_model.set_weights(model.get_weights())
             print(
-                f"Warm-started DQN policy from weights: {initial_weights_path} "
+                f"Warm-started DQN policy from {loaded_policy['source_kind']}: "
+                f"{loaded_policy['path']} "
                 f"(fresh replay, optimizer, epsilon={epsilon:.3f}, episode=0)",
                 flush=True,
             )

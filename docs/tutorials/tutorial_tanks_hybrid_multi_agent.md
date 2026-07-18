@@ -1,4 +1,4 @@
-# Tutorial: Tanks 2v2 multi-agent con azioni ibride
+# Tutorial Metis: Tanks 2v2 multi-agent con azioni ibride
 
 Questo tutorial rifonda lo scenario Tanks come arena arcade 2v2. Due squadre, rossa e
 blu, esplorano una mappa sconosciuta, evitano muri e ostacoli tramite sensori locali e

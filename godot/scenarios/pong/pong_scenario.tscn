@@ -1,0 +1,124 @@
+[gd_scene format=3 uid="uid://cv66pt1beuw2j"]
+
+[ext_resource type="Script" uid="uid://c1qwau3h5p18r" path="res://scenarios/pong/pong_scenario.gd" id="1_5k7yf"]
+[ext_resource type="Script" uid="uid://d38lybllmy6tq" path="res://scripts/bridge_server.gd" id="1_8qidu"]
+[ext_resource type="Script" uid="uid://cun4ha1fidr8n" path="res://scripts/agent/ScenarioController.gd" id="2_5k7yf"]
+[ext_resource type="Script" uid="uid://b47ph323gt6gl" path="res://scripts/agent/events/ScenarioEventSystem.gd" id="3_loxhw"]
+[ext_resource type="Script" uid="uid://botsx3bwjduj2" path="res://scripts/agent/events/ManualScenarioEventSource.gd" id="4_cvres"]
+[ext_resource type="Script" uid="uid://tn1jug3aq4ll" path="res://scripts/agent/ScenarioRewardSystem.gd" id="5_dlml4"]
+[ext_resource type="Script" uid="uid://b0mpnu83er6il" path="res://scripts/agent/scenario_reward_components/EventScenarioReward.gd" id="6_s5no5"]
+[ext_resource type="PackedScene" uid="uid://de6qiwynlc8es" path="res://agents/PongPaddle/pong_paddle.tscn" id="7_4x70t"]
+[ext_resource type="PackedScene" uid="uid://1cn4sfelb5ti" path="res://scenarios/pong/pong_ball.tscn" id="8_y1c7r"]
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_0pgps"]
+size = Vector2(1290, 20)
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_3ja26"]
+size = Vector2(16, 745)
+
+[node name="PongScenario" type="Node2D" unique_id=1718542686]
+script = ExtResource("1_5k7yf")
+
+[node name="BridgeServer" type="Node" parent="." unique_id=490047119]
+script = ExtResource("1_8qidu")
+controller_path = NodePath("../ScenarioController")
+metadata/_custom_type_script = "uid://d38lybllmy6tq"
+
+[node name="ScenarioController" type="Node" parent="." unique_id=1595229987 node_paths=PackedStringArray("controlled_agents")]
+script = ExtResource("2_5k7yf")
+controlled_agents = [NodePath("../LeftPaddle"), NodePath("../RightPaddle")]
+max_steps = 1200
+metadata/_custom_type_script = "uid://cun4ha1fidr8n"
+
+[node name="ScenarioEventSystem" type="Node" parent="ScenarioController" unique_id=716832485]
+script = ExtResource("3_loxhw")
+metadata/_custom_type_script = "uid://b47ph323gt6gl"
+
+[node name="RallyHit" type="Node" parent="ScenarioController/ScenarioEventSystem" unique_id=297418866]
+script = ExtResource("4_cvres")
+event_name = "rally_hit"
+metadata/_custom_type_script = "uid://botsx3bwjduj2"
+
+[node name="PointWon" type="Node" parent="ScenarioController/ScenarioEventSystem" unique_id=489964124]
+script = ExtResource("4_cvres")
+event_name = "point_won"
+terminal_reason = "point_won"
+metadata/_custom_type_script = "uid://botsx3bwjduj2"
+
+[node name="PointLost" type="Node" parent="ScenarioController/ScenarioEventSystem" unique_id=553334509]
+script = ExtResource("4_cvres")
+event_name = "point_lost"
+terminal_reason = "point_lost"
+metadata/_custom_type_script = "uid://botsx3bwjduj2"
+
+[node name="ScenarioRewardSystem" type="Node" parent="ScenarioController" unique_id=2071393894]
+script = ExtResource("5_dlml4")
+metadata/_custom_type_script = "uid://tn1jug3aq4ll"
+
+[node name="RallyReward" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=712175428]
+script = ExtResource("6_s5no5")
+event_name = "rally_hit"
+reward = 0.02
+only_once = false
+metadata/_custom_type_script = "uid://b0mpnu83er6il"
+
+[node name="WinReward" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=2076759548]
+script = ExtResource("6_s5no5")
+event_name = "point_won"
+reward = 1.0
+metadata/_custom_type_script = "uid://b0mpnu83er6il"
+
+[node name="LossPenalty" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=570325158]
+script = ExtResource("6_s5no5")
+event_name = "point_lost"
+reward = -1.0
+metadata/_custom_type_script = "uid://b0mpnu83er6il"
+
+[node name="LeftPaddle" parent="." unique_id=1677265676 node_paths=PackedStringArray("ball", "opponent") instance=ExtResource("7_4x70t")]
+position = Vector2(35, 355)
+vertical_center = 362.0
+vertical_limit = 258.0
+ball = NodePath("../Ball")
+opponent = NodePath("../RightPaddle")
+
+[node name="RightPaddle" parent="." unique_id=983514899 node_paths=PackedStringArray("ball", "opponent") instance=ExtResource("7_4x70t")]
+position = Vector2(1249, 355)
+vertical_center = 362.0
+vertical_limit = 258.0
+view_direction = -1.0
+team_id = 1
+ball = NodePath("../Ball")
+opponent = NodePath("../LeftPaddle")
+
+[node name="Ball" parent="." unique_id=2119255009 instance=ExtResource("8_y1c7r")]
+position = Vector2(657, 347)
+
+[node name="TopWall" type="StaticBody2D" parent="." unique_id=1637457350]
+position = Vector2(2, -10)
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="TopWall" unique_id=1738249162]
+position = Vector2(635, 0)
+shape = SubResource("RectangleShape2D_0pgps")
+
+[node name="BottomWall" type="StaticBody2D" parent="." unique_id=1064634589]
+position = Vector2(0, 733)
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="BottomWall" unique_id=548713280]
+position = Vector2(635, 0)
+shape = SubResource("RectangleShape2D_0pgps")
+
+[node name="LeftGoal" type="Area2D" parent="." unique_id=786816828]
+position = Vector2(-7, 0)
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="LeftGoal" unique_id=1258020888]
+position = Vector2(-2, 362.5)
+shape = SubResource("RectangleShape2D_3ja26")
+debug_color = Color(0.9856072, 0, 0.33672497, 0.41960785)
+
+[node name="RightGoal" type="Area2D" parent="." unique_id=1005062102]
+position = Vector2(1292, 0)
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="RightGoal" unique_id=1644796700]
+position = Vector2(-2, 362.5)
+shape = SubResource("RectangleShape2D_3ja26")
+debug_color = Color(0.9856072, 0, 0.33672497, 0.41960785)

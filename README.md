@@ -1,6 +1,9 @@
-# Godot Gymnasium Keras RL Framework
+# Metis
 
-Piccolo framework sperimentale per addestrare agenti di reinforcement learning in scenari Godot usando Gymnasium e TensorFlow/Keras.
+**Modular Environment for Training Intelligent Systems**
+
+Metis e' un framework modulare per progettare, addestrare e valutare agenti di
+reinforcement learning in scenari Godot usando Gymnasium e TensorFlow/Keras.
 
 Godot gestisce simulazione, agenti, sensori, reward locali e bridge TCP. Python interroga lo scenario, legge observation/action space esposti dagli agenti e avvia il trainer più adatto.
 
@@ -34,7 +37,7 @@ subito un nuovo agente o scenario, vedi [Tutorial nuovo scenario/agente](docs/tu
 - Python usa `ScenarioGymEnv` come wrapper Gymnasium generico.
 - `train.py` seleziona o inoltra al backend di training.
 
-Il framework supporta scenari single-agent e multi-agent. In multi-agent il trainer salva transizioni per agente nel replay buffer, usando una policy condivisa quando gli agenti hanno observation/action space compatibili.
+Metis supporta scenari single-agent e multi-agent. In multi-agent il trainer salva transizioni per agente nel replay buffer, usando una policy condivisa quando gli agenti hanno observation/action space compatibili.
 
 Negli scenari competitivi a due squadre, tutti i backend supportano anche self-play con
 opponent pool. Ogni corpo agente deve esporre `get_team_id()` (oppure una proprieta'
@@ -61,6 +64,7 @@ File principali:
 - `python/algorithms/common.py`: infrastruttura condivisa dalla famiglia DDPG/TD3.
 - `python/run.py`: esecuzione di un modello addestrato.
 - `python/recorder.py`: registrazione demo manuali.
+- `python/export.py`: conversione della policy Keras in TFLite e ONNX.
 - `python/tools/random_rollout.py`: rollout casuale per validare uno scenario.
 - `python/envs/`: wrapper Gymnasium e gestione dei processi Godot.
 - `python/core/`: modelli, replay buffer, opponent pool e servizi condivisi di training.
@@ -140,6 +144,28 @@ invece `--resume-checkpoint checkpoints/nome_run/ckpt-1025`; la directory indica
 diversa dalla directory sorgente. Se un vecchio checkpoint non ha il relativo replay,
 il trainer ricostruisce il buffer e mantiene gli aggiornamenti disabilitati fino a
 `--replay-warmup`.
+
+Tutti i trainer aggiornano inoltre `CHECKPOINT_DIR/policy.keras` e
+`CHECKPOINT_DIR/policy.json` a ogni checkpoint. Il primo contiene architettura e pesi
+della policy di inferenza; il secondo conserva observation/action contract e decoder.
+`run.py` preferisce automaticamente questo bundle e legge l'algoritmo dal manifest.
+Checkpoint e replay restano invece la fonte corretta per riprendere il training.
+Sia `train.py` sia `run.py` accettano inoltre `--policy-path`: sono supportati bundle,
+modelli completi `.keras`/`.h5` e file legacy `.weights.h5`. Nel trainer questa opzione
+crea un warm start con optimizer e replay nuovi e non puo' essere unita a `--resume`.
+
+Per esportare la policy in TFLite:
+
+```bash
+python/.venv/bin/python python/export.py \
+  --policy checkpoints/nome_run \
+  --format tflite
+```
+
+Per ONNX installa prima le dipendenze opzionali con
+`python/.venv/bin/python -m pip install -r python/requirements-export.txt`, quindi usa
+`--format onnx` oppure `--format all`. La guida completa e' in
+[Esportare una policy](docs/guides/esportare_policy.md).
 
 Dopo un resume SAC, per default i primi 2000 gradient step aggiornano soltanto i
 critic e i target critic. Actor e alpha restano congelati finche' le stime Q non si
@@ -448,7 +474,7 @@ appartenere a traiettorie differenti.
 L'indice completo, con reference dell'architettura e guide di estensione, e' in
 [docs/README.md](docs/README.md). Per aggiungere funzionalita' al framework consulta
 [Aggiungere un algoritmo RL](docs/guides/aggiungere_algoritmo_rl.md) e
-[Estendere il framework Godot](docs/guides/estendere_framework_godot.md).
+[Estendere Metis in Godot](docs/guides/estendere_framework_godot.md).
 
 Per costruire passo passo un agente 2D con azioni discrete, observation configurate
 dall'Inspector, eventi e reward di scenario, vedi

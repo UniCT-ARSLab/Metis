@@ -1,7 +1,9 @@
 import argparse
 import importlib
+import json
 import os
 import sys
+from pathlib import Path
 
 from envs.process_manager import GodotProcessManager
 from envs.scenario import ScenarioGymEnv
@@ -36,6 +38,11 @@ def parse_args(argv):
         default="auto",
     )
     parser.add_argument("--probe-port", type=int, default=None)
+    parser.add_argument(
+        "--policy-path",
+        default=None,
+        help="Warm-start from a Metis .keras/.h5 policy or a legacy .weights.h5 file.",
+    )
     parser.add_argument("--num-envs", type=int, default=1)
     parser.add_argument("--base-port", type=int, default=6200)
     parser.add_argument("--env-timeout", type=float, default=30.0)
@@ -147,6 +154,13 @@ def select_backend(args):
     if args.algorithm != "auto":
         return args.algorithm
 
+    policy_algorithm = policy_manifest_algorithm(args.policy_path)
+    if policy_algorithm:
+        if policy_algorithm not in BACKENDS:
+            raise RuntimeError(f"Unsupported algorithm={policy_algorithm!r} in policy manifest")
+        print(f"Detected policy algorithm from manifest: {policy_algorithm}", flush=True)
+        return policy_algorithm
+
     action_type = probe_action_type(args)
     if action_type == "discrete":
         return "dqn"
@@ -155,6 +169,22 @@ def select_backend(args):
     if action_type == "hybrid":
         return "ppo"
     raise RuntimeError(f"Unsupported action_type={action_type!r}; expected 'discrete', 'continuous' or 'hybrid'.")
+
+
+def policy_manifest_algorithm(policy_path):
+    if not policy_path:
+        return None
+    path = Path(policy_path)
+    manifest_path = path / "policy.json" if path.is_dir() else path.with_name("policy.json")
+    if not manifest_path.is_file():
+        return None
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Could not read policy manifest: {manifest_path}") from exc
+    if payload.get("format") != "metis-policy":
+        raise RuntimeError(f"Unsupported policy manifest format: {manifest_path}")
+    return payload.get("algorithm")
 
 
 def main():

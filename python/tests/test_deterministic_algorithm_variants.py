@@ -1,3 +1,4 @@
+import json
 import sys
 import tempfile
 import unittest
@@ -87,6 +88,44 @@ class UnifiedEntrypointTests(unittest.TestCase):
         self.assertEqual(scheduled_bc_weight(0, 1.0, 0.1, 100), 1.0)
         self.assertAlmostEqual(scheduled_bc_weight(50, 1.0, 0.1, 100), 0.55)
         self.assertAlmostEqual(scheduled_bc_weight(500, 1.0, 0.1, 100), 0.1)
+
+    def test_policy_path_is_forwarded_to_backend(self):
+        backend = SimpleNamespace(main=Mock())
+        original_argv = list(sys.argv)
+        try:
+            sys.argv = [
+                "python/train.py",
+                "--algorithm",
+                "dqn",
+                "--policy-path",
+                "saved/policy.h5",
+            ]
+            with patch.object(train.importlib, "import_module", return_value=backend):
+                train.main()
+        finally:
+            forwarded_argv = list(sys.argv)
+            sys.argv = original_argv
+
+        self.assertEqual(
+            forwarded_argv,
+            ["python/train.py", "--policy-path", "saved/policy.h5", "--headless"],
+        )
+
+    def test_policy_manifest_selects_backend_without_probing_scenario(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            policy_path = Path(temp_dir) / "policy.keras"
+            policy_path.touch()
+            (Path(temp_dir) / "policy.json").write_text(
+                json.dumps({"format": "metis-policy", "algorithm": "ppo"}),
+                encoding="utf-8",
+            )
+            args = SimpleNamespace(algorithm="auto", policy_path=str(policy_path))
+
+            with patch.object(train, "probe_action_type") as probe:
+                backend = train.select_backend(args)
+
+        self.assertEqual(backend, "ppo")
+        probe.assert_not_called()
 
 
 class DeterministicLearnerTests(unittest.TestCase):

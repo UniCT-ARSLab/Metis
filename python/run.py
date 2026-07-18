@@ -48,6 +48,13 @@ import tensorflow as tf
 
 from algorithms.ppo import build_action_metadata, pack_action, split_model_outputs
 from core.models import build_continuous_actor, build_hybrid_actor_critic, build_sac_actor, build_shared_q_network
+from core.policy_artifact import (
+    POLICY_MODEL_FILENAME,
+    load_policy_into_model,
+    load_policy_model,
+    policy_algorithms_are_compatible,
+    resolve_policy_path,
+)
 from core.training import episode_step_indices
 from envs.process_manager import GodotProcessManager
 from envs.scenario import ScenarioGymEnv
@@ -64,7 +71,19 @@ def parse_args():
         choices=["auto", "dqn", "ddpg", "ddpg_bc", "ddpgfd", "td3", "td3_bc", "sac", "ppo"],
         default="auto",
     )
-    parser.add_argument("--load-from", choices=["auto", "weights", "checkpoint"], default="auto")
+    parser.add_argument(
+        "--load-from",
+        choices=["auto", "policy", "keras", "weights", "checkpoint"],
+        default="auto",
+    )
+    parser.add_argument(
+        "--policy-path",
+        default=None,
+        help=(
+            "Policy bundle/directory, complete .keras/.h5 model, or legacy .weights.h5 file. "
+            "Defaults to CHECKPOINT_DIR/policy.keras."
+        ),
+    )
     parser.add_argument("--weights-path", default="generic_dqn_weights.weights.h5")
     parser.add_argument("--actor-weights-path", default=None)
     parser.add_argument("--checkpoint-dir", default="checkpoints/generic")
@@ -224,9 +243,19 @@ def select_multi_hybrid_actions(model, obs_batch, agent_ids, action_meta):
     }
 
 
-def resolve_algorithm(requested, env, weights_path):
+def resolve_algorithm(requested, env, weights_path, manifest=None):
     if requested != "auto":
+        if manifest is not None and not policy_algorithms_are_compatible(
+            requested,
+            str(manifest.get("algorithm", "")),
+        ):
+            raise RuntimeError(
+                f"Requested algorithm={requested!r} does not match policy manifest "
+                f"algorithm={manifest.get('algorithm')!r}"
+            )
         return requested
+    if manifest is not None and manifest.get("algorithm"):
+        return str(manifest["algorithm"])
     if env.action_type == "discrete":
         return "dqn"
     if env.action_type == "continuous":
@@ -246,6 +275,69 @@ def policy_weights_path(args, algorithm):
     if algorithm in {"ddpg", "ddpg_bc", "ddpgfd", "td3", "td3_bc", "sac"} and args.actor_weights_path:
         return args.actor_weights_path
     return args.weights_path
+
+
+def keras_policy_path(args):
+    requested = args.policy_path or str(Path(args.checkpoint_dir) / POLICY_MODEL_FILENAME)
+    return resolve_policy_path(requested)
+
+
+def load_direct_policy(args):
+    policy_path = keras_policy_path(args)
+    if args.policy_path and (args.load_from == "checkpoint" or args.checkpoint_path):
+        raise RuntimeError("--policy-path cannot be combined with checkpoint loading options")
+    should_load = (
+        args.policy_path is not None
+        or args.load_from in {"policy", "keras"}
+        or (args.load_from == "auto" and policy_path.is_file())
+    )
+    if not should_load:
+        return None, None, None, None
+    if not policy_path.is_file():
+        raise RuntimeError(f"Policy not found: {policy_path}")
+    model, manifest, source_kind, resolved_path = load_policy_model(policy_path)
+    if model is not None:
+        print(f"Loaded policy {source_kind}: {resolved_path}", flush=True)
+    return model, manifest, source_kind, str(resolved_path)
+
+
+def validate_keras_policy(model, manifest, env):
+    if manifest is not None:
+        observation_manifest = manifest.get("observation", {})
+        action_manifest = manifest.get("action", {})
+        expected_obs_dim = int(observation_manifest.get("size", env.obs_dim))
+        if expected_obs_dim != env.obs_dim:
+            raise RuntimeError(
+                f"Policy obs_dim={expected_obs_dim} does not match scenario obs_dim={env.obs_dim}"
+            )
+        expected_observation_names = list(observation_manifest.get("names", []))
+        current_observation_names = list(env._spec_for_agent(env.agent_id).get("observation_names", []))
+        if expected_observation_names and current_observation_names != expected_observation_names:
+            raise RuntimeError(
+                "Policy observation order does not match the scenario: "
+                f"policy={expected_observation_names}, scenario={current_observation_names}"
+            )
+        expected_action_type = str(action_manifest.get("type", env.action_type))
+        if expected_action_type != env.action_type:
+            raise RuntimeError(
+                f"Policy action_type={expected_action_type!r} does not match scenario "
+                f"action_type={env.action_type!r}"
+            )
+        expected_action_size = int(action_manifest.get("size", env.action_size))
+        if expected_action_size != env.action_size:
+            raise RuntimeError(
+                f"Policy action_size={expected_action_size} does not match scenario action_size={env.action_size}"
+            )
+        expected_action_names = list(action_manifest.get("names", []))
+        if expected_action_names and expected_action_names != env.action_names:
+            raise RuntimeError(
+                "Policy action order does not match the scenario: "
+                f"policy={expected_action_names}, scenario={env.action_names}"
+            )
+    if isinstance(model.input_shape, list) or int(model.input_shape[-1]) != env.obs_dim:
+        raise RuntimeError(
+            f"Keras policy input_shape={model.input_shape} is incompatible with obs_dim={env.obs_dim}"
+        )
 
 
 def normalize_checkpoint_path(checkpoint_path):
@@ -427,28 +519,53 @@ def main():
             agent_id=args.agent_id,
             multi_agent=args.multi_agent,
         )
-        algorithm = resolve_algorithm(args.algorithm, env, args.actor_weights_path or args.weights_path)
-        if algorithm == "dqn":
-            model = build_shared_q_network(obs_dim=env.obs_dim, num_actions=env.num_actions)
-        elif algorithm in {"ddpg", "ddpg_bc", "ddpgfd", "td3", "td3_bc"}:
-            model = build_continuous_actor(obs_dim=env.obs_dim, action_size=env.action_size)
-        elif algorithm == "sac":
-            model = build_sac_actor(obs_dim=env.obs_dim, action_size=env.action_size)
-        elif algorithm == "ppo":
+        model, policy_manifest, direct_policy_kind, direct_policy_path = load_direct_policy(args)
+        algorithm = resolve_algorithm(
+            args.algorithm,
+            env,
+            args.actor_weights_path or args.weights_path,
+            manifest=policy_manifest,
+        )
+        action_meta = None
+        if algorithm == "ppo":
             action_meta = build_action_metadata(env.action_space_spec)
-            model = build_hybrid_actor_critic(
-                obs_dim=env.obs_dim,
-                discrete_sizes=action_meta["discrete_sizes"],
-                continuous_size=action_meta["continuous_size"],
-            )
-            model(np.zeros((1, env.obs_dim), dtype=np.float32), training=False)
+        if model is not None:
+            validate_keras_policy(model, policy_manifest, env)
+            loaded_kind, loaded_path = direct_policy_kind, direct_policy_path
         else:
-            raise RuntimeError(f"Unsupported algorithm={algorithm!r}")
-        loaded_kind, loaded_path = load_policy(model, args, algorithm)
+            if algorithm == "dqn":
+                model = build_shared_q_network(obs_dim=env.obs_dim, num_actions=env.num_actions)
+            elif algorithm in {"ddpg", "ddpg_bc", "ddpgfd", "td3", "td3_bc"}:
+                model = build_continuous_actor(obs_dim=env.obs_dim, action_size=env.action_size)
+            elif algorithm == "sac":
+                model = build_sac_actor(obs_dim=env.obs_dim, action_size=env.action_size)
+            elif algorithm == "ppo":
+                model = build_hybrid_actor_critic(
+                    obs_dim=env.obs_dim,
+                    discrete_sizes=action_meta["discrete_sizes"],
+                    continuous_size=action_meta["continuous_size"],
+                )
+                model(np.zeros((1, env.obs_dim), dtype=np.float32), training=False)
+            else:
+                raise RuntimeError(f"Unsupported algorithm={algorithm!r}")
+            if direct_policy_path is not None:
+                loaded_policy = load_policy_into_model(
+                    model,
+                    direct_policy_path,
+                    expected_algorithm=algorithm,
+                )
+                loaded_kind = loaded_policy["source_kind"]
+                loaded_path = str(loaded_policy["path"])
+                validate_keras_policy(model, policy_manifest, env)
+                print(f"Loaded policy weights: {loaded_path}", flush=True)
+            else:
+                loaded_kind, loaded_path = load_policy(model, args, algorithm)
         warm_policy_inference(model, env.obs_dim)
 
         env_max_steps = configured_max_steps(args)
         inferred_episode = checkpoint_episode(loaded_path) if loaded_kind == "checkpoint" else None
+        if policy_manifest is not None and direct_policy_path is not None:
+            inferred_episode = int(policy_manifest.get("episode", 0))
         training_episode = args.training_episode
         if training_episode is None:
             training_episode = inferred_episode if inferred_episode is not None else 0

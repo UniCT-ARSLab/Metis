@@ -1,4 +1,4 @@
-# Tutorial: Pong con due agenti e policy condivisa
+# Tutorial Metis: Pong con due agenti e policy condivisa
 
 Questo tutorial costruisce Pong in 2D con due Paddle controllati contemporaneamente.
 I Paddle sono due istanze della stessa scena, espongono lo stesso action space e lo
@@ -55,17 +55,27 @@ Ogni Paddle riceve sei valori:
 Per il Paddle destro invertiamo soltanto l'asse X di posizione e velocita'. In questo
 modo, per entrambi, X positiva significa "verso l'avversario".
 
-### Reward zero-sum
+### Reward di risultato e shaping locale
 
-| Evento | Vincitore | Perdente | Terminale |
-|---|---:|---:|---|
-| tocco della pallina | `+0.02` | `0` | no |
-| punto segnato | `+1.0` | `-1.0` | entrambi |
-| ogni step | `-0.0005` | `-0.0005` | no |
+| Termine | Agente interessato | Reward | Terminale |
+|---|---|---:|---|
+| allineamento alla palla in arrivo | ciascun Paddle | `0.05 * delta_distanza` | no |
+| tocco della pallina | Paddle che colpisce | `+0.02` | no |
+| punto segnato | vincitore / perdente | `+1.0 / -1.0` | entrambi |
+| ogni step | entrambi | `-0.00005` | no |
 
-La reward per il tocco e' piccola: aiuta all'inizio, ma non deve diventare piu'
-conveniente del segnare. Non premiare semplicemente il movimento del Paddle, altrimenti
-la policy puo' imparare a oscillare senza seguire la pallina.
+Il risultato del punto resta zero-sum; shaping e costo temporale sono invece segnali
+locali. `delta_distanza` e' la distanza verticale precedente meno quella attuale,
+normalizzata e limitata a `[0, 1]`. Viene calcolata soltanto quando la palla si avvicina
+al Paddle: muoversi nella direzione giusta produce reward positiva, allontanarsi produce
+reward negativa e restare fermi produce zero.
+
+La reward per il tocco e lo shaping aiutano all'inizio, ma restano molto piu' piccoli
+del punto. Non premiare il movimento in se' e non usare la distanza assoluta come reward
+per step: entrambe le forme possono favorire oscillazioni o accumulo di reward senza
+vincere. La penalita' temporale deve inoltre costare meno di `+0.02` durante una normale
+traversata, altrimenti perdere rapidamente puo' diventare preferibile a continuare lo
+scambio.
 
 ## 3. Creare PongPaddle.tscn
 
@@ -78,21 +88,63 @@ PongPaddle (CharacterBody2D) [pong_paddle.gd]
 └── Agent                    [Agent.gd]
     ├── ActionSpace          [ActionSpace.gd]
     │   └── Actions          [DiscreteActionSet.gd]
+    │       ├── Idle         [DiscreteAction.gd]
+    │       ├── MoveUp       [DiscreteAction.gd]
+    │       └── MoveDown     [DiscreteAction.gd]
     ├── ObservationSystem    [ObservationSystem.gd]
     │   ├── PaddleY          [MethodObservationSource.gd]
     │   ├── BallPosition     [MethodObservationSource.gd]
     │   ├── BallVelocity     [MethodObservationSource.gd]
     │   └── OpponentY        [MethodObservationSource.gd]
     └── RewardSystem         [RewardSystem.gd]
-        └── TimePenalty      [StepPenaltyReward.gd]
+        ├── TimePenalty      [StepPenaltyReward.gd]
+        └── AlignmentReward  [FunctionRewardComponent.gd]
 ```
 
-Configura `Actions`:
+`Actions` rappresenta la scelta discreta, mentre i suoi figli collegano ogni nome al
+metodo eseguito sul corpo del Paddle. Configura i nodi dall'Inspector:
 
 ```text
-action_name = "action"
-names = ["idle", "move_up", "move_down"]
+Actions:
+  action_name = "action"
+  names = []  # Campo legacy: resta vuoto quando usi i figli DiscreteAction
+
+Idle:
+  action_name = "idle"
+  target_path = ""
+  method_name = "stop"
+
+MoveUp:
+  action_name = "move_up"
+  target_path = ""
+  method_name = "move_up"
+
+MoveDown:
+  action_name = "move_down"
+  target_path = ""
+  method_name = "move_down"
 ```
+
+Un `target_path` vuoto usa come target il corpo che possiede `Agent`, cioe'
+`PongPaddle`. L'ordine dei figli stabilisce gli ID inviati da Python:
+`Idle = 0`, `MoveUp = 1`, `MoveDown = 2`.
+
+Per costruire l'action space nell'editor:
+
+1. aggiungi un nodo `Node` sotto `ActionSpace`, chiamalo `Actions` e assegna
+   `DiscreteActionSet.gd`;
+2. aggiungi tre nodi `Node` sotto `Actions` e assegna `DiscreteAction.gd`;
+3. rinominali `Idle`, `MoveUp` e `MoveDown`;
+4. configura `action_name` e `method_name` come sopra;
+5. lascia vuoti `names`, `target_path` e `arguments`.
+
+Non usare contemporaneamente il vecchio array `names` e i figli: quando sono presenti
+i nodi `DiscreteAction`, essi sono l'unica fonte di verita'. Non serve nemmeno chiamare
+`agent.add_action()` nello script. Quell'API rimane disponibile per registrazioni
+dinamiche e compatibilita' legacy, ma non fa parte di questo tutorial.
+
+La chiamata `agent.act(action_id)` dentro `apply_action()` resta necessaria: non registra
+nuovamente l'azione, ma esegue il figlio `DiscreteAction` corrispondente all'ID.
 
 Configura le observation nell'ordine indicato:
 
@@ -114,7 +166,23 @@ OpponentY:
   method_name = "get_opponent_delta_y_observation"
 ```
 
-Configura `TimePenalty.penalty = -0.0005` e assegna il gruppo `paddle` alla radice.
+Configura le reward locali:
+
+```text
+TimePenalty:
+  penalty = -0.00005
+  term_name = "time"
+
+AlignmentReward:
+  term_name = "incoming_alignment"
+  evaluation_mode = CONTINUOUS
+  weight = 0.05
+  method_name = "get_vertical_alignment_reward"
+  node_caller = "../../.."
+```
+
+`node_caller` risale da `Agent/RewardSystem/AlignmentReward` alla radice
+`PongPaddle`. Assegna inoltre il gruppo `paddle` alla radice.
 
 ## 4. Scrivere pong_paddle.gd
 
@@ -123,6 +191,7 @@ extends CharacterBody2D
 class_name PongPaddle
 
 @export var speed := 420.0
+@export var vertical_center := 0.0
 @export var vertical_limit := 300.0
 @export var ball_speed_scale := 520.0
 @export var view_direction := 1.0
@@ -136,12 +205,7 @@ class_name PongPaddle
 var _move_input := 0.0
 var _terminal := false
 var _training_active := true
-
-
-func _ready() -> void:
-	agent.add_action("idle", Callable(self, "stop"))
-	agent.add_action("move_up", Callable(self, "move_up"))
-	agent.add_action("move_down", Callable(self, "move_down"))
+var _prev_abs_rel_y := -1.0
 
 
 func get_team_id() -> int:
@@ -155,7 +219,11 @@ func _physics_process(_delta:float) -> void:
 		_move_input = Input.get_axis("move_up", "move_down")
 	velocity = Vector2(0.0, _move_input * speed)
 	move_and_slide()
-	global_position.y = clampf(global_position.y, -vertical_limit, vertical_limit)
+	global_position.y = clampf(
+		global_position.y,
+		vertical_center - vertical_limit,
+		vertical_center + vertical_limit
+	)
 
 
 func apply_action(action:Variant) -> Variant:
@@ -191,7 +259,11 @@ func move_down() -> void:
 
 
 func get_paddle_y_observation() -> float:
-	return clampf(global_position.y / maxf(vertical_limit, 0.001), -1.0, 1.0)
+	return clampf(
+		(global_position.y - vertical_center) / maxf(vertical_limit, 0.001),
+		-1.0,
+		1.0
+	)
 
 
 func get_ball_relative_position_observation() -> Vector2:
@@ -226,6 +298,29 @@ func get_opponent_delta_y_observation() -> float:
 	)
 
 
+func get_vertical_alignment_reward() -> float:
+	if ball == null:
+		return 0.0
+
+	# Dopo il mirroring, velocita' X negativa significa "palla in arrivo" per entrambi.
+	var perceived_velocity_x := ball.velocity.x * view_direction
+	if perceived_velocity_x >= 0.0:
+		_prev_abs_rel_y = -1.0
+		return 0.0
+
+	var abs_rel_y := clampf(
+		absf(ball.global_position.y - global_position.y) / maxf(vertical_limit, 0.001),
+		0.0,
+		1.0
+	)
+	if _prev_abs_rel_y < 0.0:
+		_prev_abs_rel_y = abs_rel_y
+		return 0.0
+	var delta := _prev_abs_rel_y - abs_rel_y
+	_prev_abs_rel_y = abs_rel_y
+	return delta
+
+
 func set_episode_terminal(value:bool) -> void:
 	_terminal = value
 
@@ -237,6 +332,7 @@ func is_terminal() -> bool:
 func reset_all(original_transform:Variant, reset_rewards := true) -> void:
 	set_training_active(true)
 	_terminal = false
+	_prev_abs_rel_y = -1.0
 	stop()
 	velocity = Vector2.ZERO
 	if typeof(original_transform) == TYPE_TRANSFORM2D:
@@ -257,8 +353,10 @@ func set_training_active(enabled:bool) -> void:
 		velocity = Vector2.ZERO
 ```
 
-Nello scenario imposta `view_direction = 1` sul Paddle sinistro e `-1` sul destro.
-Entrambi continuano a usare `move_up` e `move_down` nello stesso sistema di coordinate.
+Nello scenario imposta `vertical_center` sul centro Y del campo, `view_direction = 1`
+sul Paddle sinistro e `-1` sul destro. Entrambi continuano a usare `move_up` e
+`move_down` nello stesso sistema di coordinate. Azzerare `_prev_abs_rel_y` al reset e
+quando la palla si allontana impedisce di confrontare due fasi difensive differenti.
 
 ## 5. Creare PongBall.tscn
 
@@ -534,7 +632,7 @@ python/.venv/bin/python python/train.py \
   --godot-scene res://scenarios/pong/pong_scenario.tscn \
   --num-envs 4 \
   --num-episodes 2500 \
-  --max-steps-per-episode 1200 \
+  --max-steps-per-episode 0 \
   --batch-size 128 \
   --replay-warmup 8000 \
   --epsilon-start 1.0 \
@@ -705,7 +803,8 @@ python/.venv/bin/python python/train.py \
 
 `--num-episodes 4000` indica l'episodio finale complessivo, non altri 4000 episodi. Il
 resume ripristina rete, target network, optimizer, epsilon e replay buffer. Il pool
-viene riaperto dal suo manifest. Caricare soltanto `--initial-weights-path` e' invece un
+viene riaperto dal suo manifest. Caricare soltanto `--policy-path` (il vecchio
+`--initial-weights-path` resta un alias DQN) e' invece un
 nuovo training con optimizer, epsilon e replay nuovi.
 
 Se riprendi deliberatamente un checkpoint piu' vecchio della prima snapshot rimasta

@@ -1,4 +1,4 @@
-# Tutorial: creare un nuovo agente e un nuovo scenario RL
+# Tutorial Metis: creare un nuovo agente e un nuovo scenario RL
 
 Questa guida spiega come aggiungere un nuovo scenario di reinforcement learning al progetto, mantenendo la separazione attuale:
 

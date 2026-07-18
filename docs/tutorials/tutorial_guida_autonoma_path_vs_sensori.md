@@ -1,4 +1,4 @@
-# Tutorial: guida autonoma con e senza conoscenza del percorso
+# Tutorial Metis: guida autonoma con e senza conoscenza del percorso
 
 Questo tutorial costruisce due esperimenti di guida autonoma usando lo stesso veicolo,
 la stessa fisica e le stesse azioni continue:
