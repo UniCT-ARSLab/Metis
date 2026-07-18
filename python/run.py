@@ -55,7 +55,12 @@ from core.policy_artifact import (
     policy_algorithms_are_compatible,
     resolve_policy_path,
 )
-from core.training import episode_step_indices
+from core.training import (
+    add_godot_render_argument,
+    add_tensorflow_runtime_arguments,
+    configure_tensorflow_devices,
+    episode_step_indices,
+)
 from envs.process_manager import GodotProcessManager
 from envs.scenario import ScenarioGymEnv
 
@@ -141,6 +146,8 @@ def parse_args():
         help="Godot render/process frame cap while realtime mode is active.",
     )
     parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=False)
+    add_tensorflow_runtime_arguments(parser)
+    add_godot_render_argument(parser, default="project")
     parser.add_argument("--connect-only", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--print-every", type=int, default=1)
     parser.add_argument(
@@ -492,6 +499,9 @@ def main():
         # evaluation spawns this script headless without pinning the mode -- there,
         # lockstep is what keeps eval fast and reproducible.
         args.execution_mode = "lockstep" if args.headless else "realtime"
+    # Match training: let TensorFlow grow GPU memory on demand instead of grabbing most of
+    # the VRAM at context init. Must run before the first TF op (tf.random.set_seed below).
+    configure_tensorflow_devices(tf, memory_growth=args.gpu_memory_growth, system_name=platform.system())
     random.seed(args.seed)
     np.random.seed(args.seed)
     tf.random.set_seed(args.seed)
@@ -503,7 +513,7 @@ def main():
             project_dir=args.godot_project,
             scene_path=args.godot_scene,
         )
-        manager.start_many([args.port], headless=args.headless)
+        manager.start_many([args.port], headless=args.headless, render_mode=args.render_mode)
         print(f"Started Godot on port {args.port}", flush=True)
 
     env = None

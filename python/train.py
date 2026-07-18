@@ -3,6 +3,8 @@ import importlib
 import json
 import os
 import sys
+
+from core.training import add_godot_render_argument
 from pathlib import Path
 
 from envs.process_manager import GodotProcessManager
@@ -86,6 +88,7 @@ def parse_args(argv):
     parser.add_argument("--async-replay-save", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--parallel-env-steps", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--render-env-count", type=int, default=None)
+    add_godot_render_argument(parser)
     parser.add_argument("--gpu-memory-growth", action=argparse.BooleanOptionalAction, default=True)
     args, _ = parser.parse_known_args(argv)
     return args

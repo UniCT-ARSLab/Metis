@@ -47,6 +47,24 @@ def add_tensorflow_runtime_arguments(parser, *, include_compile_learner=False):
         )
 
 
+RENDER_MODES = ("project", "cpu", "light-gpu", "gpu")
+
+
+def add_godot_render_argument(parser, *, default="light-gpu"):
+    parser.add_argument(
+        "--render-mode",
+        choices=RENDER_MODES,
+        default=default,
+        help=(
+            "Renderer for non-headless Godot instances (ignored when headless). 'project' "
+            "leaves the Godot project setting untouched; 'light-gpu' uses the OpenGL "
+            "compatibility renderer (light GPU, low TensorFlow contention); 'cpu' forces "
+            "software rendering via Mesa llvmpipe (no GPU, lower FPS); 'gpu' forces the full "
+            "Vulkan forward+ renderer."
+        ),
+    )
+
+
 def add_best_checkpoint_arguments(parser):
     parser.add_argument(
         "--best-checkpoint",

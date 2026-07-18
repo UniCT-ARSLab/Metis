@@ -65,6 +65,14 @@ In sintesi, il framework gestisce:
 - esecuzione realtime o lockstep ed export Keras, TFLite e ONNX;
 - Linux con CPU/CUDA e macOS Apple Silicon con Metal.
 
+Durante il training le finestre Godot possono usare il renderer del progetto, OpenGL
+leggero, rendering software su CPU oppure Vulkan Forward+. La scelta avviene con
+`--render-mode`; il default `light-gpu` lascia piu' risorse al learner. L'opzione conta
+solo per le istanze visibili e puo' essere combinata con `--render-env-count` per
+mostrare una sola preview anche quando gli environment sono molti. La sezione
+[Uno o molti environment](../README.md#uno-o-molti-environment) contiene la tabella
+completa e un esempio.
+
 Per la matrice completa, gli esempi di comando e i limiti attuali consulta il
 [README principale](../README.md).
 

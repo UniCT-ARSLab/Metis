@@ -43,6 +43,7 @@ from core.training import (
     add_lockstep_tuning_arguments,
     add_parallel_env_arguments,
     add_log_format_argument,
+    add_godot_render_argument,
     add_tensorflow_runtime_arguments,
     build_lockstep_user_args,
     episode_step_indices,
@@ -190,6 +191,7 @@ def parse_args():
     add_lockstep_tuning_arguments(parser)
     add_log_format_argument(parser)
     add_tensorflow_runtime_arguments(parser)
+    add_godot_render_argument(parser)
 
     # Accepted for command compatibility with DDPG runs; SAC exploration is entropy-based.
     parser.add_argument("--exploration-noise", type=float, default=None, help=argparse.SUPPRESS)
@@ -821,6 +823,7 @@ def main():
             headless=args.headless,
             debug=args.godot_debug,
             render_env_count=args.render_env_count,
+            render_mode=args.render_mode,
             user_args=build_lockstep_user_args(args),
         )
         print(f"Started Godot instances on ports {ports}", flush=True)

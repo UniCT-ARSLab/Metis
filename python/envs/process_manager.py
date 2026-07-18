@@ -5,6 +5,24 @@ import time
 from pathlib import Path
 
 
+def godot_render_args(render_mode):
+    """Map a --render-mode value to (extra Godot engine flags, env overrides) for a
+    non-headless instance. 'project' (or None) leaves the project renderer untouched."""
+    if render_mode in (None, "project"):
+        return [], {}
+    if render_mode == "light-gpu":
+        return ["--rendering-driver", "opengl3", "--rendering-method", "gl_compatibility"], {}
+    if render_mode == "cpu":
+        # OpenGL compat on top of Mesa llvmpipe -> software rasterizer on CPU, GPU stays free.
+        return (
+            ["--rendering-driver", "opengl3", "--rendering-method", "gl_compatibility"],
+            {"LIBGL_ALWAYS_SOFTWARE": "1"},
+        )
+    if render_mode == "gpu":
+        return ["--rendering-driver", "vulkan", "--rendering-method", "forward_plus"], {}
+    return [], {}
+
+
 class GodotProcessManager:
     def __init__(self, godot_bin=None, project_dir=None, logs_dir=None, scene_path=None):
         self.godot_bin = godot_bin or os.environ.get("GODOT_BIN")
@@ -40,6 +58,7 @@ class GodotProcessManager:
         user_args=None,
         fixed_fps=60,
         render_env_count=None,
+        render_mode="project",
     ):
         user_args = list(user_args or [])
         rendered_count = len(ports) if render_env_count is None else max(0, int(render_env_count))
@@ -47,10 +66,17 @@ class GodotProcessManager:
         for env_index, port in enumerate(ports):
             instance_headless = bool(headless) or env_index >= rendered_count
             args_prefix = [self.godot_bin]
+            proc_env = None
             if instance_headless:
                 args_prefix.append("--headless")
                 if fixed_fps is not None and int(fixed_fps) > 0:
                     args_prefix += ["--fixed-fps", str(int(fixed_fps))]
+            else:
+                render_flags, render_env = godot_render_args(render_mode)
+                args_prefix += render_flags
+                if render_env:
+                    proc_env = dict(os.environ)
+                    proc_env.update(render_env)
             if debug:
                 args_prefix.append("--debug")
                 args_prefix.append("--debug-collisions")
@@ -71,6 +97,7 @@ class GodotProcessManager:
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
                 text=True,
+                env=proc_env,
             )
             self.processes.append({
                 "port": port,
