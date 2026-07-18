@@ -1,0 +1,24 @@
+[gd_scene format=3 uid="uid://ji7iixu8ps7n"]
+
+[ext_resource type="Script" uid="uid://2u126d4iy388" path="res://scenarios/tanks/tank_missile.gd" id="1_8buqk"]
+
+[sub_resource type="CapsuleMesh" id="CapsuleMesh_r16sy"]
+radius = 0.015
+height = 0.05
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_8buqk"]
+radius = 0.015
+height = 0.05
+
+[node name="TankMissile" type="CharacterBody3D" unique_id=776286072 groups=["projectile"]]
+collision_layer = 8
+collision_mask = 3
+script = ExtResource("1_8buqk")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="." unique_id=226572924]
+transform = Transform3D(1, 0, 0, 0, -4.371139e-08, -1, 0, 1, -4.371139e-08, 0, 0, 0)
+mesh = SubResource("CapsuleMesh_r16sy")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="." unique_id=2040166695]
+transform = Transform3D(1, 0, 0, 0, -4.371139e-08, -1, 0, 1, -4.371139e-08, 0, 0, 0)
+shape = SubResource("CapsuleShape3D_8buqk")

@@ -58,7 +58,9 @@ def add_godot_render_argument(parser, *, default="light-gpu"):
         help=(
             "Renderer for non-headless Godot instances (ignored when headless). 'project' "
             "leaves the Godot project setting untouched; 'light-gpu' uses the OpenGL "
-            "compatibility renderer (light GPU, low TensorFlow contention); 'cpu' forces "
+            "compatibility renderer and on Linux falls back to a switcherooctl discrete "
+            "GPU when default OpenGL is software-rendered (light GPU, low TensorFlow "
+            "contention); 'cpu' forces "
             "software rendering via Mesa llvmpipe (no GPU, lower FPS); 'gpu' forces the full "
             "Vulkan forward+ renderer."
         ),

@@ -2,7 +2,16 @@
 
 [ext_resource type="Script" uid="uid://d38lybllmy6tq" path="res://scripts/bridge_server.gd" id="1_2y6o6"]
 [ext_resource type="PackedScene" uid="uid://ckcj3fbm54314" path="res://agents/Tank/tank.tscn" id="1_eom7a"]
-[ext_resource type="PackedScene" uid="uid://dgnhnv2ffdgkt" path="res://scenarios/tanks/scenario_controller.tscn" id="1_nx8d5"]
+[ext_resource type="Script" uid="uid://dy7tx2bgu7bjh" path="res://scenarios/tanks/tanks_scenario.gd" id="1_p8j0h"]
+[ext_resource type="PackedScene" uid="uid://sh8wk77w85hb" path="res://scenarios/tanks/easy_map.tscn" id="2_a6ye7"]
+[ext_resource type="Script" uid="uid://cun4ha1fidr8n" path="res://scripts/agent/ScenarioController.gd" id="3_qx68c"]
+[ext_resource type="PackedScene" uid="uid://dwvi2fqy3u0a7" path="res://scenarios/tanks/medium_map.tscn" id="3_xm7vx"]
+[ext_resource type="Script" uid="uid://b47ph323gt6gl" path="res://scripts/agent/events/ScenarioEventSystem.gd" id="4_6gp75"]
+[ext_resource type="PackedScene" uid="uid://d0goalutfb556" path="res://scenarios/tanks/hard_map.tscn" id="4_ejhqg"]
+[ext_resource type="Script" uid="uid://botsx3bwjduj2" path="res://scripts/agent/events/ManualScenarioEventSource.gd" id="5_a6ye7"]
+[ext_resource type="Script" uid="uid://tn1jug3aq4ll" path="res://scripts/agent/ScenarioRewardSystem.gd" id="6_xm7vx"]
+[ext_resource type="Script" uid="uid://b0mpnu83er6il" path="res://scripts/agent/scenario_reward_components/EventScenarioReward.gd" id="7_ejhqg"]
+[ext_resource type="PackedScene" uid="uid://ji7iixu8ps7n" path="res://scenarios/tanks/tank_missile.tscn" id="12_xm7vx"]
 
 [sub_resource type="PlaneMesh" id="PlaneMesh_cyscs"]
 size = Vector2(5, 3)
@@ -41,38 +50,134 @@ size = Vector3(0.115, 0.555, 5.265)
 [sub_resource type="BoxShape3D" id="BoxShape3D_lcct3"]
 size = Vector3(0.115, 0.555, 5.265)
 
-[sub_resource type="CylinderMesh" id="CylinderMesh_p8j0h"]
-top_radius = 0.09
-bottom_radius = 0.18
-height = 0.825
-
-[sub_resource type="CylinderShape3D" id="CylinderShape3D_qx68c"]
-height = 0.825
-radius = 0.135
-
-[sub_resource type="CylinderMesh" id="CylinderMesh_eom7a"]
-top_radius = 0.1
-bottom_radius = 0.1
-height = 0.2
-
-[sub_resource type="CylinderShape3D" id="CylinderShape3D_nx8d5"]
-height = 0.2
-radius = 0.1
-
-[node name="TanksScenario" type="Node3D" unique_id=651348079]
+[node name="TanksScenario" type="Node3D" unique_id=651348079 node_paths=PackedStringArray("tanks", "layout_container")]
+script = ExtResource("1_p8j0h")
+tanks = [NodePath("Agents/RedTank1"), NodePath("Agents/RedTank2"), NodePath("Agents/BlueTank1"), NodePath("Agents/BlueTank2")]
+layout_scenes = Array[PackedScene]([ExtResource("2_a6ye7"), ExtResource("3_xm7vx"), ExtResource("4_ejhqg")])
+layout_container = NodePath("Environment/LayoutContainer")
 
 [node name="BridgeServer" type="Node" parent="." unique_id=1507754248]
 script = ExtResource("1_2y6o6")
 controller_path = NodePath("../ScenarioController")
 metadata/_custom_type_script = "uid://d38lybllmy6tq"
 
-[node name="ScenarioController" parent="." unique_id=1293921414 node_paths=PackedStringArray("controlled_agents", "target") instance=ExtResource("1_nx8d5")]
-controlled_agents = [NodePath("../Agents/Tank"), NodePath("../Agents/Tank2"), NodePath("../Agents/Tank3")]
-target = NodePath("../Target")
+[node name="ScenarioController" type="Node" parent="." unique_id=527788711 node_paths=PackedStringArray("controlled_agents")]
+script = ExtResource("3_qx68c")
+controlled_agents = [NodePath("../Agents/RedTank1"), NodePath("../Agents/RedTank2"), NodePath("../Agents/BlueTank1"), NodePath("../Agents/BlueTank2")]
+randomize_reset = true
+reset_position_jitter = Vector3(0.3, 0, 0.3)
+reset_yaw_jitter_degrees = 15.0
+max_steps = 1000
+metadata/_custom_type_script = "uid://cun4ha1fidr8n"
+
+[node name="ScenarioEventSystem" type="Node" parent="ScenarioController" unique_id=1388296052]
+script = ExtResource("4_6gp75")
+metadata/_custom_type_script = "uid://b47ph323gt6gl"
+
+[node name="EnemyDamage" type="Node" parent="ScenarioController/ScenarioEventSystem" unique_id=274630187]
+script = ExtResource("5_a6ye7")
+event_name = "enemy_damage"
+metadata/_custom_type_script = "uid://botsx3bwjduj2"
+
+[node name="EnemyKill" type="Node" parent="ScenarioController/ScenarioEventSystem" unique_id=1822112240]
+script = ExtResource("5_a6ye7")
+event_name = "enemy_kill"
+metadata/_custom_type_script = "uid://botsx3bwjduj2"
+
+[node name="TeamKillAssist" type="Node" parent="ScenarioController/ScenarioEventSystem" unique_id=1624277811]
+script = ExtResource("5_a6ye7")
+event_name = "team_kill_assist"
+metadata/_custom_type_script = "uid://botsx3bwjduj2"
+
+[node name="DamageTaken" type="Node" parent="ScenarioController/ScenarioEventSystem" unique_id=910046098]
+script = ExtResource("5_a6ye7")
+event_name = "damage_taken"
+metadata/_custom_type_script = "uid://botsx3bwjduj2"
+
+[node name="Destroyed" type="Node" parent="ScenarioController/ScenarioEventSystem" unique_id=1399967179]
+script = ExtResource("5_a6ye7")
+event_name = "destroyed"
+metadata/_custom_type_script = "uid://botsx3bwjduj2"
+
+[node name="TeamWon" type="Node" parent="ScenarioController/ScenarioEventSystem" unique_id=1607016359]
+script = ExtResource("5_a6ye7")
+event_name = "team_won"
+terminal_reason = "team_won"
+metadata/_custom_type_script = "uid://botsx3bwjduj2"
+
+[node name="TeamLost" type="Node" parent="ScenarioController/ScenarioEventSystem" unique_id=774902737]
+script = ExtResource("5_a6ye7")
+event_name = "team_lost"
+terminal_reason = "team_lost"
+metadata/_custom_type_script = "uid://botsx3bwjduj2"
+
+[node name="MatchDraw" type="Node" parent="ScenarioController/ScenarioEventSystem" unique_id=834275134]
+script = ExtResource("5_a6ye7")
+event_name = "match_draw"
+terminal_reason = "match_draw"
+metadata/_custom_type_script = "uid://botsx3bwjduj2"
+
+[node name="ScenarioRewardSystem" type="Node" parent="ScenarioController" unique_id=2087203092]
+script = ExtResource("6_xm7vx")
+metadata/_custom_type_script = "uid://tn1jug3aq4ll"
+
+[node name="EnemyDamageReward" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=1700495064]
+script = ExtResource("7_ejhqg")
+event_name = "enemy_damage"
+reward = 0.25
+only_once = false
+metadata/_custom_type_script = "uid://b0mpnu83er6il"
+
+[node name="EnemyKillReward" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=1663469701]
+script = ExtResource("7_ejhqg")
+event_name = "enemy_kill"
+reward = 1.0
+only_once = false
+metadata/_custom_type_script = "uid://b0mpnu83er6il"
+
+[node name="TeamAssistReward" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=1369767907]
+script = ExtResource("7_ejhqg")
+event_name = "team_kill_assist"
+reward = 0.2
+only_once = false
+metadata/_custom_type_script = "uid://b0mpnu83er6il"
+
+[node name="DamageTakenPenalty" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=1927531120]
+script = ExtResource("7_ejhqg")
+event_name = "damage_taken"
+reward = -0.15
+only_once = false
+metadata/_custom_type_script = "uid://b0mpnu83er6il"
+
+[node name="DestroyedPenalty" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=1051870801]
+script = ExtResource("7_ejhqg")
+event_name = "destroyed"
+reward = -1.0
+metadata/_custom_type_script = "uid://b0mpnu83er6il"
+
+[node name="WinReward" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=873492580]
+script = ExtResource("7_ejhqg")
+event_name = "team_won"
+reward = 3.0
+metadata/_custom_type_script = "uid://b0mpnu83er6il"
+
+[node name="LossPenalty" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=1163631667]
+script = ExtResource("7_ejhqg")
+event_name = "team_lost"
+reward = -3.0
+metadata/_custom_type_script = "uid://b0mpnu83er6il"
+
+[node name="DrawPenalty" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=89296234]
+script = ExtResource("7_ejhqg")
+event_name = "match_draw"
+reward = -0.25
+metadata/_custom_type_script = "uid://b0mpnu83er6il"
 
 [node name="Environment" type="Node3D" parent="." unique_id=1098615820]
 
 [node name="Floor" type="StaticBody3D" parent="Environment" unique_id=1837786907]
+collision_layer = 2
+collision_mask = 9
 
 [node name="MeshInstance3D" type="MeshInstance3D" parent="Environment/Floor" unique_id=322680629]
 mesh = SubResource("PlaneMesh_cyscs")
@@ -89,6 +194,8 @@ shadow_enabled = true
 environment = SubResource("Environment_2y6o6")
 
 [node name="Walls" type="StaticBody3D" parent="Environment" unique_id=1973456835]
+collision_layer = 2
+collision_mask = 9
 
 [node name="MeshInstance3D" type="MeshInstance3D" parent="Environment/Walls" unique_id=293481788]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.5712748, 0, 0)
@@ -122,93 +229,33 @@ mesh = SubResource("BoxMesh_2y6o6")
 transform = Transform3D(-4.371139e-08, 0, -1, 0, 1, 0, 1, 0, -4.371139e-08, 0.0060658455, 0, -1.5541937)
 shape = SubResource("BoxShape3D_lcct3")
 
-[node name="Obstacles" type="Node" parent="Environment" unique_id=578724054]
-
-[node name="Obstacle" type="StaticBody3D" parent="Environment/Obstacles" unique_id=366725570]
-
-[node name="MeshInstance3D" type="MeshInstance3D" parent="Environment/Obstacles/Obstacle" unique_id=1222232524]
-mesh = SubResource("CylinderMesh_p8j0h")
-
-[node name="CollisionShape3D" type="CollisionShape3D" parent="Environment/Obstacles/Obstacle" unique_id=804377804]
-shape = SubResource("CylinderShape3D_qx68c")
-
-[node name="Obstacle2" type="StaticBody3D" parent="Environment/Obstacles" unique_id=681798040]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.6651534, 0, 0.5406203)
-
-[node name="MeshInstance3D" type="MeshInstance3D" parent="Environment/Obstacles/Obstacle2" unique_id=1796307805]
-mesh = SubResource("CylinderMesh_p8j0h")
-
-[node name="CollisionShape3D" type="CollisionShape3D" parent="Environment/Obstacles/Obstacle2" unique_id=915023252]
-shape = SubResource("CylinderShape3D_qx68c")
-
-[node name="Obstacle3" type="StaticBody3D" parent="Environment/Obstacles" unique_id=1746325169]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.5017418, 0, 0.5406203)
-
-[node name="MeshInstance3D" type="MeshInstance3D" parent="Environment/Obstacles/Obstacle3" unique_id=890515862]
-mesh = SubResource("CylinderMesh_p8j0h")
-
-[node name="CollisionShape3D" type="CollisionShape3D" parent="Environment/Obstacles/Obstacle3" unique_id=1102543673]
-shape = SubResource("CylinderShape3D_qx68c")
-
-[node name="Obstacle4" type="StaticBody3D" parent="Environment/Obstacles" unique_id=468125689]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.6925752, 0, 0.675091)
-
-[node name="MeshInstance3D" type="MeshInstance3D" parent="Environment/Obstacles/Obstacle4" unique_id=1441681266]
-mesh = SubResource("CylinderMesh_p8j0h")
-
-[node name="CollisionShape3D" type="CollisionShape3D" parent="Environment/Obstacles/Obstacle4" unique_id=1651022050]
-shape = SubResource("CylinderShape3D_qx68c")
-
-[node name="Obstacle5" type="StaticBody3D" parent="Environment/Obstacles" unique_id=1686681852]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.0095098, 0, 0.675091)
-
-[node name="MeshInstance3D" type="MeshInstance3D" parent="Environment/Obstacles/Obstacle5" unique_id=1904215353]
-mesh = SubResource("CylinderMesh_p8j0h")
-
-[node name="CollisionShape3D" type="CollisionShape3D" parent="Environment/Obstacles/Obstacle5" unique_id=1564721165]
-shape = SubResource("CylinderShape3D_qx68c")
-
-[node name="Obstacle6" type="StaticBody3D" parent="Environment/Obstacles" unique_id=1060251003]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.49116862, 0, 0.675091)
-
-[node name="MeshInstance3D" type="MeshInstance3D" parent="Environment/Obstacles/Obstacle6" unique_id=1714435723]
-mesh = SubResource("CylinderMesh_p8j0h")
-
-[node name="CollisionShape3D" type="CollisionShape3D" parent="Environment/Obstacles/Obstacle6" unique_id=711854855]
-shape = SubResource("CylinderShape3D_qx68c")
-
-[node name="Obstacle7" type="StaticBody3D" parent="Environment/Obstacles" unique_id=1984063510]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.49116862, 0, 0.858418)
-
-[node name="MeshInstance3D" type="MeshInstance3D" parent="Environment/Obstacles/Obstacle7" unique_id=783181963]
-mesh = SubResource("CylinderMesh_p8j0h")
-
-[node name="CollisionShape3D" type="CollisionShape3D" parent="Environment/Obstacles/Obstacle7" unique_id=1599180213]
-shape = SubResource("CylinderShape3D_qx68c")
+[node name="LayoutContainer" type="Node3D" parent="Environment" unique_id=1603286823]
 
 [node name="Camera3D" type="Camera3D" parent="." unique_id=1398719326]
 transform = Transform3D(0.9997216, 0.016435327, -0.016931614, 0, 0.7175446, 0.6965126, 0.023596598, -0.6963186, 0.7173449, -0.007, 1.954, 1.81)
 
 [node name="Agents" type="Node" parent="." unique_id=1308854801]
 
-[node name="Tank" parent="Agents" unique_id=1089950526 instance=ExtResource("1_eom7a")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.2561896, 0, 0)
-manualControl = false
+[node name="RedTank1" parent="Agents" unique_id=1089950526 node_paths=PackedStringArray("projectile_parent") instance=ExtResource("1_eom7a")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.098996, 0, -1)
+projectile_scene = ExtResource("12_xm7vx")
+projectile_parent = NodePath("../../Projectiles")
 
-[node name="Tank2" parent="Agents" unique_id=2107215311 instance=ExtResource("1_eom7a")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.0731688, 0, 0)
-manualControl = false
+[node name="RedTank2" parent="Agents" unique_id=114299370 node_paths=PackedStringArray("projectile_parent") instance=ExtResource("1_eom7a")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.9330361, 0, 0.3562026)
+projectile_scene = ExtResource("12_xm7vx")
+projectile_parent = NodePath("../../Projectiles")
 
-[node name="Tank3" parent="Agents" unique_id=1970893581 instance=ExtResource("1_eom7a")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.20209265, 0, -0.976848)
-manualControl = false
+[node name="BlueTank1" parent="Agents" unique_id=2107215311 node_paths=PackedStringArray("projectile_parent") instance=ExtResource("1_eom7a")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.6305596, 0, 0.39465392)
+team_id = 1
+projectile_scene = ExtResource("12_xm7vx")
+projectile_parent = NodePath("../../Projectiles")
 
-[node name="Target" type="Area3D" parent="." unique_id=1815520715 groups=["target"]]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.10049996, 1.1670119)
-collision_layer = 2
+[node name="BlueTank2" parent="Agents" unique_id=1568179364 node_paths=PackedStringArray("projectile_parent") instance=ExtResource("1_eom7a")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.7721485, 0, -1.1158298)
+team_id = 1
+projectile_scene = ExtResource("12_xm7vx")
+projectile_parent = NodePath("../../Projectiles")
 
-[node name="MeshInstance3D" type="MeshInstance3D" parent="Target" unique_id=995929452]
-mesh = SubResource("CylinderMesh_eom7a")
-
-[node name="CollisionShape3D" type="CollisionShape3D" parent="Target" unique_id=55847602]
-shape = SubResource("CylinderShape3D_nx8d5")
+[node name="Projectiles" type="Node3D" parent="." unique_id=55041648]

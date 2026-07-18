@@ -4,121 +4,24 @@
 [ext_resource type="Script" uid="uid://byrdvsguqdev3" path="res://scripts/agent/Agent.gd" id="2_k1kma"]
 [ext_resource type="PackedScene" uid="uid://cur0khgnvey27" path="res://agents/Tank/mesh.scn" id="3_k1kma"]
 [ext_resource type="Script" uid="uid://d1xuba84xevcv" path="res://scripts/agent/RewardSystem.gd" id="4_7dpgw"]
+[ext_resource type="Script" uid="uid://bvoj0o4atoby" path="res://scripts/agent/action_space/ContinuousAction.gd" id="5_fpfgf"]
 [ext_resource type="Script" uid="uid://dyq1fjgcu1wqu" path="res://scripts/agent/reward_components/StepPenaltyReward.gd" id="5_y1s7q"]
-[ext_resource type="Script" uid="uid://cmxl6ko0bmgpr" path="res://scripts/agent/reward_components/MovementReward.gd" id="6_g2rcs"]
-[ext_resource type="Script" uid="uid://bhw2062f0e3vg" path="res://scripts/agent/reward_components/StuckPenaltyReward.gd" id="7_5ne7s"]
-[ext_resource type="Script" uid="uid://b1oe6cauwxkrf" path="res://scripts/agent/reward_components/ObservationThresholdReward.gd" id="8_e2dfk"]
-[ext_resource type="Script" path="res://scripts/agent/action_space/ActionSpace.gd" id="9_action_space"]
-[ext_resource type="Script" path="res://scripts/agent/action_space/DiscreteActionSet.gd" id="10_discrete_action"]
-[ext_resource type="Script" path="res://scripts/agent/observations/ObservationSystem.gd" id="11_observation_system"]
-[ext_resource type="Script" path="res://scripts/agent/observations/MethodObservationSource.gd" id="12_method_observation"]
-[ext_resource type="Script" path="res://scripts/agent/observations/TargetRaycastObservationSource.gd" id="13_target_observation"]
-[ext_resource type="Script" path="res://scripts/agent/observations/RaycastObservationSource.gd" id="14_raycast_observation"]
+[ext_resource type="Script" uid="uid://cp4g4r5f7n1kx" path="res://scripts/agent/action_space/DiscreteAction.gd" id="7_udsel"]
+[ext_resource type="Script" uid="uid://b8upnu2gpbkpl" path="res://scripts/agent/observations/BodySpeedObservationSource.gd" id="9_7dx2u"]
+[ext_resource type="Script" uid="uid://bjhxcss2ima54" path="res://scripts/agent/action_space/ActionSpace.gd" id="9_action_space"]
+[ext_resource type="Script" uid="uid://c3v2k8xuahe2j" path="res://scripts/agent/action_space/DiscreteActionSet.gd" id="10_discrete_action"]
+[ext_resource type="Script" uid="uid://clefx53jebtj3" path="res://scripts/agent/observations/ObservationSystem.gd" id="11_observation_system"]
+[ext_resource type="Script" uid="uid://dqxk6hbd17ub7" path="res://scripts/agent/observations/TeamRaycastObservationSource.gd" id="12_ejdby"]
+[ext_resource type="Script" uid="uid://cys7i0vchrdlo" path="res://scripts/agent/observations/MethodObservationSource.gd" id="12_method_observation"]
+[ext_resource type="Script" uid="uid://twqtydrv0cm4" path="res://scripts/agent/observations/RaycastObservationSource.gd" id="14_raycast_observation"]
+[ext_resource type="Script" uid="uid://dheahoedootoj" path="res://scripts/agent/reward_components/EventReward.gd" id="15_uj3st"]
 
 [sub_resource type="SphereShape3D" id="SphereShape3D_f2qhv"]
 radius = 0.057358228
 
-[node name="Tank" type="CharacterBody3D" unique_id=1089950526]
+[node name="TankBattleAgent" type="CharacterBody3D" unique_id=1089950526]
+collision_mask = 3
 script = ExtResource("1_jgq1b")
-
-[node name="Agent" type="Node" parent="." unique_id=905330640]
-script = ExtResource("2_k1kma")
-metadata/_custom_type_script = "uid://byrdvsguqdev3"
-
-[node name="ActionSpace" type="Node" parent="Agent"]
-script = ExtResource("9_action_space")
-
-[node name="DiscreteActions" type="Node" parent="Agent/ActionSpace"]
-script = ExtResource("10_discrete_action")
-names = PackedStringArray("idle", "move_forward", "move_backward", "turn_right", "turn_left", "forward_right", "forward_left", "backward_right", "backward_left")
-
-[node name="ObservationSystem" type="Node" parent="Agent"]
-script = ExtResource("11_observation_system")
-
-[node name="Position" type="Node" parent="Agent/ObservationSystem"]
-script = ExtResource("12_method_observation")
-observation_name = "position"
-method_name = "_get_position_observation"
-
-[node name="Forward" type="Node" parent="Agent/ObservationSystem"]
-script = ExtResource("12_method_observation")
-observation_name = "forward"
-method_name = "_get_forward_observation"
-
-[node name="LocalVelocity" type="Node" parent="Agent/ObservationSystem"]
-script = ExtResource("12_method_observation")
-observation_name = "local_velocity"
-method_name = "_get_local_velocity_observation"
-
-[node name="MoveInput" type="Node" parent="Agent/ObservationSystem"]
-script = ExtResource("12_method_observation")
-observation_name = "move_input"
-method_name = "_get_move_input"
-
-[node name="TurnInput" type="Node" parent="Agent/ObservationSystem"]
-script = ExtResource("12_method_observation")
-observation_name = "turn_input"
-method_name = "_get_turn_input"
-
-[node name="TargetSensors" type="Node" parent="Agent/ObservationSystem"]
-script = ExtResource("13_target_observation")
-signal_observations = {
-"target_signal_left": "ViewSensor/LineOfViewSensorLeft",
-"target_signal_center": "ViewSensor/LineOfViewSensor",
-"target_signal_right": "ViewSensor/LineOfViewSensorRight"
-}
-
-[node name="Raycasts" type="Node" parent="Agent/ObservationSystem"]
-script = ExtResource("14_raycast_observation")
-root_path = NodePath("../../..")
-update_debug_colors = false
-
-[node name="RewardSystem" type="Node" parent="Agent" unique_id=625923553]
-script = ExtResource("4_7dpgw")
-
-[node name="StepPenalty" type="Node" parent="Agent/RewardSystem" unique_id=1644918576]
-script = ExtResource("5_y1s7q")
-term_name = "step"
-
-[node name="Movement" type="Node" parent="Agent/RewardSystem" unique_id=1416979168]
-script = ExtResource("6_g2rcs")
-term_name = "movement"
-
-[node name="StuckPenalty" type="Node" parent="Agent/RewardSystem" unique_id=191633301]
-script = ExtResource("7_5ne7s")
-term_name = "stuck"
-
-[node name="FrontObstaclePenalty" type="Node" parent="Agent/RewardSystem" unique_id=315473332]
-script = ExtResource("8_e2dfk")
-observation_prefix = "ray_frontobstaclesensors"
-gate_observation = "move_input"
-gate_min_value = 0.2
-term_name = "front_obstacle"
-
-[node name="RearObstaclePenalty" type="Node" parent="Agent/RewardSystem" unique_id=487977916]
-script = ExtResource("8_e2dfk")
-observation_prefix = "ray_rearobstaclesensors"
-gate_observation = "move_input"
-gate_max_value = -0.2
-term_name = "rear_obstacle"
-
-[node name="TargetVisibleReward" type="Node" parent="Agent/RewardSystem" unique_id=79120644]
-script = ExtResource("8_e2dfk")
-observation_prefix = "target_visible"
-value = 0.001
-threshold = 0.5
-mode = 1
-term_name = "target_visible"
-metadata/_custom_type_script = "uid://b1oe6cauwxkrf"
-
-[node name="TargetCenterSignalReward" type="Node" parent="Agent/RewardSystem" unique_id=89141868]
-script = ExtResource("8_e2dfk")
-observation_prefix = "target_signal_center"
-value = 0.005
-threshold = 0.05
-mode = 1
-term_name = "target_signal_center"
-metadata/_custom_type_script = "uid://b1oe6cauwxkrf"
 
 [node name="Mesh" parent="." unique_id=474342407 instance=ExtResource("3_k1kma")]
 transform = Transform3D(-8.7422775e-10, 0, -0.02, 0, 0.02, 0, 0.02, 0, -8.7422775e-10, 0, 0, 0)
@@ -128,91 +31,171 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.058210254, 0)
 shape = SubResource("SphereShape3D_f2qhv")
 debug_color = Color(0.678012, 0.50533205, 0, 0.41960785)
 
-[node name="FrontObstacleSensors" type="Node3D" parent="." unique_id=1339399316]
+[node name="Muzzle" type="Marker3D" parent="." unique_id=941893958]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.0915532, 0.06837037)
+
+[node name="ObstacleSensors" type="Node3D" parent="." unique_id=1339399316]
 transform = Transform3D(-4.371139e-08, 0, -1, 0, 1, 0, 1, 0, -4.371139e-08, 0, 0.030419849, 0)
 
-[node name="ObstacleSensor" type="RayCast3D" parent="FrontObstacleSensors" unique_id=1733503939]
-target_position = Vector3(0.15, 0, 0)
+[node name="FrontLeft" type="RayCast3D" parent="ObstacleSensors" unique_id=941128796]
+transform = Transform3D(0.8660254, 0, 0.5, 0, 1, 0, -0.5, 0, 0.8660254, 0, 0, 0)
+target_position = Vector3(0.12, 0, 0)
+collision_mask = 3
 
-[node name="ObstacleSensor2" type="RayCast3D" parent="FrontObstacleSensors" unique_id=1230621601]
-transform = Transform3D(0.9659258, 0, 0.25881904, 0, 1, 0, -0.25881904, 0, 0.9659258, 0, 0, 0)
-target_position = Vector3(0.15, 0, 0)
+[node name="Front" type="RayCast3D" parent="ObstacleSensors" unique_id=1733503939]
+target_position = Vector3(0.12, 0, 0)
+collision_mask = 3
 
-[node name="ObstacleSensor3" type="RayCast3D" parent="FrontObstacleSensors" unique_id=1297205345]
-transform = Transform3D(0.8660255, 0, 0.50000006, 0, 1, 0, -0.50000006, 0, 0.8660255, 0, 0, 0)
-target_position = Vector3(0.15, 0, 0)
+[node name="FrontRight" type="RayCast3D" parent="ObstacleSensors" unique_id=502421373]
+transform = Transform3D(0.8660254, 0, -0.5, 0, 1, 0, 0.5, 0, 0.8660254, 0, 0, 0)
+target_position = Vector3(0.12, 0, 0)
+collision_mask = 3
 
-[node name="ObstacleSensor4" type="RayCast3D" parent="FrontObstacleSensors" unique_id=1981301125]
-transform = Transform3D(0.70710677, 0, 0.7071069, 0, 1, 0, -0.7071069, 0, 0.70710677, 0, 0, 0)
-target_position = Vector3(0.15, 0, 0)
+[node name="Left" type="RayCast3D" parent="ObstacleSensors" unique_id=1432998791]
+transform = Transform3D(-1.3909066e-08, 0, 1, 0, 1, 0, -1, 0, -1.3909066e-08, 0, 0, 0)
+target_position = Vector3(0.12, 0, 0)
+collision_mask = 3
 
-[node name="ObstacleSensor5" type="RayCast3D" parent="FrontObstacleSensors" unique_id=1894330001]
-transform = Transform3D(0.70710695, 0, -0.7071067, 0, 1, 0, 0.7071067, 0, 0.70710695, 0, 0, 0)
-target_position = Vector3(0.15, 0, 0)
+[node name="Right" type="RayCast3D" parent="ObstacleSensors" unique_id=1018110499]
+transform = Transform3D(-7.549791e-08, 0, -0.99999994, 0, 1, 0, 0.99999994, 0, -7.549791e-08, 0, 0, 0)
+target_position = Vector3(0.12, 0, 0)
+collision_mask = 3
 
-[node name="ObstacleSensor6" type="RayCast3D" parent="FrontObstacleSensors" unique_id=916961603]
-transform = Transform3D(0.86602545, 0, -0.49999997, 0, 1, 0, 0.49999997, 0, 0.86602545, 0, 0, 0)
-target_position = Vector3(0.15, 0, 0)
+[node name="RearLeft" type="RayCast3D" parent="ObstacleSensors" unique_id=1626183098]
+transform = Transform3D(-0.8660252, 0, 0.50000006, 0, 1, 0, -0.50000006, 0, -0.8660252, 0, 0, 0)
+target_position = Vector3(0.12, 0, 0)
+collision_mask = 3
 
-[node name="ObstacleSensor7" type="RayCast3D" parent="FrontObstacleSensors" unique_id=1400208354]
-transform = Transform3D(0.9659258, 0, -0.258819, 0, 1, 0, 0.258819, 0, 0.9659258, 0, 0, 0)
-target_position = Vector3(0.15, 0, 0)
+[node name="RearRight" type="RayCast3D" parent="ObstacleSensors" unique_id=2067305883]
+transform = Transform3D(-0.86602545, 0, -0.5, 0, 1, 0, 0.5, 0, -0.86602545, 0, 0, 0)
+target_position = Vector3(0.12, 0, 0)
+collision_mask = 3
 
-[node name="RearObstacleSensors" type="Node3D" parent="." unique_id=1001328067]
-transform = Transform3D(1.3113416e-07, 0, 1, 0, 1, 0, -1, 0, 1.3113416e-07, 0, 0.030419849, 0)
+[node name="VisionSensors" type="Node3D" parent="." unique_id=1045978904]
 
-[node name="ObstacleSensor" type="RayCast3D" parent="RearObstacleSensors" unique_id=1949148438]
-target_position = Vector3(0.15, 0, 0)
-
-[node name="ObstacleSensor2" type="RayCast3D" parent="RearObstacleSensors" unique_id=1755131588]
-transform = Transform3D(0.9659258, 0, 0.25881904, 0, 1, 0, -0.25881904, 0, 0.9659258, 0, 0, 0)
-target_position = Vector3(0.15, 0, 0)
-
-[node name="ObstacleSensor3" type="RayCast3D" parent="RearObstacleSensors" unique_id=1861118699]
-transform = Transform3D(0.8660255, 0, 0.50000006, 0, 1, 0, -0.50000006, 0, 0.8660255, 0, 0, 0)
-target_position = Vector3(0.15, 0, 0)
-
-[node name="ObstacleSensor4" type="RayCast3D" parent="RearObstacleSensors" unique_id=2080961512]
-transform = Transform3D(0.70710677, 0, 0.7071069, 0, 1, 0, -0.7071069, 0, 0.70710677, 0, 0, 0)
-target_position = Vector3(0.15, 0, 0)
-
-[node name="ObstacleSensor5" type="RayCast3D" parent="RearObstacleSensors" unique_id=1020046346]
-transform = Transform3D(0.70710695, 0, -0.7071067, 0, 1, 0, 0.7071067, 0, 0.70710695, 0, 0, 0)
-target_position = Vector3(0.15, 0, 0)
-
-[node name="ObstacleSensor6" type="RayCast3D" parent="RearObstacleSensors" unique_id=1961348712]
-transform = Transform3D(0.86602545, 0, -0.49999997, 0, 1, 0, 0.49999997, 0, 0.86602545, 0, 0, 0)
-target_position = Vector3(0.15, 0, 0)
-
-[node name="ObstacleSensor7" type="RayCast3D" parent="RearObstacleSensors" unique_id=807425405]
-transform = Transform3D(0.9659258, 0, -0.258819, 0, 1, 0, 0.258819, 0, 0.9659258, 0, 0, 0)
-target_position = Vector3(0.15, 0, 0)
-
-[node name="ViewSensor" type="Node3D" parent="." unique_id=1045978904]
-
-[node name="LineOfSightSensor" type="RayCast3D" parent="ViewSensor" unique_id=11835788]
-transform = Transform3D(-4.371139e-08, 0, -1, 0, 1, 0, 1, 0, -4.371139e-08, 0, 0.09006241, 0)
-target_position = Vector3(0.5, 0, 0)
-collide_with_areas = true
-debug_shape_custom_color = Color(0.8066953, 0, 0.18377393, 1)
-
-[node name="LineOfViewSensor" type="RayCast3D" parent="ViewSensor" unique_id=1026499567]
+[node name="VisionCenter" type="RayCast3D" parent="VisionSensors" unique_id=1026499567]
 transform = Transform3D(-4.371139e-08, 0, -1, 0, 1, 0, 1, 0, -4.371139e-08, 0, 0.030168697, 0)
 target_position = Vector3(1, 0, 0)
 collision_mask = 3
 collide_with_areas = true
 debug_shape_custom_color = Color(0.7290001, 0, 0.81, 1)
 
-[node name="LineOfViewSensorRight" type="RayCast3D" parent="ViewSensor" unique_id=721697063]
+[node name="VisionRight" type="RayCast3D" parent="VisionSensors" unique_id=721697063]
 transform = Transform3D(-0.25881907, 0, -0.9659258, 0, 1, 0, 0.9659258, 0, -0.25881907, 0, 0.030168697, 0)
 target_position = Vector3(1, 0, 0)
 collision_mask = 3
 collide_with_areas = true
 debug_shape_custom_color = Color(0.7290001, 0, 0.81, 1)
 
-[node name="LineOfViewSensorLeft" type="RayCast3D" parent="ViewSensor" unique_id=1423975790]
+[node name="VisionLeft" type="RayCast3D" parent="VisionSensors" unique_id=1423975790]
 transform = Transform3D(0.258819, 0, -0.9659258, 0, 1, 0, 0.9659258, 0, 0.258819, 0, 0.030168697, 0)
 target_position = Vector3(1, 0, 0)
 collision_mask = 3
 collide_with_areas = true
 debug_shape_custom_color = Color(0.7290001, 0, 0.81, 1)
+
+[node name="Agent" type="Node" parent="." unique_id=905330640]
+script = ExtResource("2_k1kma")
+metadata/_custom_type_script = "uid://byrdvsguqdev3"
+
+[node name="ActionSpace" type="Node" parent="Agent" unique_id=1186135639]
+script = ExtResource("9_action_space")
+
+[node name="Movement" type="Node" parent="Agent/ActionSpace" unique_id=429512418]
+script = ExtResource("5_fpfgf")
+action_name = "movement"
+size = 2
+metadata/_custom_type_script = "uid://bvoj0o4atoby"
+
+[node name="Weapon" type="Node" parent="Agent/ActionSpace" unique_id=1883863516]
+script = ExtResource("10_discrete_action")
+action_name = "weapon"
+metadata/_custom_type_script = "uid://c3v2k8xuahe2j"
+
+[node name="HoldFire" type="Node" parent="Agent/ActionSpace/Weapon" unique_id=1344201933]
+script = ExtResource("7_udsel")
+action_name = "hold_fire"
+method_name = &"hold_fire"
+metadata/_custom_type_script = "uid://cp4g4r5f7n1kx"
+
+[node name="Fire" type="Node" parent="Agent/ActionSpace/Weapon" unique_id=1369259060]
+script = ExtResource("7_udsel")
+action_name = "fire"
+method_name = &"request_fire"
+metadata/_custom_type_script = "uid://cp4g4r5f7n1kx"
+
+[node name="ObservationSystem" type="Node" parent="Agent" unique_id=1523281255]
+script = ExtResource("11_observation_system")
+
+[node name="BodySpeed" type="Node" parent="Agent/ObservationSystem" unique_id=972084368]
+script = ExtResource("9_7dx2u")
+speed_scale = 12.0
+metadata/_custom_type_script = "uid://b8upnu2gpbkpl"
+
+[node name="Throttle" type="Node" parent="Agent/ObservationSystem" unique_id=288303822]
+script = ExtResource("12_method_observation")
+observation_name = "throttle_input"
+method_name = &"get_control_input"
+bind_string_arg = "throttle_input"
+metadata/_custom_type_script = "uid://cys7i0vchrdlo"
+
+[node name="Steering" type="Node" parent="Agent/ObservationSystem" unique_id=361246916]
+script = ExtResource("12_method_observation")
+observation_name = "rotation_input"
+method_name = &"get_control_input"
+bind_string_arg = "rotation_input"
+metadata/_custom_type_script = "uid://cys7i0vchrdlo"
+
+[node name="Health" type="Node" parent="Agent/ObservationSystem" unique_id=909852189]
+script = ExtResource("12_method_observation")
+observation_name = "health"
+method_name = &"get_health_observation"
+metadata/_custom_type_script = "uid://cys7i0vchrdlo"
+
+[node name="ReloadReady" type="Node" parent="Agent/ObservationSystem" unique_id=2147213616]
+script = ExtResource("12_method_observation")
+observation_name = "reload_ready"
+method_name = &"get_reload_ready_observation"
+metadata/_custom_type_script = "uid://cys7i0vchrdlo"
+
+[node name="Alive" type="Node" parent="Agent/ObservationSystem" unique_id=1075712229]
+script = ExtResource("12_method_observation")
+observation_name = "alive"
+method_name = &"get_alive_observation"
+metadata/_custom_type_script = "uid://cys7i0vchrdlo"
+
+[node name="Obstacles" type="Node" parent="Agent/ObservationSystem" unique_id=1817991735]
+script = ExtResource("14_raycast_observation")
+root_path = NodePath("../../../ObstacleSensors")
+observation_prefix = "obstacle"
+metadata/_custom_type_script = "uid://twqtydrv0cm4"
+
+[node name="TeamVision" type="Node" parent="Agent/ObservationSystem" unique_id=1397064296]
+script = ExtResource("12_ejdby")
+enemy_signal_observations = {
+"enemy_center": "VisionSensors/VisionCenter",
+"enemy_left": "VisionSensors/VisionLeft",
+"enemy_right": "VisionSensors/VisionRight"
+}
+ally_signal_observations = {
+"ally_center": "VisionSensors/VisionCenter",
+"ally_left": "VisionSensors/VisionLeft",
+"ally_right": "VisionSensors/VisionRight"
+}
+metadata/_custom_type_script = "uid://dqxk6hbd17ub7"
+
+[node name="RewardSystem" type="Node" parent="Agent" unique_id=625923553]
+script = ExtResource("4_7dpgw")
+
+[node name="TimePenality" type="Node" parent="Agent/RewardSystem" unique_id=800745542]
+script = ExtResource("5_y1s7q")
+penalty = -0.0005
+term_name = "time"
+metadata/_custom_type_script = "uid://dyq1fjgcu1wqu"
+
+[node name="InvalidFirePenalty" type="Node" parent="Agent/RewardSystem" unique_id=1731417114]
+script = ExtResource("15_uj3st")
+event_name = "invalid_fire"
+scale = -0.01
+term_name = "invalid_fire"
+metadata/_custom_type_script = "uid://dheahoedootoj"

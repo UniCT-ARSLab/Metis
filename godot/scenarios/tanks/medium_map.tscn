@@ -1,0 +1,67 @@
+[gd_scene format=3 uid="uid://dwvi2fqy3u0a7"]
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_8n3vy"]
+top_radius = 0.15
+bottom_radius = 0.15
+height = 0.5
+
+[sub_resource type="CylinderShape3D" id="CylinderShape3D_qv5wp"]
+height = 0.5
+radius = 0.15
+
+[node name="Medium" type="Node3D" unique_id=19630636]
+
+[node name="Obstacle" type="StaticBody3D" parent="." unique_id=132546432]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.1530366, 0, -0.82870007)
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Obstacle" unique_id=2058784790]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.25049984, 0)
+mesh = SubResource("CylinderMesh_8n3vy")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Obstacle" unique_id=1171809544]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.25049984, 0)
+shape = SubResource("CylinderShape3D_qv5wp")
+
+[node name="Obstacle2" type="StaticBody3D" parent="." unique_id=1564136202]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.1530366, 0, 0.51247096)
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Obstacle2" unique_id=1596882686]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.25049984, 0)
+mesh = SubResource("CylinderMesh_8n3vy")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Obstacle2" unique_id=2143844737]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.25049984, 0)
+shape = SubResource("CylinderShape3D_qv5wp")
+
+[node name="Obstacle3" type="StaticBody3D" parent="." unique_id=401289957]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.0666013, 0, 0.51247096)
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Obstacle3" unique_id=1066573724]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.25049984, 0)
+mesh = SubResource("CylinderMesh_8n3vy")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Obstacle3" unique_id=1212865721]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.25049984, 0)
+shape = SubResource("CylinderShape3D_qv5wp")
+
+[node name="Obstacle4" type="StaticBody3D" parent="." unique_id=991499863]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.0666013, 0, -0.99922657)
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Obstacle4" unique_id=651848656]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.25049984, 0)
+mesh = SubResource("CylinderMesh_8n3vy")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Obstacle4" unique_id=1353286397]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.25049984, 0)
+shape = SubResource("CylinderShape3D_qv5wp")
+
+[node name="Obstacle5" type="StaticBody3D" parent="." unique_id=1549430314]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.050012976, 0, -0.07405555)
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Obstacle5" unique_id=837969225]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.25049984, 0)
+mesh = SubResource("CylinderMesh_8n3vy")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Obstacle5" unique_id=1504540305]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.25049984, 0)
+shape = SubResource("CylinderShape3D_qv5wp")

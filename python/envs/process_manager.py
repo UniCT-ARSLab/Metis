@@ -1,8 +1,98 @@
 import os
+import platform
+import shlex
 import socket
 import subprocess
 import time
 from pathlib import Path
+
+
+_GPU_OFFLOAD_ENV_KEYS = {
+    "DRI_PRIME",
+    "__GLX_VENDOR_LIBRARY_NAME",
+    "__NV_PRIME_RENDER_OFFLOAD",
+    "__VK_LAYER_NV_optimus",
+}
+
+
+def _is_software_opengl(glxinfo_output):
+    output = str(glxinfo_output).lower()
+    return any(
+        marker in output
+        for marker in ("llvmpipe", "softpipe", "software rasterizer", "accelerated: no")
+    )
+
+
+def _parse_switcheroo_offload_environment(switcheroo_output):
+    blocks = []
+    current = []
+    for line in str(switcheroo_output).splitlines():
+        if line.startswith("Device:") and current:
+            blocks.append(current)
+            current = []
+        current.append(line)
+    if current:
+        blocks.append(current)
+
+    for block in blocks:
+        is_default = any(
+            line.strip().lower().startswith("default:")
+            and line.split(":", 1)[1].strip().lower() == "yes"
+            for line in block
+        )
+        if is_default:
+            continue
+        for line in block:
+            stripped = line.strip()
+            if not stripped.startswith("Environment:"):
+                continue
+            result = {}
+            for assignment in shlex.split(stripped.removeprefix("Environment:").strip()):
+                key, separator, value = assignment.partition("=")
+                if separator and key in _GPU_OFFLOAD_ENV_KEYS:
+                    result[key] = value
+            if result:
+                return result
+    return {}
+
+
+def _light_gpu_fallback_environment(system_name=None, command_runner=subprocess.run):
+    """Select a discrete Linux GPU only when default OpenGL is software-rendered."""
+    system_name = system_name or platform.system()
+    if system_name != "Linux" or not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return {}
+    if os.environ.get("LIBGL_ALWAYS_SOFTWARE") == "1":
+        return {}
+    if any(os.environ.get(key) for key in _GPU_OFFLOAD_ENV_KEYS):
+        return {}
+
+    try:
+        glxinfo = command_runner(
+            ["glxinfo", "-B"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return {}
+    glxinfo_output = (glxinfo.stdout or "") + (glxinfo.stderr or "")
+    if glxinfo.returncode != 0 or not _is_software_opengl(glxinfo_output):
+        return {}
+
+    try:
+        switcheroo = command_runner(
+            ["switcherooctl", "list"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return {}
+    if switcheroo.returncode != 0:
+        return {}
+    return _parse_switcheroo_offload_environment(switcheroo.stdout)
 
 
 def godot_render_args(render_mode):
@@ -62,6 +152,15 @@ class GodotProcessManager:
     ):
         user_args = list(user_args or [])
         rendered_count = len(ports) if render_env_count is None else max(0, int(render_env_count))
+        light_gpu_fallback_env = {}
+        if not headless and rendered_count > 0 and render_mode == "light-gpu":
+            light_gpu_fallback_env = _light_gpu_fallback_environment()
+            if light_gpu_fallback_env:
+                print(
+                    "light-gpu: software OpenGL detected; applying discrete GPU offload "
+                    f"({', '.join(sorted(light_gpu_fallback_env))}).",
+                    flush=True,
+                )
 
         for env_index, port in enumerate(ports):
             instance_headless = bool(headless) or env_index >= rendered_count
@@ -73,6 +172,8 @@ class GodotProcessManager:
                     args_prefix += ["--fixed-fps", str(int(fixed_fps))]
             else:
                 render_flags, render_env = godot_render_args(render_mode)
+                if render_mode == "light-gpu" and light_gpu_fallback_env:
+                    render_env.update(light_gpu_fallback_env)
                 args_prefix += render_flags
                 if render_env:
                     proc_env = dict(os.environ)

@@ -301,7 +301,7 @@ lasciare a Godot durante il training:
 
 | Valore | Comportamento | Quando usarlo |
 |---|---|---|
-| `light-gpu` | OpenGL compatibility | default del training; una preview leggera che contende poca GPU a TensorFlow |
+| `light-gpu` | OpenGL compatibility con fallback PRIME | default del training; se Linux ricade su llvmpipe, prova automaticamente la GPU discreta esposta da `switcherooctl` |
 | `project` | usa il renderer configurato nel progetto Godot | quando vuoi vedere lo scenario esattamente come e' stato progettato |
 | `cpu` | OpenGL software tramite Mesa llvmpipe | per liberare del tutto la GPU, accettando piu' carico CPU e meno FPS |
 | `gpu` | Vulkan Forward+ | per controllare la resa completa; in genere non serve durante un training |
@@ -318,7 +318,8 @@ il renderer leggero:
 la scelta si applica soltanto alle finestre effettivamente renderizzate: gli altri
 processi continuano senza interfaccia grafica. La modalita' `cpu` dipende da Mesa ed e'
 pensata soprattutto per Linux; se il driver software non e' disponibile conviene usare
-`light-gpu`.
+`light-gpu`. Il fallback di `light-gpu` non viene applicato quando OpenGL e' gia'
+accelerato o quando l'utente ha impostato esplicitamente variabili PRIME/DRI.
 
 ## Multi-agent e self-play
 

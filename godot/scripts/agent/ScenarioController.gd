@@ -249,8 +249,8 @@ func step(actions:Variant):
 	
 
 func reset_episode_with_request(request:Dictionary):
-	var seed := int(request.get("seed", 0))
-	return await reset_episode(seed)
+	var _seed := int(request.get("seed", 0))
+	return await reset_episode(_seed)
 
 
 func configure(config:Dictionary) -> Dictionary:
@@ -306,7 +306,7 @@ func configure(config:Dictionary) -> Dictionary:
 	}
 
 
-func reset_episode(seed := 0):
+func reset_episode(_seed := 0):
 	_refresh_agents()
 	_scenario_reward_system = get_node_or_null(scenario_reward_system_path)
 	_progress_provider = get_node_or_null(progress_provider_path)
@@ -315,7 +315,7 @@ func reset_episode(seed := 0):
 	_last_reset_info.clear()
 	_done_agents.clear()
 	_cached_done_step_results.clear()
-	episode_reset_started.emit(seed)
+	episode_reset_started.emit(_seed)
 	if _scenario_reward_system != null and _scenario_reward_system.has_method("reset_rewards"):
 		_scenario_reward_system.reset_rewards()
 	if _progress_provider != null and _progress_provider.has_method("reset_provider"):
@@ -324,12 +324,12 @@ func reset_episode(seed := 0):
 		_event_system.reset_events()
 
 	var shared_rng := RandomNumberGenerator.new()
-	shared_rng.seed = int(seed)
+	shared_rng.seed = int(_seed)
 
 	var channels := []
 	for agent in _agents:
 		var agent_id := _agent_id(agent)
-		var rng := _reset_rng_for_agent(int(seed), agent_id) if use_agent_specific_reset_seed else shared_rng
+		var rng := _reset_rng_for_agent(int(_seed), agent_id) if use_agent_specific_reset_seed else shared_rng
 		
 		_done_agents[agent_id] = false
 
@@ -362,7 +362,7 @@ func reset_episode(seed := 0):
 	for agent in _agents:
 		channels.append(_build_agent_reset_result(agent))
 	_update_current_agent_camera()
-	episode_reset_completed.emit(seed)
+	episode_reset_completed.emit(_seed)
 	
 	if channels.size() == 1:
 		var single: Dictionary = channels[0].duplicate(true)
@@ -616,9 +616,9 @@ func _build_reset_transform(agent_id:String, original_transform:Variant, rng:Ran
 	_last_reset_info[agent_id] = reset_info
 	return reset_transform
 
-func _reset_rng_for_agent(seed:int, agent_id:String) -> RandomNumberGenerator:
+func _reset_rng_for_agent(_seed:int, agent_id:String) -> RandomNumberGenerator:
 	var rng := RandomNumberGenerator.new()
-	var mixed_seed := int(seed) & 0x7fffffff
+	var mixed_seed := int(_seed) & 0x7fffffff
 	for idx in range(agent_id.length()):
 		mixed_seed = int((mixed_seed * 1103515245 + agent_id.unicode_at(idx) + 12345) & 0x7fffffff)
 	rng.seed = mixed_seed

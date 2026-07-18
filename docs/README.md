@@ -69,7 +69,9 @@ Durante il training le finestre Godot possono usare il renderer del progetto, Op
 leggero, rendering software su CPU oppure Vulkan Forward+. La scelta avviene con
 `--render-mode`; il default `light-gpu` lascia piu' risorse al learner. L'opzione conta
 solo per le istanze visibili e puo' essere combinata con `--render-env-count` per
-mostrare una sola preview anche quando gli environment sono molti. La sezione
+mostrare una sola preview anche quando gli environment sono molti. Su Linux, se
+OpenGL ricade su `llvmpipe`, questa modalita' prova automaticamente la GPU discreta
+indicata da `switcherooctl`. La sezione
 [Uno o molti environment](../README.md#uno-o-molti-environment) contiene la tabella
 completa e un esempio.
 

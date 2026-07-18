@@ -1,77 +1,79 @@
-# Tutorial Metis: Tanks 2v2 multi-agent con azioni ibride
+# Tanks 2v2: multi-agent con azioni ibride
 
-Questo tutorial rifonda lo scenario Tanks come arena arcade 2v2. Due squadre, rossa e
-blu, esplorano una mappa sconosciuta, evitano muri e ostacoli tramite sensori locali e
-sparano missili quando trovano un avversario.
+In questo tutorial costruiamo uno scenario arcade 3D con due squadre di carri armati.
+Ogni carro esplora una mappa sconosciuta, evita gli ostacoli, riconosce alleati e nemici
+attraverso RayCast e decide quando sparare.
 
-Non riutilizziamo il vecchio `scenarios/tanks/scenario_controller.gd`: contiene bridge,
-reward e reset specifici ormai sostituiti dal framework generico. Il nuovo scenario
-usa `ScenarioController.gd`, `Agent`, `ObservationSystem`, `ScenarioEventSystem` e
-`ScenarioRewardSystem`.
+L'esempio serve anche a mostrare il contratto ibrido di Metis:
 
-## 1. Cosa deve imparare la policy
+- movimento e rotazione sono azioni continue;
+- `hold_fire` e `fire` sono azioni discrete;
+- tutti i carri condividono la stessa policy PPO;
+- reward e terminalita' restano separate per agente;
+- il `ScenarioController` e il bridge sono quelli generici del framework.
 
-Ogni carro deve imparare contemporaneamente a:
+Il progetto contiene gia' l'implementazione descritta nel tutorial. I file reali sono:
 
-1. accelerare, frenare o arretrare;
-2. ruotare senza urtare gli ostacoli;
-3. esplorare senza conoscere la mappa;
+```text
+res://agents/Tank/tank.tscn
+res://agents/Tank/tank.gd
+res://agents/Tank/mesh.scn
+res://scenarios/tanks/tanks_scenario.tscn
+res://scenarios/tanks/tanks_scenario.gd
+res://scenarios/tanks/tank_missile.tscn
+res://scenarios/tanks/tank_missile.gd
+res://scenarios/tanks/easy_map.tscn
+res://scenarios/tanks/medium_map.tscn
+res://scenarios/tanks/hard_map.tscn
+```
+
+Non serve piu' il vecchio `res://scenarios/tanks/scenario_controller.gd`: la scena usa
+`res://scripts/agent/ScenarioController.gd` e mantiene in `tanks_scenario.gd` soltanto
+le regole proprie della battaglia.
+
+
+## 1. Definire il compito
+
+Ogni carro deve imparare a:
+
+1. accelerare, frenare e ruotare;
+2. esplorare senza conoscere coordinate o layout;
+3. evitare muri e altri carri;
 4. distinguere alleati e nemici visibili;
-5. allineare il cannone con un nemico;
-6. scegliere quando sparare;
-7. contribuire alla vittoria della squadra.
-
-Non forniamo Path3D, coordinate del nemico, waypoint o una griglia della mappa. Una
-parete interrompe il RayCast: il carro non puo' vedere attraverso gli ostacoli.
-
-## 2. Multi-agent e policy condivisa
+5. sparare soltanto quando il tiro ha senso;
+6. sopravvivere e contribuire alla vittoria della squadra.
 
 La prima versione usa quattro agenti:
 
 ```text
-RedTank1   team_id=0
-RedTank2   team_id=0
-BlueTank1  team_id=1
-BlueTank2  team_id=1
+RedTank1    team_id=0
+RedTank2    team_id=0
+BlueTank1   team_id=1
+BlueTank2   team_id=1
 ```
 
-Sono quattro istanze della stessa scena e usano una sola policy PPO condivisa. Il
-colore e il numero della squadra non entrano nelle observation. I sensori restituiscono
-soltanto relazioni `ally` o `enemy`, quindi la policy funziona allo stesso modo per
-rosso e blu.
+Sono quattro istanze della stessa scena. Il colore e il numero della squadra non
+entrano nelle observation: i sensori restituiscono relazioni locali come `ally` ed
+`enemy`. La stessa policy puo' quindi controllare entrambi i lati.
 
-Con quattro env otteniamo sedici traiettorie contemporanee:
+Con quattro environment il learner raccoglie fino a sedici traiettorie:
 
 ```text
-4 env x 4 carri = 16 agenti, 1 modello condiviso
+4 environment x 4 agenti = 16 canali, 1 policy condivisa
 ```
 
-Questa e' una forma di self-play simultaneo. Con `--opponent-pool` il trainer mantiene
-sempre una sola policy allenabile, ma l'altra squadra puo' eseguire una snapshot
-storica congelata. Due policy diverse entrambe allenabili richiederebbero invece un
-trainer multi-policy e non sono il comportamento del trainer generico.
+Questo e' parameter sharing con self-play simultaneo, non quattro modelli indipendenti.
 
-## 3. Action space ibrido
+## 2. Progettare l'action space ibrido
 
-L'action space contiene due componenti nominati:
+Lo spazio avra' due componenti:
 
-```gdscript
-{
-	"movement": {
-		"size": 2,
-		"action_type": "continuous",
-		"low": -1.0,
-		"high": 1.0
-	},
-	"weapon": {
-		"size": 2,
-		"action_type": "discrete",
-		"names": ["hold_fire", "fire"]
-	}
-}
+```text
+movement: continuous, size=2, range=[-1, 1]
+weapon:   discrete,   actions=[hold_fire, fire]
 ```
 
-Il payload ricevuto dal carro sara' simile a:
+Il payload che arriva al carro ha questa forma:
 
 ```gdscript
 {
@@ -80,173 +82,115 @@ Il payload ricevuto dal carro sara' simile a:
 }
 ```
 
-`movement[0]` e' accelerazione; `movement[1]` e' rotazione. `weapon=1` richiede lo
-sparo. La rete PPO ha quindi una testa gaussiana continua e una testa categorica
-discreta, oltre al value estimator.
+`movement[0]` e' il throttle, `movement[1]` lo steering. L'indice `weapon=1`
+corrisponde a `fire` perche' sara' il secondo figlio del set discreto.
 
-## 4. Observation locali
+Metis rileva automaticamente la presenza di componenti continue e discrete, dichiara
+lo spazio `hybrid` e permette a PPO di creare una testa gaussiana e una categorica.
 
-Una configurazione iniziale ragionevole e':
+## 3. Progettare observation locali
 
-| Gruppo | Valori | Descrizione |
+Una prima configurazione ragionevole e':
+
+| Gruppo | Valori | Contenuto |
 |---|---:|---|
-| velocita' | 2 | avanti firmata e modulo normalizzato |
-| input precedenti | 2 | accelerazione e rotazione correnti |
-| stato | 3 | vita, ricarica pronta, vivo |
-| ostacoli | 7 | distanze RayCast corte normalizzate |
+| velocita' | 2 | velocita' in avanti firmata e modulo |
+| controllo precedente | 2 | throttle e steering correnti |
+| stato | 3 | salute, ricarica pronta, vivo |
+| ostacoli | 7 | distanza normalizzata dei RayCast corti |
 | nemici | 4 | visibile, sinistra, centro, destra |
 | alleati | 3 | sinistra, centro, destra |
 
-Totale indicativo: 21 valori. Il numero effettivo dipende dai RayCast configurati.
+Il totale e' 21, ma dipende dal numero effettivo di RayCast. Non inserire:
 
-Non includere:
-
-- posizione globale;
-- rotazione globale;
+- posizione o rotazione globale;
 - coordinate degli avversari;
 - indice del layout;
 - `team_id`;
-- progresso lungo un percorso.
+- una rappresentazione completa della mappa.
 
-Gli input precedenti aiutano PPO a interpretare inerzia e frenata. `reload_ready`
-evita che debba dedurre il cooldown contando gli step.
+Le pareti devono interrompere i RayCast di visione. Se un nemico e' dietro un muro,
+l'observation deve indicare che non e' visibile.
 
-## 5. Creare TankBattleAgent.tscn
+## 4. La scena del carro
 
-Crea `res://agents/TankBattle/tank_battle_agent.tscn`:
+Apri `res://agents/Tank/tank.tscn`:
 
 ```text
-TankBattleAgent (CharacterBody3D) [tank_battle_agent.gd]
-├── Mesh
+TankBattleAgent                    CharacterBody3D, tank.gd
+├── Mesh                           istanza di mesh.scn
 ├── CollisionShape3D
-├── Muzzle (Marker3D)
-├── ObstacleSensors (Node3D)
-│   ├── FrontLeft (RayCast3D)
-│   ├── Front (RayCast3D)
-│   ├── FrontRight (RayCast3D)
-│   ├── Left (RayCast3D)
-│   ├── Right (RayCast3D)
-│   ├── RearLeft (RayCast3D)
-│   └── RearRight (RayCast3D)
-├── VisionSensors (Node3D)
-│   ├── VisionLeft (RayCast3D)
-│   ├── VisionCenter (RayCast3D)
-│   └── VisionRight (RayCast3D)
-└── Agent [Agent.gd]
-    ├── ActionSpace [ActionSpace.gd]
-    │   ├── Movement [ContinuousAction.gd]
-    │   └── Weapon [DiscreteActionSet.gd]
-    ├── ObservationSystem [ObservationSystem.gd]
-    │   ├── BodySpeed [BodySpeedObservationSource.gd]
-    │   ├── Throttle [MethodObservationSource.gd]
-    │   ├── Steering [MethodObservationSource.gd]
-    │   ├── Health [MethodObservationSource.gd]
-    │   ├── ReloadReady [MethodObservationSource.gd]
-    │   ├── Alive [MethodObservationSource.gd]
-    │   ├── Obstacles [RaycastObservationSource.gd]
-    │   └── TeamVision [TeamRaycastObservationSource.gd]
-    └── RewardSystem [RewardSystem.gd]
-        ├── TimePenalty [StepPenaltyReward.gd]
-        └── InvalidFirePenalty [EventReward.gd]
+├── Muzzle                         Marker3D
+├── ObstacleSensors                Node3D
+│   ├── FrontLeft                  RayCast3D
+│   ├── Front                      RayCast3D
+│   ├── FrontRight                 RayCast3D
+│   ├── Left                       RayCast3D
+│   ├── Right                      RayCast3D
+│   ├── RearLeft                   RayCast3D
+│   └── RearRight                  RayCast3D
+├── VisionSensors                  Node3D
+│   ├── VisionLeft                 RayCast3D
+│   ├── VisionCenter               RayCast3D
+│   └── VisionRight                RayCast3D
+└── Agent                          Agent.gd
+    ├── ActionSpace                ActionSpace.gd
+    │   ├── Movement               ContinuousAction.gd
+    │   └── Weapon                 DiscreteActionSet.gd
+    │       ├── HoldFire           DiscreteAction.gd
+    │       └── Fire               DiscreteAction.gd
+    ├── ObservationSystem          ObservationSystem.gd
+    │   ├── BodySpeed              BodySpeedObservationSource.gd
+    │   ├── Throttle               MethodObservationSource.gd
+    │   ├── Steering               MethodObservationSource.gd
+    │   ├── Health                 MethodObservationSource.gd
+    │   ├── ReloadReady            MethodObservationSource.gd
+    │   ├── Alive                  MethodObservationSource.gd
+    │   ├── Obstacles              RaycastObservationSource.gd
+    │   └── TeamVision             TeamRaycastObservationSource.gd
+    └── RewardSystem               RewardSystem.gd
+        ├── TimePenality           StepPenaltyReward.gd
+        └── InvalidFirePenalty     EventReward.gd
 ```
 
-`TeamRaycastObservationSource` e' un nodo del framework. Cerca sul collider o sui suoi
-genitori il metodo `get_team_id()` e confronta il risultato con quello del corpo che
-osserva.
+I RayCast ostacoli possono essere corti. Quelli di visione devono essere piu' lunghi,
+ma non devono ignorare muri e ostacoli.
 
-## 6. Configurare ActionSpace
+## 5. Configurare le azioni dall'Inspector
 
-Nel nodo `Movement`:
+Configura `Movement`:
 
 ```text
-action_name = "movement"
+action_name = movement
 size = 2
 low = -1.0
 high = 1.0
 ```
 
-Nel nodo `Weapon`:
+Configura `Weapon`:
 
 ```text
-action_name = "weapon"
-names = ["hold_fire", "fire"]
+action_name = weapon
 ```
 
-La presenza contemporanea di almeno una componente continua e una discreta fa
-restituire automaticamente `action_type="hybrid"`. `train.py --algorithm
-auto` selezionera' PPO.
+Le azioni reali sono i figli `DiscreteAction`:
 
-## 7. Configurare le observation
+| Nodo | `action_name` | `method_name` | `target_path` |
+|---|---|---|---|
+| HoldFire | `hold_fire` | `hold_fire` | vuoto |
+| Fire | `fire` | `request_fire` | vuoto |
 
-`BodySpeed`:
+Con `target_path` vuoto, `DiscreteAction` invoca il metodo sul corpo `BattleTank`.
+L'ordine dei figli determina gli indici e deve restare stabile per tutta la vita del
+modello.
 
-```text
-include_forward_speed = true
-include_absolute_speed = true
-forward_speed_name = "forward_speed"
-absolute_speed_name = "speed"
-speed_scale = 12.0
-```
+Non registrare nuovamente queste azioni con `agent.add_action()`: la scena deve avere
+una sola fonte di verita'.
 
-I tre `MethodObservationSource` di stato:
+## 6. Il corpo del carro
 
-```text
-Throttle:
-  observation_name = "throttle_input"
-  method_name = "get_control_input"
-  bind_string_arg = "throttle_input"
-
-Steering:
-  observation_name = "rotation_input"
-  method_name = "get_control_input"
-  bind_string_arg = "rotation_input"
-
-Health:
-  observation_name = "health"
-  method_name = "get_health_observation"
-
-ReloadReady:
-  observation_name = "reload_ready"
-  method_name = "get_reload_ready_observation"
-
-Alive:
-  observation_name = "alive"
-  method_name = "get_alive_observation"
-```
-
-Per `Obstacles`, imposta:
-
-```text
-root_path = "../../../ObstacleSensors"
-observation_prefix = "obstacle"
-```
-
-I RayCast ostacoli devono essere relativamente corti e collidere con muri, ostacoli e
-carri. Restituiscono `1` quando liberi e valori vicini a `0` quando l'ostacolo e'
-vicino.
-
-Per `TeamVision` configura gli stessi tre RayCast sia come nemici sia come alleati:
-
-```text
-enemy_visible_observation_name = "enemy_visible"
-
-enemy_signal_observations = {
-  "enemy_left": "VisionSensors/VisionLeft",
-  "enemy_center": "VisionSensors/VisionCenter",
-  "enemy_right": "VisionSensors/VisionRight"
-}
-
-ally_signal_observations = {
-  "ally_left": "VisionSensors/VisionLeft",
-  "ally_center": "VisionSensors/VisionCenter",
-  "ally_right": "VisionSensors/VisionRight"
-}
-```
-
-I RayCast di visione devono essere piu' lunghi. Se incontrano prima un muro, tutte le
-observation target di quel raggio valgono zero: questa e' l'occlusione desiderata.
-
-## 8. Scrivere tank_battle_agent.gd
+Il seguente codice corrisponde a `res://agents/Tank/tank.gd`, collegato alla radice
+`TankBattleAgent`:
 
 ```gdscript
 extends CharacterBody3D
@@ -282,14 +226,15 @@ var _rotation_input := 0.0
 var _cooldown_left := 0.0
 var _health := 100.0
 var _alive := true
-var _match_terminal := false
 var _training_active := true
 var _initial_collision_layer := 0
+var _initial_collision_mask := 0
 
 
 func _ready() -> void:
 	_health = max_health
 	_initial_collision_layer = collision_layer
+	_initial_collision_mask = collision_mask
 
 
 func _physics_process(delta:float) -> void:
@@ -319,21 +264,23 @@ func _physics_process(delta:float) -> void:
 
 
 func apply_action(action:Variant) -> Variant:
-	if typeof(action) == TYPE_STRING or typeof(action) == TYPE_STRING_NAME:
-		if str(action) == "manual":
-			return apply_manual_action()
+	if (typeof(action) == TYPE_STRING or typeof(action) == TYPE_STRING_NAME) and str(action) == "manual":
+		return apply_manual_action()
 
+	manual_control = false
+	clear_inputs()
 	if not _alive or typeof(action) != TYPE_DICTIONARY:
-		clear_inputs()
-		return {"movement": [0.0, 0.0], "weapon": 0}
+		return _zero_action()
 
 	var action_map: Dictionary = action
 	var movement := agent.decode_continuous_action(action_map)
-	_throttle_input = clampf(float(movement[0]), -1.0, 1.0)
-	_rotation_input = clampf(float(movement[1]), -1.0, 1.0)
+	_throttle_input = clampf(float(movement[0]), -1.0, 1.0) if movement.size() > 0 else 0.0
+	_rotation_input = clampf(float(movement[1]), -1.0, 1.0) if movement.size() > 1 else 0.0
+
 	var weapon_action := int(action_map.get("weapon", 0))
-	if weapon_action == 1:
-		try_fire()
+	if agent.act_discrete(weapon_action, "weapon") != OK:
+		weapon_action = 0
+
 	return {
 		"movement": [_throttle_input, _rotation_input],
 		"weapon": weapon_action
@@ -346,13 +293,21 @@ func apply_manual_action() -> Dictionary:
 			Input.get_axis("move_back", "move_forward"),
 			Input.get_axis("turn_left", "turn_right")
 		],
-		"weapon": 1 if Input.is_action_pressed("fire") else 0
+		"weapon": 1 if Input.is_action_just_pressed("fire") else 0
 	})
+
+
+func hold_fire() -> void:
+	pass
+
+
+func request_fire() -> void:
+	if not try_fire():
+		agent.add_reward_event("invalid_fire", 1.0)
 
 
 func try_fire() -> bool:
 	if not _alive or _cooldown_left > 0.0 or projectile_scene == null:
-		agent.add_reward_event("invalid_fire", 1.0)
 		return false
 
 	var projectile := projectile_scene.instantiate()
@@ -369,13 +324,16 @@ func take_damage(attacker:BattleTank, amount:float) -> void:
 		return
 	_health = maxf(_health - amount, 0.0)
 	damage_received.emit(self, attacker, amount)
-	if _health <= 0.0:
-		_alive = false
-		visible = false
-		collision_layer = 0
-		clear_inputs()
-		velocity = Vector3.ZERO
-		destroyed.emit(self, attacker)
+	if _health > 0.0:
+		return
+
+	_alive = false
+	visible = false
+	collision_layer = 0
+	collision_mask = 0
+	clear_inputs()
+	velocity = Vector3.ZERO
+	destroyed.emit(self, attacker)
 
 
 func get_team_id() -> int:
@@ -406,12 +364,8 @@ func is_alive() -> bool:
 	return _alive
 
 
-func set_match_terminal(value:bool) -> void:
-	_match_terminal = value
-
-
 func is_terminal() -> bool:
-	return _match_terminal
+	return false
 
 
 func clear_inputs() -> void:
@@ -425,10 +379,10 @@ func reset_all(original_transform:Variant, reset_rewards := true) -> void:
 		transform = original_transform
 	_health = max_health
 	_alive = true
-	_match_terminal = false
 	_cooldown_left = 0.0
 	visible = true
 	collision_layer = _initial_collision_layer
+	collision_mask = _initial_collision_mask
 	clear_inputs()
 	velocity = Vector3.ZERO
 	if has_method("reset_physics_interpolation"):
@@ -445,38 +399,127 @@ func set_training_active(enabled:bool) -> void:
 	if not enabled:
 		clear_inputs()
 		velocity = Vector3.ZERO
+
+
+func _zero_action() -> Dictionary:
+	return {"movement": [0.0, 0.0], "weapon": 0}
 ```
 
-Un carro distrutto non termina subito il proprio canale: rimane immobile e invisibile
-fino alla fine del match. Cosi' riceve anche la reward finale di vittoria o sconfitta
-della squadra. Tutti gli agenti diventano terminali insieme quando una squadra e'
-eliminata.
+`apply_action()` decodifica la parte continua tramite `Agent` e delega la parte
+discreta al `DiscreteActionSet`. Il corpo non contiene nomi o indici duplicati.
 
-## 9. Reward locali del carro
+Per provare il carro senza Python, abilita `manual_control` e configura queste azioni
+in **Project Settings > Input Map**:
 
-Configura `TimePenalty`:
+| Azione | Tasto suggerito |
+|---|---|
+| `move_forward` | W |
+| `move_back` | S |
+| `turn_left` | A |
+| `turn_right` | D |
+| `fire` | Spazio |
+
+Nel progetto attuale le prime quattro sono gia' presenti; `fire` deve essere aggiunta.
+Questa Input Map riguarda soltanto il controllo manuale: durante il training lo sparo
+arriva dal componente discreto `weapon`.
+
+Un carro distrutto non termina immediatamente il proprio canale: rimane inattivo fino
+alla fine del match e puo' ricevere l'esito di squadra. L'observation `alive` permette
+alla policy e al value estimator di distinguere questo stato.
+
+## 7. Configurare le observation
+
+Configura `BodySpeed`:
 
 ```text
-penalty = -0.001
-term_name = "time"
+include_forward_speed = true
+include_absolute_speed = true
+forward_speed_name = forward_speed
+absolute_speed_name = speed
+speed_scale = 12.0
 ```
 
-Configura `InvalidFirePenalty`:
+Configura i `MethodObservationSource` lasciando vuoto `source_path`:
+
+| Nodo | `observation_name` | `method_name` | `bind_string_arg` |
+|---|---|---|---|
+| Throttle | `throttle_input` | `get_control_input` | `throttle_input` |
+| Steering | `rotation_input` | `get_control_input` | `rotation_input` |
+| Health | `health` | `get_health_observation` | vuoto |
+| ReloadReady | `reload_ready` | `get_reload_ready_observation` | vuoto |
+| Alive | `alive` | `get_alive_observation` | vuoto |
+
+Configura `Obstacles`:
 
 ```text
-event_name = "invalid_fire"
+root_path = ../../../ObstacleSensors
+observation_prefix = obstacle
+```
+
+La distanza vale `1` quando il raggio e' libero e si avvicina a `0` quando la
+collisione e' vicina. I colori di debug vengono disabilitati automaticamente in
+headless.
+
+Configura `TeamVision`:
+
+```text
+team_method_name = get_team_id
+enemy_visible_observation_name = enemy_visible
+
+enemy_signal_observations = {
+  "enemy_left": "VisionSensors/VisionLeft",
+  "enemy_center": "VisionSensors/VisionCenter",
+  "enemy_right": "VisionSensors/VisionRight"
+}
+
+ally_signal_observations = {
+  "ally_left": "VisionSensors/VisionLeft",
+  "ally_center": "VisionSensors/VisionCenter",
+  "ally_right": "VisionSensors/VisionRight"
+}
+```
+
+La source cerca `get_team_id()` sul collider o sui suoi genitori. Se il RayCast colpisce
+prima un muro, non trova un proprietario di squadra e restituisce zero: e' proprio
+l'occlusione desiderata.
+
+Salva la scena e controlla lo spec con un rollout prima di assumere che `obs_dim` sia
+21. Python usera' la dimensione dichiarata realmente da Godot.
+
+## 8. Configurare le reward locali
+
+`TimePenality`:
+
+```text
+term_name = time
+penalty = -0.0005
+weight = 1.0
+```
+
+`InvalidFirePenalty`:
+
+```text
+term_name = invalid_fire
+event_name = invalid_fire
 scale = -0.01
-term_name = "invalid_fire"
+weight = 1.0
 ```
 
-Non aggiungere una reward elevata per `enemy_visible`: porterebbe i carri a guardare
-un avversario senza sparare. Se vuoi shaping visivo, usa al massimo un valore molto
-piccolo e controlla che non domini hit e vittorie.
+Questi termini appartengono al singolo corpo. Non premiare molto `enemy_visible`: una
+policy potrebbe imparare a guardare un avversario senza combattere. Hit, danni, kill e
+vittoria saranno eventi dello scenario.
 
-## 10. Creare Missile.tscn
+Nel file `tank.tscn` attuale `TimePenality.penalty` vale `0.0`, quindi il termine e'
+disabilitato. Impostalo a `-0.0005` soltanto se vuoi davvero attribuire un costo alla
+durata: il valore mostrato sopra e' una proposta iniziale, non un requisito del bridge.
+
+## 9. Il missile
+
+Apri `res://scenarios/tanks/tank_missile.tscn`; il relativo script e'
+`res://scenarios/tanks/tank_missile.gd`:
 
 ```text
-Missile (CharacterBody3D) [missile.gd]
+TankMissile                      CharacterBody3D, tank_missile.gd
 ├── MeshInstance3D
 └── CollisionShape3D
 ```
@@ -523,113 +566,115 @@ func _physics_process(delta:float) -> void:
 	queue_free()
 ```
 
-Il missile non riceve observation e non e' un agente. E' soltanto una conseguenza
+Il missile non e' un agente: non ha observation, reward o policy. E' una conseguenza
 fisica dell'azione discreta.
 
-## 11. Creare tank_battle_scenario.tscn
+## 10. Lo scenario
+
+Apri `res://scenarios/tanks/tanks_scenario.tscn`:
 
 ```text
-TankBattleScenario (Node3D) [tank_battle_manager.gd]
-├── BridgeServer [bridge_server.gd]
-├── ScenarioController [ScenarioController.gd]
-│   ├── ScenarioEventSystem [ScenarioEventSystem.gd]
-│   │   ├── EnemyHit [ManualScenarioEventSource.gd]
-│   │   ├── EnemyKill [ManualScenarioEventSource.gd]
-│   │   ├── TeamKill [ManualScenarioEventSource.gd]
-│   │   ├── DamageTaken [ManualScenarioEventSource.gd]
-│   │   ├── Destroyed [ManualScenarioEventSource.gd]
-│   │   ├── TeamWon [ManualScenarioEventSource.gd]
-│   │   ├── TeamLost [ManualScenarioEventSource.gd]
-│   │   └── MatchDraw [ManualScenarioEventSource.gd]
-│   └── ScenarioRewardSystem [ScenarioRewardSystem.gd]
-│       ├── HitReward [EventScenarioReward.gd]
-│       ├── KillReward [EventScenarioReward.gd]
-│       ├── TeamKillReward [EventScenarioReward.gd]
-│       ├── DamagePenalty [EventScenarioReward.gd]
-│       ├── DestroyedPenalty [EventScenarioReward.gd]
-│       ├── WinReward [EventScenarioReward.gd]
-│       └── LossPenalty [EventScenarioReward.gd]
+TanksScenario                      Node3D, tanks_scenario.gd
 ├── Environment
 │   ├── Floor
 │   ├── Walls
-│   └── Layouts
-│       ├── EasyLayout
-│       ├── MediumLayout
-│       └── HardLayout
+│   └── LayoutContainer            Node3D
+├── Camera3D
 ├── Agents
-│   ├── RedTank1
-│   ├── RedTank2
-│   ├── BlueTank1
-│   └── BlueTank2
-└── Projectiles
+│   ├── RedTank1                   BattleTank, team_id=0
+│   ├── RedTank2                   BattleTank, team_id=0
+│   ├── BlueTank1                  BattleTank, team_id=1
+│   └── BlueTank2                  BattleTank, team_id=1
+├── Projectiles                    Node3D
+├── ScenarioController             ScenarioController.gd
+│   ├── ScenarioEventSystem        ScenarioEventSystem.gd
+│   │   ├── EnemyDamage            ManualScenarioEventSource.gd
+│   │   ├── EnemyKill              ManualScenarioEventSource.gd
+│   │   ├── TeamKillAssist         ManualScenarioEventSource.gd
+│   │   ├── DamageTaken            ManualScenarioEventSource.gd
+│   │   ├── Destroyed              ManualScenarioEventSource.gd
+│   │   ├── TeamWon                ManualScenarioEventSource.gd
+│   │   ├── TeamLost               ManualScenarioEventSource.gd
+│   │   └── MatchDraw              ManualScenarioEventSource.gd
+│   └── ScenarioRewardSystem       ScenarioRewardSystem.gd
+│       ├── EnemyDamageReward      EventScenarioReward.gd
+│       ├── EnemyKillReward        EventScenarioReward.gd
+│       ├── TeamAssistReward       EventScenarioReward.gd
+│       ├── DamageTakenPenalty     EventScenarioReward.gd
+│       ├── DestroyedPenalty       EventScenarioReward.gd
+│       ├── WinReward              EventScenarioReward.gd
+│       ├── LossPenalty            EventScenarioReward.gd
+│       └── DrawPenalty            EventScenarioReward.gd
+└── BridgeServer                   bridge_server.gd
 ```
 
-Nel `ScenarioController` imposta manualmente tutti i carri:
+Non serve un `ProgressProvider`: questo scenario non possiede un progresso scalare
+ordinato. Il percorso predefinito `ProgressProvider` non trova alcun nodo e viene
+trattato come `null`; in alternativa puoi lasciare vuoto `progress_provider_path`.
+
+L'array `layout_scenes` della radice contiene, in quest'ordine, `easy_map.tscn`,
+`medium_map.tscn` e `hard_map.tscn`. `layout_container` punta a
+`Environment/LayoutContainer`.
+
+Configura `ScenarioController`:
 
 ```text
-controlled_agents = [
-  "../Agents/RedTank1",
-  "../Agents/RedTank2",
-  "../Agents/BlueTank1",
-  "../Agents/BlueTank2"
-]
-number_of_replications = 0
+controlled_agents = [RedTank1, RedTank2, BlueTank1, BlueTank2]
+scenario_reward_system_path = ScenarioRewardSystem
+event_system_path = ScenarioEventSystem
+max_steps = 1000
+physics_frames_per_step = 1
 randomize_reset = true
-reset_position_jitter = (0.5, 0.0, 0.5)
-reset_yaw_jitter_degrees = 15
-max_steps = 800
+reset_position_jitter = (0.3, 0.0, 0.3)
+reset_yaw_jitter_degrees = 15.0
+deactivate_done_agents = true
+number_of_replications = 0
 ```
 
-Assegna `projectile_parent` di ogni carro al nodo `Projectiles`.
+Questi sono i valori salvati attualmente nella scena. Il parametro Python
+`--max-steps-per-episode` puo' sovrascrivere `max_steps` quando il trainer configura
+l'environment.
 
-`TeamWon`, `TeamLost` e `MatchDraw` devono avere un `terminal_reason` non vuoto. Gli
-altri eventi sono impulsi non terminali.
+`BridgeServer.controller_path` e' `../ScenarioController`. Ogni carro usa
+`tank_missile.tscn` come `projectile_scene` e punta `projectile_parent` a `Projectiles`.
 
-Configura gli event source con questi nomi:
+Usa istanze di scene layout dentro `LayoutContainer`, non piu' layout sovrapposti resi
+soltanto invisibili. Nascondere un `StaticBody3D` o disabilitarne il processing non
+rimuove necessariamente le collisioni; rimuovere la scena inattiva dall'albero evita
+ostacoli invisibili.
 
-| Nodo | event_name | terminal_reason |
+## 11. Tradurre il combattimento in eventi Metis
+
+Configura le event source:
+
+| Nodo | `event_name` | `terminal_reason` |
 |---|---|---|
-| EnemyHit | `enemy_hit` | vuoto |
+| EnemyDamage | `enemy_damage` | vuoto |
 | EnemyKill | `enemy_kill` | vuoto |
-| TeamKill | `team_enemy_killed` | vuoto |
+| TeamKillAssist | `team_kill_assist` | vuoto |
 | DamageTaken | `damage_taken` | vuoto |
 | Destroyed | `destroyed` | vuoto |
 | TeamWon | `team_won` | `team_won` |
 | TeamLost | `team_lost` | `team_lost` |
 | MatchDraw | `match_draw` | `match_draw` |
 
-## 12. Configurare reward di scenario
+Le `ManualScenarioEventSource` sono componenti attuali del framework: lo scenario
+chiama `trigger(agent_id, value)` quando avviene un fatto del dominio. Non calcolano
+reward e non costruiscono la risposta Python.
 
-Valori iniziali prudenti:
-
-| Componente | Evento | Reward | only_once |
-|---|---|---:|---|
-| HitReward | `enemy_hit` | `+0.10` | false |
-| KillReward | `enemy_kill` | `+0.80` | false |
-| TeamKillReward | `team_enemy_killed` | `+0.20` | false |
-| DamagePenalty | `damage_taken` | `-0.10` | false |
-| DestroyedPenalty | `destroyed` | `-0.80` | true |
-| WinReward | `team_won` | `+2.00` | true |
-| LossPenalty | `team_lost` | `-2.00` | true |
-
-Il killer riceve hit, kill e reward cooperativa; il compagno riceve la reward
-cooperativa. La vittoria resta il segnale piu' importante.
-
-Non usare una somma globale delle reward dei quattro carri. Ogni agente riceve i propri
-eventi e soltanto le reward cooperative esplicitamente assegnate alla sua squadra.
-
-## 13. Scrivere tank_battle_manager.gd
+Collega questo script alla radice dello scenario:
 
 ```gdscript
 extends Node3D
 
 @export var tanks: Array[BattleTank] = []
-@export var layouts: Array[Node3D] = []
+@export var layout_scenes: Array[PackedScene] = []
+@export var layout_container: Node3D
 
-@onready var controller := $ScenarioController
-@onready var enemy_hit: ManualScenarioEventSource = $ScenarioController/ScenarioEventSystem/EnemyHit
+@onready var controller: ScenarioController = $ScenarioController
+@onready var enemy_damage: ManualScenarioEventSource = $ScenarioController/ScenarioEventSystem/EnemyDamage
 @onready var enemy_kill: ManualScenarioEventSource = $ScenarioController/ScenarioEventSystem/EnemyKill
-@onready var team_kill: ManualScenarioEventSource = $ScenarioController/ScenarioEventSystem/TeamKill
+@onready var team_kill_assist: ManualScenarioEventSource = $ScenarioController/ScenarioEventSystem/TeamKillAssist
 @onready var damage_taken: ManualScenarioEventSource = $ScenarioController/ScenarioEventSystem/DamageTaken
 @onready var destroyed_event: ManualScenarioEventSource = $ScenarioController/ScenarioEventSystem/Destroyed
 @onready var team_won: ManualScenarioEventSource = $ScenarioController/ScenarioEventSystem/TeamWon
@@ -638,11 +683,12 @@ extends Node3D
 
 var _training_episode := 0
 var _match_finished := false
+var _current_layout: Node
 
 
 func _ready() -> void:
 	controller.scenario_configured.connect(_on_scenario_configured)
-	controller.episode_reset_started.connect(_reset_match)
+	controller.episode_reset_started.connect(_on_episode_reset_started)
 	for tank in tanks:
 		tank.damage_received.connect(_on_damage_received)
 		tank.destroyed.connect(_on_tank_destroyed)
@@ -652,20 +698,20 @@ func _on_scenario_configured(config:Dictionary) -> void:
 	_training_episode = int(config.get("training_episode", _training_episode))
 
 
-func _reset_match(seed:int) -> void:
+func _on_episode_reset_started(episode_seed:int) -> void:
 	_match_finished = false
-	for projectile in get_tree().get_nodes_in_group("projectile"):
-		projectile.queue_free()
-	_select_layout(seed)
-	for tank in tanks:
-		tank.set_match_terminal(false)
+	_clear_projectiles()
+	_select_layout(episode_seed)
 
 
-func _on_damage_received(victim:BattleTank, attacker:BattleTank, _amount:float) -> void:
-	if _match_finished or attacker == null or attacker.get_team_id() == victim.get_team_id():
+func _on_damage_received(victim:BattleTank, attacker:BattleTank, amount:float) -> void:
+	if _match_finished or attacker == null:
 		return
-	enemy_hit.trigger(str(attacker.name))
-	damage_taken.trigger(str(victim.name))
+	if attacker.get_team_id() == victim.get_team_id():
+		return
+	var normalized_damage := amount / maxf(victim.max_health, 0.001)
+	enemy_damage.trigger(str(attacker.name), normalized_damage)
+	damage_taken.trigger(str(victim.name), normalized_damage)
 
 
 func _on_tank_destroyed(victim:BattleTank, killer:BattleTank) -> void:
@@ -676,7 +722,7 @@ func _on_tank_destroyed(victim:BattleTank, killer:BattleTank) -> void:
 		enemy_kill.trigger(str(killer.name))
 		for teammate in tanks:
 			if teammate.get_team_id() == killer.get_team_id():
-				team_kill.trigger(str(teammate.name))
+				team_kill_assist.trigger(str(teammate.name))
 	_check_match_finished()
 
 
@@ -690,127 +736,160 @@ func _check_match_finished() -> void:
 	if red_alive == 0 and blue_alive == 0:
 		for tank in tanks:
 			match_draw.trigger(str(tank.name))
-	else:
-		var winner_team := 0 if red_alive > 0 else 1
-		for tank in tanks:
-			if tank.get_team_id() == winner_team:
-				team_won.trigger(str(tank.name))
-			else:
-				team_lost.trigger(str(tank.name))
+		return
 
+	var winner_team := 0 if red_alive > 0 else 1
 	for tank in tanks:
-		tank.set_match_terminal(true)
+		if tank.get_team_id() == winner_team:
+			team_won.trigger(str(tank.name))
+		else:
+			team_lost.trigger(str(tank.name))
 
 
 func _alive_count(team:int) -> int:
-	var result := 0
+	var count := 0
 	for tank in tanks:
 		if tank.get_team_id() == team and tank.is_alive():
-			result += 1
-	return result
+			count += 1
+	return count
 
 
-func _select_layout(seed:int) -> void:
-	if layouts.is_empty():
+func _clear_projectiles() -> void:
+	for projectile in get_tree().get_nodes_in_group("projectile"):
+		var parent := projectile.get_parent()
+		if parent != null:
+			parent.remove_child(projectile)
+		projectile.queue_free()
+
+
+func _select_layout(episode_seed:int) -> void:
+	if layout_scenes.is_empty() or layout_container == null:
 		return
-	var rng := RandomNumberGenerator.new()
-	rng.seed = seed
-	var available_layouts := 1
+	if is_instance_valid(_current_layout):
+		layout_container.remove_child(_current_layout)
+		_current_layout.queue_free()
+
+	var available := 1
 	if _training_episode >= 500:
-		available_layouts = mini(2, layouts.size())
+		available = mini(2, layout_scenes.size())
 	if _training_episode >= 1500:
-		available_layouts = layouts.size()
-	var selected := rng.randi_range(0, max(available_layouts - 1, 0))
-	for idx in range(layouts.size()):
-		layouts[idx].visible = idx == selected
-		layouts[idx].process_mode = (
-			Node.PROCESS_MODE_INHERIT if idx == selected
-			else Node.PROCESS_MODE_DISABLED
-		)
+		available = layout_scenes.size()
+
+	var rng := RandomNumberGenerator.new()
+	rng.seed = episode_seed
+	var selected := rng.randi_range(0, maxi(available - 1, 0))
+	_current_layout = layout_scenes[selected].instantiate()
+	layout_container.add_child(_current_layout)
 ```
 
-Ogni layout contiene corpi e collisioni completi. Disabilitare `process_mode` rimuove
-anche la simulazione delle collisioni del layout non selezionato.
+Questo script contiene soltanto regole specifiche della battaglia: danni, squadre,
+layout e proiettili. Reset dei componenti RL, step fisici, spec, reward aggregation e
+terminalita' vengono ancora gestiti dai nodi Metis.
 
-## 14. Collision layer
+## 12. Configurare le reward di scenario
 
-Una possibile configurazione:
+Configura gli `EventScenarioReward`:
 
-| Oggetto | Layer | Mask |
+| Componente | `event_name` | `reward` | `only_once` |
+|---|---|---:|---|
+| EnemyDamageReward | `enemy_damage` | `+0.25` | false |
+| EnemyKillReward | `enemy_kill` | `+1.00` | false |
+| TeamAssistReward | `team_kill_assist` | `+0.20` | false |
+| DamageTakenPenalty | `damage_taken` | `-0.15` | false |
+| DestroyedPenalty | `destroyed` | `-1.00` | true |
+| WinReward | `team_won` | `+3.00` | true |
+| LossPenalty | `team_lost` | `-3.00` | true |
+| DrawPenalty | `match_draw` | `-0.25` | true |
+
+`enemy_damage` e `damage_taken` ricevono una frazione della salute massima, quindi il
+valore effettivo scala con il danno. Gli altri eventi valgono `1`.
+
+Non sommare automaticamente le reward dei quattro carri. Il killer riceve il proprio
+segnale, i compagni ricevono soltanto l'assist esplicito e ogni agente conserva danni,
+distruzione ed esito finale personali.
+
+Controlla i termini con `--print-reward-terms` prima di regolare i pesi. Il bonus di
+vittoria deve restare il segnale dominante, senza rendere irrilevanti hit e kill.
+
+## 13. Collision layer e reset
+
+La scena usa questa configurazione:
+
+| Oggetto | Layer Inspector | Mask Inspector |
 |---|---:|---:|
 | carri | 1 | 1, 2 |
-| muri/ostacoli | 2 | 1, 4 |
+| pavimento e muri esterni | 2 | 1, 4 |
 | missili | 4 | 1, 2 |
-| RayCast ostacoli | - | 1, 2 |
-| RayCast visione | - | 1, 2 |
+| RayCast ostacoli | nessuno | 1, 2 |
+| RayCast visione | nessuno | 1, 2 |
 
-I colori non devono determinare le collisioni. La relazione amico/nemico viene letta
-da `team_id`, così le due squadre possono usare la stessa scena e la stessa policy.
+Gli `StaticBody3D` di `medium_map.tscn` e `hard_map.tscn` non impostano ancora
+esplicitamente il layer e quindi ereditano il layer 1. Funzionano, ma per mantenere la
+separazione indicata sopra e' preferibile assegnarli al layer 2.
 
-## 15. Curriculum
+La relazione amico/nemico dipende da `team_id`, non dal layer o dal colore.
 
-Il curriculum non deve rivelare la mappa. Cambia la distribuzione degli scenari:
+Dopo ogni reset verifica che:
 
-| Episodi | Layout | Altre variazioni |
-|---:|---|---|
-| `0-499` | arena aperta | spawn quasi fissi, missili lenti |
-| `500-1499` | ostacoli semplici | yaw e spawn leggermente casuali |
-| `1500+` | piu' layout | spawn, ostacoli e velocita' variabili |
+- vita, visibilita', layer e mask siano ripristinati;
+- velocita' e input precedenti siano azzerati;
+- tutti i missili del vecchio episodio siano rimossi;
+- sia presente un solo layout collisionabile;
+- RayCast e reward state leggano il nuovo episodio;
+- il seed produca sempre la stessa selezione del layout.
 
-Mantieni sempre identici:
+## 14. Validare con azioni casuali
 
-- numero e ordine delle observation;
-- action space ibrido;
-- significato di hit, kill e vittoria;
-- numero di carri per env durante lo stesso run PPO.
-
-Per passare da 1v1 a 2v2 e' preferibile usare due scene differenti ma con lo stesso
-spec. Puoi inizializzare il modello 2v2 dai pesi 1v1, ma non riprendere ciecamente lo
-stato dell'optimizer se reward e distribuzione cambiano molto.
-
-## 16. Validare lo scenario
-
-Prima usa azioni casuali:
+Prima del training:
 
 ```bash
 python/.venv/bin/python python/tools/random_rollout.py \
-  --godot-bin /home/fedyfausto/Godot/Godot_v4.6.2-stable_linux.x86_64 \
   --godot-project godot \
-  --godot-scene res://scenarios/tank_battle/tank_battle_scenario.tscn \
+  --godot-scene res://scenarios/tanks/tanks_scenario.tscn \
   --multi-agent \
-  --steps 200 \
+  --steps 500 \
   --print-reward-terms \
   --no-headless
 ```
 
-Lo spec deve mostrare:
+Lo spec deve indicare:
 
 ```text
-action_type=hybrid
 agents=['RedTank1', 'RedTank2', 'BlueTank1', 'BlueTank2']
+obs_shape=(4, 21)
+action_type=hybrid
+action components: movement, weapon
+continuous size: 2
+discrete weapon size: 2
 ```
 
 Controlla manualmente:
 
-1. un muro azzera i segnali enemy dietro di esso;
-2. un alleato produce `ally_*`, non `enemy_*`;
-3. `weapon=1` crea al massimo un missile per cooldown;
-4. un hit assegna reward soltanto agli agenti previsti;
-5. un carro distrutto non si muove ma riceve l'esito finale;
-6. tutti e quattro terminano quando una squadra viene eliminata;
-7. il reset elimina i missili e ripristina vita, visibilita' e collisioni.
+1. il dizionario ibrido muove e fa sparare il carro corretto;
+2. `hold_fire` non crea proiettili;
+3. il cooldown impedisce spam e produce `invalid_fire`;
+4. un muro nasconde il nemico ai sensori;
+5. un alleato attiva `ally_*`, non `enemy_*`;
+6. danni e kill premiano gli agenti previsti;
+7. tutti i canali terminano quando una squadra viene eliminata;
+8. un timeout e' `truncated`, non una vittoria o sconfitta.
 
-## 17. Avviare PPO hybrid multi-agent
+Se lo spec o le reward non sono corretti, non iniziare ancora il training.
+
+## 15. Primo training: self-play simultaneo
+
+Inizia senza opponent pool. Il collector asincrono puo' usare tutti gli environment e
+le due squadre eseguono la policy corrente:
 
 ```bash
 python/.venv/bin/python python/train.py \
-  --algorithm auto \
-  --godot-bin /home/fedyfausto/Godot/Godot_v4.6.2-stable_linux.x86_64 \
+  --algorithm ppo \
   --godot-project godot \
-  --godot-scene res://scenarios/tank_battle/tank_battle_scenario.tscn \
+  --godot-scene res://scenarios/tanks/tanks_scenario.tscn \
   --num-envs 4 \
   --num-episodes 5000 \
-  --max-steps-per-episode 800 \
+  --max-steps-per-episode 1000 \
+  --physics-frames-per-step 1 \
   --batch-size 256 \
   --ppo-epochs 4 \
   --gamma 0.99 \
@@ -819,96 +898,147 @@ python/.venv/bin/python python/train.py \
   --learning-rate 3e-4 \
   --entropy-coef 0.01 \
   --checkpoint-dir checkpoints/tank_battle_ppo_v1 \
-  --weights-path tank_battle_ppo_v1.weights.h5 \
   --multi-agent \
-  --collector-mode sync \
-  --opponent-pool \
-  --opponent-snapshot-every 100 \
-  --opponent-pool-size 12 \
-  --opponent-current-probability 0.2 \
+  --collector-mode async \
   --headless
 ```
 
-PPO e' on-policy: non usa replay buffer. `--batch-size` indica la dimensione dei
-minibatch usati per aggiornare le traiettorie appena raccolte.
+PPO e' on-policy e non usa replay buffer. Non cambiare il numero di agenti nel mezzo
+di un rollout o di un resume senza rivalutare la distribuzione dei dati.
 
-L'opponent pool storico richiede `--collector-mode sync`; il trainer rifiuta la
-combinazione con `async` per evitare che una traiettoria cambi avversario o lato learner.
-Senza pool, il multi-agent con policy corrente condivisa puo' usare il collector
-asincrono. Mantieni `--physics-frames-per-step 1` finche' non hai validato missili,
-cooldown e sensori: un valore maggiore riduce la frequenza delle decisioni e cambia la
-durata fisica di ogni finestra espressa in step.
+Mantieni `physics_frames_per_step=1` finche' non hai validato sensori, proiettili e
+cooldown. Aumentarlo riduce la frequenza delle decisioni e cambia la durata fisica di
+tutti i termini espressi per step.
 
-Per riprendere:
+## 16. Seconda fase: opponent pool
+
+Il self-play simultaneo puo' dimenticare strategie precedenti. Dopo che il combattimento
+base funziona, puoi allenare una squadra contro snapshot storiche congelate:
 
 ```bash
 python/.venv/bin/python python/train.py \
   --algorithm ppo \
-  --godot-bin /home/fedyfausto/Godot/Godot_v4.6.2-stable_linux.x86_64 \
   --godot-project godot \
-  --godot-scene res://scenarios/tank_battle/tank_battle_scenario.tscn \
+  --godot-scene res://scenarios/tanks/tanks_scenario.tscn \
   --num-envs 4 \
-  --num-episodes 7000 \
-  --checkpoint-dir checkpoints/tank_battle_ppo_v1 \
-  --weights-path tank_battle_ppo_v1.weights.h5 \
+  --num-episodes 8000 \
+  --max-steps-per-episode 1000 \
+  --policy-path checkpoints/tank_battle_ppo_v1 \
+  --checkpoint-dir checkpoints/tank_battle_ppo_pool_v1 \
   --multi-agent \
   --collector-mode sync \
   --opponent-pool \
   --opponent-snapshot-every 100 \
   --opponent-pool-size 12 \
   --opponent-current-probability 0.2 \
+  --headless
+```
+
+Per PPO l'opponent pool richiede il collector sincrono. Senza `--learner-team`, Metis
+sceglie a ogni episodio quale squadra viene allenata; l'altra usa la snapshot. Con
+`--learner-team 0` puoi fissare temporaneamente il lato learner per il debug.
+
+`--policy-path` inizializza il nuovo run dalla policy del self-play base, ma crea un
+optimizer e un opponent pool nuovi. Non e' un resume del vecchio run.
+
+Non attivare il pool dall'episodio zero soltanto perche' e' disponibile. Prima valida
+che una singola policy impari hit, sopravvivenza e vittoria contro se stessa.
+
+## 17. Curriculum senza rivelare la mappa
+
+Lo script dello scenario riceve `training_episode` tramite `scenario_configured` e usa
+quel valore soltanto per scegliere la distribuzione dei layout:
+
+| Episodi | Layout disponibili | Reset |
+|---:|---|---|
+| `0-499` | `easy_map.tscn` | arena aperta |
+| `500-1499` | `easy_map.tscn`, `medium_map.tscn` | ostacoli semplici |
+| `1500+` | tutti e tre i file | layout completi |
+
+Il curriculum non entra nelle observation. Mantieni invariati:
+
+- ordine e dimensione delle observation;
+- componenti e ordine dell'action space;
+- significato di hit, kill e vittoria;
+- numero di carri durante lo stesso run PPO.
+
+Per passare da 1v1 a 2v2 puoi usare scene differenti con lo stesso contratto e fare un
+warm start dalla policy 1v1. Non e' automaticamente un resume equivalente: la
+distribuzione delle traiettorie e delle reward e' cambiata.
+
+## 18. Riprendere ed eseguire la policy
+
+Per riprendere il training:
+
+```bash
+python/.venv/bin/python python/train.py \
+  --algorithm ppo \
+  --godot-project godot \
+  --godot-scene res://scenarios/tanks/tanks_scenario.tscn \
+  --num-envs 4 \
+  --num-episodes 7000 \
+  --max-steps-per-episode 1000 \
+  --batch-size 256 \
+  --ppo-epochs 4 \
+  --checkpoint-dir checkpoints/tank_battle_ppo_v1 \
+  --multi-agent \
+  --collector-mode async \
   --resume \
   --headless
 ```
 
-## 18. Eseguire il modello ibrido
+Riporta anche le opzioni strutturali del run originale, in particolare collector,
+opponent pool e durata dell'episodio.
+
+Per osservare il bundle Keras prodotto:
 
 ```bash
 python/.venv/bin/python python/run.py \
-  --algorithm ppo \
-  --godot-bin /home/fedyfausto/Godot/Godot_v4.6.2-stable_linux.x86_64 \
+  --policy-path checkpoints/tank_battle_ppo_v1 \
   --godot-project godot \
-  --godot-scene res://scenarios/tank_battle/tank_battle_scenario.tscn \
-  --weights-path tank_battle_ppo_v1.weights.h5 \
+  --godot-scene res://scenarios/tanks/tanks_scenario.tscn \
   --multi-agent \
   --episodes 20 \
   --no-headless
 ```
 
-In esecuzione, le azioni discrete usano `argmax` e quelle continue la media della
-policy, senza rumore di esplorazione. Per caricare il best checkpoint al posto dei pesi
-finali usa `--load-from checkpoint` insieme a
-`--checkpoint-dir checkpoints/tank_battle_ppo_v1/best` e ometti `--weights-path`.
+`policy.json` contiene backend, algoritmo e contratto dell'action space, quindi non
+serve ripetere `--algorithm ppo`. In esecuzione le categorie usano la scelta
+deterministica e le continue la media della policy.
 
-## 19. Metriche utili
+## 19. Metriche da osservare
 
-La sola reward media non basta. Registra per squadra e per agente:
+La reward media non basta. Registra almeno:
 
-- vittorie, sconfitte e pareggi;
-- hit rate: colpi a segno / missili sparati;
+- vittorie, sconfitte e pareggi per squadra;
 - danno inflitto e subito;
-- kill e sopravvivenza;
-- collisioni con ostacoli;
-- percentuale di tempo con nemico visibile;
-- distanza percorsa senza coordinate nella policy;
-- frequenza dell'azione `fire` durante cooldown.
+- hit rate: colpi a segno diviso missili sparati;
+- kill, morti e sopravvivenza;
+- collisioni con muri e altri carri;
+- tempo con un nemico realmente visibile;
+- frequenza di `fire` durante cooldown;
+- durata media dei match;
+- risultati contro bot semplici e checkpoint precedenti.
 
-Una policy valida deve vincere su layout e seed non usati nel training. Poiche' rosso
-e blu condividono il modello, valuta anche contro un bot semplice e contro checkpoint
-precedenti: il 50% contro una copia identica non dimostra che sappia combattere.
+Due copie identiche della stessa policy tenderanno al 50% anche se entrambe giocano
+male. Valuta sempre su layout e seed separati e contro avversari con forza nota.
 
-## 20. Estensioni successive
+## Checklist
 
-Dopo aver validato il 2v2 puoi aggiungere, una cosa per volta:
+- [ ] Ogni carro ha lo stesso action e observation contract.
+- [ ] `Weapon` usa figli `DiscreteAction`, non l'array legacy `names`.
+- [ ] Il corpo delega l'azione discreta con `agent.act_discrete()`.
+- [ ] Nessuna observation rivela coordinate o layout.
+- [ ] I muri occludono i sensori di squadra.
+- [ ] Le reward locali e di scenario restano separate.
+- [ ] Gli eventi terminali vengono attivati per tutti gli agenti del match.
+- [ ] I carri distrutti non si muovono ma ricevono l'esito finale.
+- [ ] Un solo layout collisionabile e' presente nell'albero.
+- [ ] Il rollout casuale passa prima del training.
+- [ ] L'opponent pool viene aggiunto soltanto dopo il self-play base.
+- [ ] `run.py` carica il bundle senza ricostruire manualmente la rete.
 
-- torretta indipendente con una terza azione continua;
-- tipi di missile come seconda componente discreta;
-- munizioni limitate e pickup;
-- comunicazione locale tra alleati;
-- fog of war con sensori diversi;
-- league con rating e promozione selettiva delle snapshot del pool;
-- team di dimensione variabile con masking.
-
-Ogni nuova componente continua o discreta puo' essere aggiunta come figlio di
-`ActionSpace`; PPO ricostruisce automaticamente le teste compatibili. Cambiare lo spec
-invalida pero' i vecchi pesi, quindi completa prima una versione minima funzionante.
+Quando questa versione funziona puoi aggiungere una torretta indipendente, tipi di
+munizione, pickup o comunicazione locale. Ogni nuovo componente va dichiarato sotto
+`ActionSpace`; se ne cambi ordine o dimensione, la vecchia policy non ha piu' lo stesso
+contratto.

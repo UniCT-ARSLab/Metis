@@ -30,6 +30,7 @@ enabled=PackedStringArray("res://addons/metis_inspector/plugin.cfg")
 [global_group]
 
 brick=""
+projectile=""
 
 [input]
 

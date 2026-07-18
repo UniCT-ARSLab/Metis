@@ -1,0 +1,48 @@
+[gd_scene format=3 uid="uid://d0goalutfb556"]
+
+[sub_resource type="BoxMesh" id="BoxMesh_few8b"]
+size = Vector3(0.145, 0.385, 1.78)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_svno1"]
+size = Vector3(0.145, 0.385, 1.78)
+
+[sub_resource type="BoxMesh" id="BoxMesh_hpls7"]
+size = Vector3(0.145, 0.385, 1.065)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_ml8ps"]
+size = Vector3(0.145, 0.385, 1.065)
+
+[node name="Hard" type="Node3D" unique_id=1989689304]
+
+[node name="Obstacle" type="StaticBody3D" parent="." unique_id=1300754800]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.1530366, 0, 0.054534197)
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Obstacle" unique_id=1720113424]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.25049984, 0)
+mesh = SubResource("BoxMesh_few8b")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Obstacle" unique_id=209575173]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.25049984, 0)
+shape = SubResource("BoxShape3D_svno1")
+
+[node name="Obstacle2" type="StaticBody3D" parent="." unique_id=1476113743]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.0858042, 0, 0.054534197)
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Obstacle2" unique_id=793914918]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.25049984, 0)
+mesh = SubResource("BoxMesh_few8b")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Obstacle2" unique_id=1059584151]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.25049984, 0)
+shape = SubResource("BoxShape3D_svno1")
+
+[node name="Obstacle3" type="StaticBody3D" parent="." unique_id=1396789746]
+transform = Transform3D(-4.371139e-08, 0, -1, 0, 1, 0, 1, 0, -4.371139e-08, -0.06585586, 0, 0.054534197)
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Obstacle3" unique_id=63055077]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.25049984, 0)
+mesh = SubResource("BoxMesh_hpls7")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Obstacle3" unique_id=567784782]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.25049984, 0)
+shape = SubResource("BoxShape3D_ml8ps")

@@ -199,11 +199,11 @@ func _call_reset(request:Dictionary) -> Dictionary:
 
 	if controller.has_method("reset_episode"):
 		if controller.has_method("step_episode"):
-			var seed := int(request.get("seed", 0))
+			var _seed := int(request.get("seed", 0))
 			var teams: Variant = request.get("teams", [0])
 			if typeof(teams) != TYPE_ARRAY:
 				teams = [0]
-			return await controller.reset_episode(seed, teams as Array)
+			return await controller.reset_episode(_seed, teams as Array)
 		return await controller.reset_episode()
 
 	return {"ok": false, "error": "Controller has no reset_episode"}

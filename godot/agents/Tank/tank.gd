@@ -1,367 +1,210 @@
-extends CharacterBody3D 
-class_name Tank
+extends CharacterBody3D
+class_name BattleTank
 
-@export_category("Tank Information")
-@export var move_speed := 20.0
-@export var turn_speed := 2.0
-@export var gravity := 20.0
-@export var manualControl:bool = true
-@export var observation_position_scale := 10.0
-@export var observation_speed_scale := 20.0
+signal damage_received(victim:BattleTank, attacker:BattleTank, amount:float)
+signal destroyed(victim:BattleTank, killer:BattleTank)
 
-var _move_input = 0.0
-var _turn_input = 0.0
-var _raycasts: Array[RayCast3D] = []
+@export_category("Team")
+@export var team_id := 0
 
-@onready var agent:Agent = $Agent
+@export_category("Movement")
+@export var max_forward_speed := 12.0
+@export var max_reverse_speed := 5.0
+@export var acceleration := 18.0
+@export var drag := 12.0
+@export var turn_speed_degrees := 110.0
+
+@export_category("Combat")
+@export var max_health := 100.0
+@export var fire_cooldown := 0.8
+@export var projectile_scene: PackedScene
+@export var projectile_parent: Node
+
+@export_category("Control")
+@export var manual_control := false
+
+@onready var agent: Agent = $Agent
+@onready var muzzle: Marker3D = $Muzzle
+
+var _throttle_input := 0.0
+var _rotation_input := 0.0
+var _cooldown_left := 0.0
+var _health := 100.0
+var _alive := true
+var _training_active := true
+var _initial_collision_layer := 0
+var _initial_collision_mask := 0
+
 
 func _ready() -> void:
-	agent.add_action("idle", Callable(self, "clear_inputs"))
-	agent.add_action("move_forward", Callable(self, "move_forward"))
-	agent.add_action("move_backward", Callable(self, "move_backward"))
-	agent.add_action("turn_right", Callable(self, "turn_right"))
-	agent.add_action("turn_left", Callable(self, "turn_left"))
-	agent.add_action("forward_right", Callable(self, "forward_right"))
-	agent.add_action("forward_left", Callable(self, "forward_left"))
-	agent.add_action("backward_right", Callable(self, "backward_right"))
-	agent.add_action("backward_left", Callable(self, "backward_left"))
-	
-	_find_raycasts(self, _raycasts)
-	if not agent.register_observation_sources(self):
-		_register_observations()
+	_health = max_health
+	_initial_collision_layer = collision_layer
+	_initial_collision_mask = collision_mask
 
-func _physics_process(delta):
+
+func _physics_process(delta:float) -> void:
+	_cooldown_left = maxf(_cooldown_left - delta, 0.0)
+	if not _training_active or not _alive:
+		return
+
+	if manual_control:
+		_throttle_input = Input.get_axis("move_back", "move_forward")
+		_rotation_input = Input.get_axis("turn_left", "turn_right")
+
+	rotate_y(-_rotation_input * deg_to_rad(turn_speed_degrees) * delta)
+
+	var speed_limit := max_forward_speed if _throttle_input >= 0.0 else max_reverse_speed
+	var desired_velocity := global_transform.basis.z * _throttle_input * speed_limit
+	var flat_velocity := Vector3(velocity.x, 0.0, velocity.z)
+	if absf(_throttle_input) > 0.05:
+		flat_velocity = flat_velocity.move_toward(desired_velocity, acceleration * delta)
+	else:
+		flat_velocity = flat_velocity.move_toward(Vector3.ZERO, drag * delta)
+
+	velocity.x = flat_velocity.x
+	velocity.z = flat_velocity.z
 	if not is_on_floor():
-		velocity.y -= gravity * delta
-
-	var y_velocity := velocity.y
-	
-	if manualControl:
-		manual_control()
-
-	velocity = global_transform.basis.z * _move_input * move_speed * delta
-	velocity.y = y_velocity
-
-	rotate_y(_turn_input * turn_speed * delta)
+		velocity += get_gravity() * delta
 	move_and_slide()
 
 
-func apply_action(action:Variant) -> int:
-	if typeof(action) == TYPE_STRING or typeof(action) == TYPE_STRING_NAME:
-		var action_name := str(action)
-		if action_name == "manual":
-			return apply_manual_action()
-		var named_action_id := _action_id_from_name(action_name)
-		if named_action_id < 0:
-			clear_inputs()
-			return 0
-		clear_inputs()
-		agent.act(named_action_id)
-		return named_action_id
+func apply_action(action:Variant) -> Variant:
+	if (typeof(action) == TYPE_STRING or typeof(action) == TYPE_STRING_NAME) and str(action) == "manual":
+		return apply_manual_action()
 
+	manual_control = false
 	clear_inputs()
-	var action_id := int(action)
-	if agent.act(action_id) != OK:
-		return 0
-	return action_id
+	if not _alive or typeof(action) != TYPE_DICTIONARY:
+		return _zero_action()
+
+	var action_map: Dictionary = action
+	var movement := agent.decode_continuous_action(action_map)
+	_throttle_input = clampf(float(movement[0]), -1.0, 1.0) if movement.size() > 0 else 0.0
+	_rotation_input = clampf(float(movement[1]), -1.0, 1.0) if movement.size() > 1 else 0.0
+
+	var weapon_action := int(action_map.get("weapon", 0))
+	if agent.act_discrete(weapon_action, "weapon") != OK:
+		weapon_action = 0
+
+	return {
+		"movement": [_throttle_input, _rotation_input],
+		"weapon": weapon_action
+	}
 
 
-func apply_manual_action() -> int:
-	var action_id := get_manual_action_id()
+func apply_manual_action() -> Dictionary:
+	return apply_action({
+		"movement": [
+			Input.get_axis("move_back", "move_forward"),
+			Input.get_axis("turn_left", "turn_right")
+		],
+		"weapon": 1 if Input.is_action_just_pressed("fire") else 0
+	})
+
+
+func hold_fire() -> void:
+	pass
+
+
+func request_fire() -> void:
+	if not try_fire():
+		agent.add_reward_event("invalid_fire", 1.0)
+
+
+func try_fire() -> bool:
+	if not _alive or _cooldown_left > 0.0 or projectile_scene == null:
+		return false
+
+	var projectile := projectile_scene.instantiate()
+	var parent := projectile_parent if projectile_parent != null else get_tree().current_scene
+	parent.add_child(projectile)
+	projectile.global_transform = muzzle.global_transform
+	projectile.launch(self)
+	_cooldown_left = fire_cooldown
+	return true
+
+
+func take_damage(attacker:BattleTank, amount:float) -> void:
+	if not _alive:
+		return
+	_health = maxf(_health - amount, 0.0)
+	damage_received.emit(self, attacker, amount)
+	if _health > 0.0:
+		return
+
+	_alive = false
+	visible = false
+	collision_layer = 0
+	collision_mask = 0
 	clear_inputs()
-	agent.act(action_id)
-	return action_id
+	velocity = Vector3.ZERO
+	destroyed.emit(self, attacker)
 
 
-func get_manual_action_id() -> int:
-	var move_axis := Input.get_axis("move_back", "move_forward")
-	var turn_axis := Input.get_axis("turn_left", "turn_right")
-	var deadzone := 0.2
-	var move := 0
-	var turn := 0
-
-	if move_axis > deadzone:
-		move = 1
-	elif move_axis < -deadzone:
-		move = -1
-
-	if turn_axis > deadzone:
-		turn = 1
-	elif turn_axis < -deadzone:
-		turn = -1
-
-	if move > 0 and turn > 0:
-		return _action_id_from_name("forward_right")
-	if move > 0 and turn < 0:
-		return _action_id_from_name("forward_left")
-	if move < 0 and turn > 0:
-		return _action_id_from_name("backward_right")
-	if move < 0 and turn < 0:
-		return _action_id_from_name("backward_left")
-	if move > 0:
-		return _action_id_from_name("move_forward")
-	if move < 0:
-		return _action_id_from_name("move_backward")
-	if turn > 0:
-		return _action_id_from_name("turn_right")
-	if turn < 0:
-		return _action_id_from_name("turn_left")
-	return _action_id_from_name("idle")
+func get_team_id() -> int:
+	return team_id
 
 
-func get_observation_vector() -> Array:
-	return agent.get_observation_vector()
+func get_control_input(input_name:String) -> float:
+	if input_name == "throttle_input":
+		return _throttle_input
+	if input_name == "rotation_input":
+		return _rotation_input
+	return 0.0
 
 
-func get_observation_size() -> int:
-	return agent.get_observation_size()
+func get_health_observation() -> float:
+	return clampf(_health / maxf(max_health, 0.001), 0.0, 1.0)
 
 
-func get_observations() -> Dictionary:
-	return agent.get_observations()
+func get_reload_ready_observation() -> float:
+	return 1.0 if _cooldown_left <= 0.0 else 0.0
 
 
-func get_action_count() -> int:
-	return agent.get_action_count()
+func get_alive_observation() -> float:
+	return 1.0 if _alive else 0.0
 
 
-func get_action_names() -> Array:
-	return agent.get_action_names()
+func is_alive() -> bool:
+	return _alive
 
 
-func get_action_space() -> Dictionary:
-	return agent.get_action_space()
-
-
-func get_action_type() -> String:
-	return agent.get_action_type()
-
-
-func get_action_size() -> int:
-	return agent.get_action_size()
-
-
-func reset_reward() -> void:
-	agent.reset_reward(_build_reward_context())
-
-
-func add_reward_event(term:String, value:float) -> void:
-	agent.add_reward_event(term, value)
-
-
-func get_reward() -> float:
-	return agent.get_reward(_build_reward_context())
-
-
-func get_reward_terms() -> Dictionary:
-	return agent.get_reward_terms()
+func is_terminal() -> bool:
+	return false
 
 
 func clear_inputs() -> void:
-	_move_input = 0.0
-	_turn_input = 0.0
-
-	
-func move_forward() -> void:
-	_move_input = 1
-	
-
-func move_backward() -> void:
-	_move_input = -1
+	_throttle_input = 0.0
+	_rotation_input = 0.0
 
 
-func turn_right() -> void:
-	_turn_input = -1
-
-
-func turn_left() -> void:
-	_turn_input = 1
-
-
-func forward_right() -> void:
-	_move_input = 1
-	_turn_input = -1
-
-
-func forward_left() -> void:
-	_move_input = 1
-	_turn_input = 1
-
-
-func backward_right() -> void:
-	_move_input = -1
-	_turn_input = -1
-
-
-func backward_left() -> void:
-	_move_input = -1
-	_turn_input = 1
-
-
-func manual_control() -> void:
-	if manualControl:
-		_move_input = Input.get_axis("move_back", "move_forward")
-		_turn_input = -Input.get_axis("turn_left", "turn_right")
-
-func reset_all(original_position:Transform3D, reset_rewards := true):
-	if original_position!= null:
-		transform = original_position
+func reset_all(original_transform:Variant, reset_rewards := true) -> void:
+	set_training_active(true)
+	if typeof(original_transform) == TYPE_TRANSFORM3D:
+		transform = original_transform
+	_health = max_health
+	_alive = true
+	_cooldown_left = 0.0
+	visible = true
+	collision_layer = _initial_collision_layer
+	collision_mask = _initial_collision_mask
 	clear_inputs()
 	velocity = Vector3.ZERO
 	if has_method("reset_physics_interpolation"):
 		reset_physics_interpolation()
-	reset_raycast_state()
-	if reset_rewards:
-		refresh_sensors()
-		reset_reward()
-
-func reset_raycast_state() -> void:
 	agent.reset_observation_sources()
-	for raycast in _raycasts:
-		if is_instance_valid(raycast):
-			raycast.clear_exceptions()
-			raycast.enabled = false
-
-func refresh_sensors() -> void:
-	agent.refresh_observation_sources()
-	for raycast in _raycasts:
-		if is_instance_valid(raycast):
-			raycast.clear_exceptions()
-			raycast.enabled = true
-			raycast.force_raycast_update()
-
-func _register_observations() -> void:
-	if _raycasts.is_empty():
-		_find_raycasts(self, _raycasts)
-
-	agent.add_observation("position", Callable(self, "_get_position_observation"))
-	agent.add_observation("forward", Callable(self, "_get_forward_observation"))
-	agent.add_observation("local_velocity", Callable(self, "_get_local_velocity_observation"))
-	agent.add_observation("move_input", Callable(self, "_get_move_input"))
-	agent.add_observation("turn_input", Callable(self, "_get_turn_input"))
-	
-	agent.add_observation("target_visible", Callable(self, "_get_target_visible"))
-	agent.add_observation("target_signal_left", Callable(self, "_get_target_signal").bind($ViewSensor/LineOfViewSensorLeft))
-	agent.add_observation("target_signal_center", Callable(self, "_get_target_signal").bind($ViewSensor/LineOfViewSensor))
-	agent.add_observation("target_signal_right", Callable(self, "_get_target_signal").bind($ViewSensor/LineOfViewSensorRight))
-
-	var used_names := {}
-	for raycast in _raycasts:
-		raycast.enabled = true
-		var sensor_name := _make_unique_sensor_name(_get_sensor_base_name(raycast), used_names)
-		agent.add_observation("ray_%s" % sensor_name, Callable(self, "_get_raycast_distance_observation").bind(raycast))
-
-func _find_raycasts(node:Node, result:Array[RayCast3D]) -> void:
-	for child in node.get_children():
-		if child is RayCast3D:
-			result.append(child)
-		_find_raycasts(child, result)
-
-func _make_unique_sensor_name(base_name:String, used_names:Dictionary) -> String:
-	if base_name.is_empty():
-		base_name = "sensor"
-
-	if not used_names.has(base_name):
-		used_names[base_name] = 1
-		return base_name
-
-	used_names[base_name] += 1
-	return "%s_%d" % [base_name, used_names[base_name]]
-
-func _get_sensor_base_name(raycast:RayCast3D) -> String:
-	var parent_name := "sensor_group"
-	if raycast.get_parent() != null:
-		parent_name = str(raycast.get_parent().name)
-
-	return "%s_%s" % [
-		parent_name.to_lower().replace(" ", "_"),
-		str(raycast.name).to_lower().replace(" ", "_")
-	]
-
-func _action_id_from_name(action_name:String) -> int:
-	var action_names := agent.get_action_names()
-	for idx in range(action_names.size()):
-		if str(action_names[idx]) == action_name:
-			return idx
-	return -1
-
-func _build_reward_context() -> Dictionary:
-	return {
-		"body": self,
-		"observations": get_observations()
-	}
+	if reset_rewards:
+		agent.refresh_observation_sources()
+		agent.reset_reward({"body": self})
 
 
-func _get_position_observation() -> Vector3:
-	return global_position / max(observation_position_scale, 0.001)
+func set_training_active(enabled:bool) -> void:
+	_training_active = enabled
+	set_physics_process(enabled)
+	if not enabled:
+		clear_inputs()
+		velocity = Vector3.ZERO
 
 
-func _get_forward_observation() -> Vector3:
-	return global_transform.basis.z.normalized()
-
-
-func _get_local_velocity_observation() -> Vector3:
-	var local_velocity := global_transform.basis.inverse() * velocity
-	return local_velocity / max(observation_speed_scale, 0.001)
-
-
-func _get_move_input() -> float:
-	return _move_input
-
-
-func _get_turn_input() -> float:
-	return _turn_input
-
-
-func _get_raycast_distance_observation(raycast:RayCast3D) -> float:
-	if not is_instance_valid(raycast):
-		return 1.0
-
-	raycast.force_raycast_update()
-
-	var max_distance := raycast.target_position.length()
-	if max_distance <= 0.001:
-		return 1.0
-
-	if not raycast.is_colliding():
-		return 1.0
-
-	var hit_distance := raycast.global_position.distance_to(raycast.get_collision_point())
-	return clamp(hit_distance / max_distance, 0.0, 1.0)
-
-func _raycast_hits_target(raycast: RayCast3D) -> bool:
-	raycast.force_raycast_update()
-	
-	if not raycast.is_colliding():
-		return false
-	
-	var collider = raycast.get_collider()
-	if collider == null:
-		return false
-		
-	return _node_or_parent_is_in_group(collider, "target")
-	
-func _get_target_signal(raycast: RayCast3D) -> float:
-	if not _raycast_hits_target(raycast):
-		return 0.0
-	var max_distance = raycast.target_position.length()
-	var hit_distance = raycast.global_position.distance_to(raycast.get_collision_point())
-	var normalized_distance = clamp(hit_distance / max_distance, 0.0, 1.0)
-	return 1.0 - normalized_distance
-	
-func _get_target_visible() -> float:
-	if _raycast_hits_target($ViewSensor/LineOfViewSensorLeft):
-		return 1.0
-	if _raycast_hits_target($ViewSensor/LineOfViewSensor):
-		return 1.0
-	if _raycast_hits_target($ViewSensor/LineOfViewSensorRight):
-		return 1.0
-	return 0.0
-
-func _node_or_parent_is_in_group(node: Node, group_name: String) -> bool:
-	var current = node
-	while current != null:
-		if current.is_in_group(group_name):
-			return true
-		current = current.get_parent()
-	return false
+func _zero_action() -> Dictionary:
+	return {"movement": [0.0, 0.0], "weapon": 0}
