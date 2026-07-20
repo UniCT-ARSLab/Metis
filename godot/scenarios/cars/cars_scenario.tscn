@@ -8,7 +8,6 @@
 [ext_resource type="Script" uid="uid://b0mpnu83er6il" path="res://scripts/agent/scenario_reward_components/EventScenarioReward.gd" id="6_event_reward"]
 [ext_resource type="Script" uid="uid://5rg0xs5vr24r" path="res://scripts/agent/scenario_reward_components/ProgressStallScenarioReward.gd" id="7_stall_reward"]
 [ext_resource type="Script" uid="uid://de8abo2d3ccfc" path="res://scripts/agent/scenario_reward_components/ProgressPaceScenarioReward.gd" id="8_pace_reward"]
-[ext_resource type="Script" uid="uid://d6nwtectqyp" path="res://scripts/agent/scenario_reward_components/AgentTerminalScenarioReward.gd" id="9_terminal_reward"]
 [ext_resource type="Script" uid="uid://dvjsbnwsr82xy" path="res://scripts/agent/progress/Path3DProgressProvider.gd" id="10_progress_provider"]
 [ext_resource type="Script" uid="uid://b47ph323gt6gl" path="res://scripts/agent/events/ScenarioEventSystem.gd" id="11_event_system"]
 [ext_resource type="Script" uid="uid://douxrysm43n8i" path="res://scripts/agent/events/AreaReachedEventSource.gd" id="12_area_event"]
@@ -141,9 +140,11 @@ controlled_agents = [NodePath("../Agents/Car")]
 randomize_reset = true
 reset_use_progress_provider = true
 reset_progress_max = 0.025
-reset_yaw_jitter_degrees = 0.0
+reset_lateral_jitter = 0.2
+reset_yaw_jitter_degrees = 5.0
+max_steps = 4500
 agent_to_replicate = NodePath("../Agents/Car")
-number_of_replications = 9
+number_of_replications = 0
 agents_container = NodePath("../Agents")
 
 [node name="ProgressProvider" type="Node" parent="ScenarioController" unique_id=1354235311 node_paths=PackedStringArray("path")]
@@ -164,31 +165,27 @@ script = ExtResource("4_rewards")
 
 [node name="ProgressReward" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=790006403]
 script = ExtResource("5_progress_reward")
-progress_reward_scale = 180.0
-backward_penalty_scale = 120.0
+progress_reward_scale = 100.0
+backward_penalty_scale = 100.0
 
 [node name="FinishReward" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=93529843]
 script = ExtResource("6_event_reward")
 event_name = "finish_reached"
-reward = 80.0
+reward = 50.0
 
 [node name="ProgressStallPenalty" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=836538214]
 script = ExtResource("7_stall_reward")
 terminate_on_stalled_progress = true
-stalled_progress_window_steps = 110
-stalled_progress_min_delta = 0.008
-stalled_progress_penalty = -6.0
+stalled_progress_window_steps = 150
+stalled_progress_min_delta = 0.005
+stalled_progress_penalty = -8.0
 
 [node name="ProgressPacePenalty" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=1623680728]
 script = ExtResource("8_pace_reward")
 progress_pace_bucket_size = 0.01
-progress_pace_steps_per_bucket = 100
-progress_pace_penalty = -4.0
-terminate_on_progress_pace_failure = true
-
-[node name="AgentTerminalPenalty" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=557879140]
-script = ExtResource("9_terminal_reward")
-penalty = -20.0
+progress_pace_steps_per_bucket = 130
+progress_pace_penalty = -2.0
+terminate_on_progress_pace_failure = false
 
 [node name="Environment" type="Node3D" parent="." unique_id=412876759]
 
@@ -222,6 +219,7 @@ skeleton = NodePath("")
 [node name="CollisionShape3D" type="CollisionShape3D" parent="Environment/Tracciato" unique_id=1991173489]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -4.521594, -0.05673933, -2.7313485)
 shape = SubResource("ConcavePolygonShape3D_p42p6")
+disabled = true
 
 [node name="Path3D" type="Path3D" parent="Environment/Tracciato" unique_id=1190980157]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.18224001, 0)
@@ -258,10 +256,10 @@ offset_bottom = 46.0
 text = "Total Agents: "
 label_settings = SubResource("LabelSettings_p42p6")
 
-[node name="RoadGenerator" type="Path3D" parent="." unique_id=316570233]
+[node name="RoadGenerator" type="Path3D" parent="." groups=["navigation_path"] unique_id=316570233]
 curve = SubResource("Curve3D_xv75d")
 
-[node name="CSGPolygon3D3" type="CSGPolygon3D" parent="RoadGenerator" unique_id=1448621689]
+[node name="CSGPolygon3D3" type="CSGPolygon3D" parent="RoadGenerator" groups=["car_crash_obstacle"] unique_id=1448621689]
 use_collision = true
 collision_layer = 2
 polygon = PackedVector2Array(6.8228264, -0.04716444, 6.7743917, 1.9506198, 7.31263, 1.9417965, 7.327011, 0.024861932)
@@ -278,7 +276,7 @@ path_u_distance = 1.0
 path_joined = true
 smooth_faces = true
 
-[node name="CSGPolygon3D2" type="CSGPolygon3D" parent="RoadGenerator" unique_id=1012139786]
+[node name="CSGPolygon3D2" type="CSGPolygon3D" parent="RoadGenerator" groups=["car_crash_obstacle"] unique_id=1012139786]
 use_collision = true
 collision_layer = 2
 polygon = PackedVector2Array(-7.3068123, 0.05918908, -7.3088417, 1.7531005, -6.7088413, 1.769418, -6.6948395, 0.061200857)

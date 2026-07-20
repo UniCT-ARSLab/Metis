@@ -2,18 +2,20 @@ extends CharacterBody3D
 class_name Car
 
 @export_category("Driving")
-@export var acceleration := 100.0
-@export var brake_strength := 9.0
-@export var steering_speed_degrees := 115.0
-@export var low_speed_steering_reference := 28.0
-@export_range(0.0, 1.0, 0.01) var min_steering_authority := 0.16
-@export var min_forward_speed_for_steering := 2.0
-@export var friction := 4.0
-@export var max_speed := 800.0
-@export var manual_control := true
+@export var acceleration := 35.0
+@export var brake_strength := 8.0
+@export var steering_speed_degrees := 100.0
+@export var min_speed_for_steering := 0.5
+@export var friction := 3.0
+@export var max_speed := 20.0
+@export var manual_control := false
+
+@export_category("RL Contract")
+@export var path_aware_observations := false
 
 @export_category("Episode")
 @export var crash_floor_normal_threshold := 0.5
+@export var crash_obstacle_group := "car_crash_obstacle"
 
 @export_category("Presentation")
 @export var auto_manage_camera := false
@@ -37,6 +39,10 @@ var _crashed := false
 var _training_active := true
 
 
+func _enter_tree() -> void:
+	_configure_path_observations()
+
+
 func _ready() -> void:
 	if auto_optimize_in_headless and _is_headless():
 		set_training_optimized(true)
@@ -56,13 +62,11 @@ func _physics_process(delta:float) -> void:
 
 		var acceleration_input := clampf(_move_input, -1.0, 1.0)
 		var forward_speed := absf(get_signed_forward_speed())
-		var steering_authority := 0.0
-		if acceleration_input > 0.1 and forward_speed >= min_forward_speed_for_steering:
-			steering_authority = minf(
-				(forward_speed - min_forward_speed_for_steering) / maxf(low_speed_steering_reference, 0.000001),
-				1.0
-			)
-			steering_authority = maxf(steering_authority, min_steering_authority)
+		var steering_authority := clampf(
+			forward_speed / maxf(min_speed_for_steering * 4.0, 0.001),
+			0.0,
+			1.0
+		)
 
 		rotate_y(-_rotate_input * steering_authority * deg_to_rad(steering_speed_degrees) * delta)
 		if acceleration_input >= 0.0:
@@ -70,7 +74,7 @@ func _physics_process(delta:float) -> void:
 		else:
 			velocity = velocity.lerp(Vector3.ZERO, minf(absf(acceleration_input) * brake_strength * delta, 1.0))
 
-		velocity = velocity.lerp(Vector3.ZERO, friction * delta)
+		velocity = velocity.lerp(Vector3.ZERO, minf(friction * delta, 1.0))
 		velocity = velocity.limit_length(max_speed)
 		move_and_slide()
 
@@ -82,15 +86,9 @@ func _physics_process(delta:float) -> void:
 
 func apply_action(action:Variant) -> Variant:
 	if typeof(action) == TYPE_STRING or typeof(action) == TYPE_STRING_NAME:
-		var action_name := str(action)
-		if action_name == "manual":
+		if str(action) == "manual":
 			return apply_manual_action()
-		if agent.get_action_type() == "discrete":
-			return _apply_discrete_action(action_name)
-
-	if agent.get_action_type() == "continuous":
-		return apply_continuous_action(action)
-	return _apply_discrete_action(action)
+	return apply_continuous_action(action)
 
 
 func apply_continuous_action(action:Variant) -> Array:
@@ -136,6 +134,11 @@ func get_control_input(input_name:String) -> float:
 	if input_name == "rotation_input" or input_name == "steering_input":
 		return _rotate_input
 	return 0.0
+
+
+func set_path_aware_observations(enabled:bool) -> void:
+	path_aware_observations = enabled
+	_configure_path_observations()
 
 
 func is_terminal() -> bool:
@@ -192,20 +195,10 @@ func set_training_optimized(enabled:bool) -> void:
 		camera.process_mode = Node.PROCESS_MODE_DISABLED
 
 
-func _apply_discrete_action(action:Variant) -> int:
-	clear_inputs()
-	var action_id := int(action) if typeof(action) == TYPE_INT else _action_id_from_name(str(action))
-	if action_id < 0 or agent.act(action_id) != OK:
-		return 0
-	return action_id
-
-
-func _action_id_from_name(action_name:String) -> int:
-	var action_names := agent.get_action_names()
-	for idx in range(action_names.size()):
-		if str(action_names[idx]) == action_name:
-			return idx
-	return -1
+func _configure_path_observations() -> void:
+	var source := get_node_or_null("Agent/ObservationSystem/PathNavigation")
+	if source != null:
+		source.set("enabled", path_aware_observations)
 
 
 func _update_crash_state() -> void:
@@ -213,13 +206,31 @@ func _update_crash_state() -> void:
 		return
 	for collision_idx in range(get_slide_collision_count()):
 		var collision := get_slide_collision(collision_idx)
-		if collision == null or collision.get_normal().dot(Vector3.UP) >= crash_floor_normal_threshold:
+		if collision == null:
+			continue
+		var collider := collision.get_collider()
+		var explicit_obstacle := (
+			collider is Node
+			and not crash_obstacle_group.is_empty()
+			and _node_or_parent_is_in_group(collider, crash_obstacle_group)
+		)
+		var non_floor_contact := collision.get_normal().dot(Vector3.UP) < crash_floor_normal_threshold
+		if not explicit_obstacle and not non_floor_contact:
 			continue
 		_crashed = true
 		if auto_manage_camera:
 			set_camera_current(false)
 		agent.add_reward_event("collision", 1.0)
 		return
+
+
+func _node_or_parent_is_in_group(node:Node, group_name:String) -> bool:
+	var current:Node = node
+	while current != null:
+		if current.is_in_group(group_name):
+			return true
+		current = current.get_parent()
+	return false
 
 
 func _update_status_text(text:String) -> void:

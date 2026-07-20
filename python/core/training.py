@@ -45,6 +45,16 @@ def add_tensorflow_runtime_arguments(parser, *, include_compile_learner=False):
             default=True,
             help="Compile learner updates into a TensorFlow graph and batch consecutive updates.",
         )
+        parser.add_argument(
+            "--tf-xla",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help=(
+                "Compile the learner graph with XLA (jit_compile). Measured SLOWER for the "
+                "small actor-critic MLPs used here (fusion overhead exceeds the gain); off by "
+                "default. Enable with --tf-xla only for large networks where XLA pays off."
+            ),
+        )
 
 
 RENDER_MODES = ("project", "cpu", "light-gpu", "gpu")
@@ -128,6 +138,15 @@ def add_best_checkpoint_arguments(parser):
         help="Device exposed to the isolated policy evaluator.",
     )
     parser.add_argument(
+        "--best-evaluation-cpu-threads",
+        type=int,
+        default=1,
+        help=(
+            "CPU threads available to a CPU best-checkpoint evaluator. Small policy "
+            "networks are usually faster with one thread and do not starve training."
+        ),
+    )
+    parser.add_argument(
         "--best-metric",
         choices=["auto", "success_rate", "reward_mean"],
         default="auto",
@@ -188,6 +207,8 @@ class BestCheckpointTracker:
         # Zero is meaningful (exit without waiting); negative is not.
         if float(getattr(self.args, "best_final_drain_timeout", 0.0)) < 0.0:
             raise ValueError("--best-final-drain-timeout cannot be negative")
+        if int(getattr(self.args, "best_evaluation_cpu_threads", 1)) < 1:
+            raise ValueError("--best-evaluation-cpu-threads must be at least 1")
         if self.args.best_evaluation_training_episode is not None and int(
             self.args.best_evaluation_training_episode
         ) < 0:
@@ -281,9 +302,26 @@ class BestCheckpointTracker:
             child_env = os.environ.copy()
             if self.args.best_evaluation_device == "cpu":
                 child_env["CUDA_VISIBLE_DEVICES"] = ""
+                cpu_threads = str(getattr(self.args, "best_evaluation_cpu_threads", 1))
+                for variable in (
+                    "OMP_NUM_THREADS",
+                    "OPENBLAS_NUM_THREADS",
+                    "MKL_NUM_THREADS",
+                    "NUMEXPR_NUM_THREADS",
+                    "TF_NUM_INTRAOP_THREADS",
+                    "TF_NUM_INTEROP_THREADS",
+                ):
+                    child_env[variable] = cpu_threads
             print(
                 f"Evaluating frozen checkpoint episode={episode} "
-                f"episodes={self.args.best_evaluation_episodes} metric={self.args.best_metric}...",
+                f"episodes={self.args.best_evaluation_episodes} metric={self.args.best_metric} "
+                f"device={self.args.best_evaluation_device}"
+                + (
+                    f" cpu_threads={getattr(self.args, 'best_evaluation_cpu_threads', 1)}"
+                    if self.args.best_evaluation_device == "cpu"
+                    else ""
+                )
+                + "...",
                 flush=True,
             )
             try:

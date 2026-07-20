@@ -190,7 +190,7 @@ def parse_args():
     add_parallel_env_arguments(parser)
     add_lockstep_tuning_arguments(parser)
     add_log_format_argument(parser)
-    add_tensorflow_runtime_arguments(parser)
+    add_tensorflow_runtime_arguments(parser, include_compile_learner=True)
     add_godot_render_argument(parser)
 
     # Accepted for command compatibility with DDPG runs; SAC exploration is entropy-based.
@@ -313,7 +313,7 @@ def select_action_with(sample_fn, obs, action_low, action_high):
     )[0]
 
 
-def train_step(
+def build_sac_learner_step(
     actor,
     critic1,
     critic2,
@@ -325,61 +325,67 @@ def train_step(
     alpha_optimizer,
     log_alpha,
     target_entropy,
-    buffer,
-    batch_size,
     gamma,
     action_low,
     action_high,
     log_std_min,
     log_std_max,
-    update_policy=True,
+    *,
+    compiled=True,
+    xla=False,
 ):
-    obs, actions, rewards, next_obs, dones = buffer.sample(batch_size, action_dtype=np.float32)
-    obs = tf.convert_to_tensor(obs, dtype=tf.float32)
-    actions = tf.convert_to_tensor(actions, dtype=tf.float32)
-    rewards = tf.convert_to_tensor(rewards.reshape(-1, 1), dtype=tf.float32)
-    next_obs = tf.convert_to_tensor(next_obs, dtype=tf.float32)
-    dones = tf.convert_to_tensor(dones.reshape(-1, 1), dtype=tf.float32)
-    action_low_tensor = tf.convert_to_tensor(action_low.reshape(1, -1), dtype=tf.float32)
-    action_high_tensor = tf.convert_to_tensor(action_high.reshape(1, -1), dtype=tf.float32)
+    """Build the SAC gradient step, optionally compiled into a tf.function.
 
-    alpha = tf.exp(log_alpha)
-    next_actions, next_log_prob, _ = sample_actor(
-        actor,
-        next_obs,
-        action_low_tensor,
-        action_high_tensor,
-        log_std_min,
-        log_std_max,
-    )
-    target_q1 = target_critic1([next_obs, next_actions], training=False)
-    target_q2 = target_critic2([next_obs, next_actions], training=False)
-    target_q = tf.minimum(target_q1, target_q2) - alpha * next_log_prob
-    y = rewards + (1.0 - dones) * gamma * target_q
+    Eager updates dispatch each op individually and force a host sync via .numpy() every
+    call, which makes the learner the async pipeline's bottleneck (queue saturates). A
+    traced graph fuses the forward/backward/apply into one launch (typically 5-10x). Mirrors
+    build_dqn_learner_step. The `update_policy` flag is a Python bool, so it selects between
+    two concrete functions (critics-only vs full) to keep each graph's output structure
+    fixed instead of returning None from inside a graph. Sampling stays in Python (the
+    replay buffer is not a tensor); only the tensor math is graphed.
+    """
+    gamma_c = tf.constant(float(gamma), dtype=tf.float32)
+    action_low_tensor = tf.constant(np.asarray(action_low, dtype=np.float32).reshape(1, -1))
+    action_high_tensor = tf.constant(np.asarray(action_high, dtype=np.float32).reshape(1, -1))
+    target_entropy_c = tf.constant(float(target_entropy), dtype=tf.float32)
 
-    with tf.GradientTape() as tape:
-        q1 = critic1([obs, actions], training=True)
-        critic1_loss = tf.reduce_mean(tf.square(tf.stop_gradient(y) - q1))
-    critic1_grads = tape.gradient(critic1_loss, critic1.trainable_variables)
-    critic1_optimizer.apply_gradients(zip(critic1_grads, critic1.trainable_variables))
+    # Build slots eagerly (outside any graph) so a deferred checkpoint restore populates them
+    # deterministically and no variable is created inside the traced function after resume.
+    critic1_optimizer.build(critic1.trainable_variables)
+    critic2_optimizer.build(critic2.trainable_variables)
+    actor_optimizer.build(actor.trainable_variables)
+    alpha_optimizer.build([log_alpha])
 
-    with tf.GradientTape() as tape:
-        q2 = critic2([obs, actions], training=True)
-        critic2_loss = tf.reduce_mean(tf.square(tf.stop_gradient(y) - q2))
-    critic2_grads = tape.gradient(critic2_loss, critic2.trainable_variables)
-    critic2_optimizer.apply_gradients(zip(critic2_grads, critic2.trainable_variables))
+    def _update_critics_impl(obs, actions, rewards, next_obs, dones):
+        alpha = tf.exp(log_alpha)
+        next_actions, next_log_prob, _ = sample_actor(
+            actor, next_obs, action_low_tensor, action_high_tensor, log_std_min, log_std_max
+        )
+        target_q1 = target_critic1([next_obs, next_actions], training=False)
+        target_q2 = target_critic2([next_obs, next_actions], training=False)
+        target_q = tf.minimum(target_q1, target_q2) - alpha * next_log_prob
+        y = tf.stop_gradient(rewards + (1.0 - dones) * gamma_c * target_q)
 
-    actor_loss_value = None
-    alpha_loss_value = None
-    if update_policy:
+        with tf.GradientTape() as tape:
+            q1 = critic1([obs, actions], training=True)
+            critic1_loss = tf.reduce_mean(tf.square(y - q1))
+        critic1_grads = tape.gradient(critic1_loss, critic1.trainable_variables)
+        critic1_optimizer.apply_gradients(zip(critic1_grads, critic1.trainable_variables))
+
+        with tf.GradientTape() as tape:
+            q2 = critic2([obs, actions], training=True)
+            critic2_loss = tf.reduce_mean(tf.square(y - q2))
+        critic2_grads = tape.gradient(critic2_loss, critic2.trainable_variables)
+        critic2_optimizer.apply_gradients(zip(critic2_grads, critic2.trainable_variables))
+        return critic1_loss, critic2_loss
+
+    def _update_all_impl(obs, actions, rewards, next_obs, dones):
+        critic1_loss, critic2_loss = _update_critics_impl(obs, actions, rewards, next_obs, dones)
+        alpha = tf.exp(log_alpha)
+
         with tf.GradientTape() as tape:
             policy_actions, log_prob, _ = sample_actor(
-                actor,
-                obs,
-                action_low_tensor,
-                action_high_tensor,
-                log_std_min,
-                log_std_max,
+                actor, obs, action_low_tensor, action_high_tensor, log_std_min, log_std_max
             )
             q1_pi = critic1([obs, policy_actions], training=False)
             q2_pi = critic2([obs, policy_actions], training=False)
@@ -387,29 +393,50 @@ def train_step(
             actor_loss = tf.reduce_mean(alpha * log_prob - q_pi)
         actor_grads = tape.gradient(actor_loss, actor.trainable_variables)
         actor_optimizer.apply_gradients(zip(actor_grads, actor.trainable_variables))
-        actor_loss_value = float(actor_loss.numpy())
 
         with tf.GradientTape() as tape:
             _, log_prob, _ = sample_actor(
-                actor,
-                obs,
-                action_low_tensor,
-                action_high_tensor,
-                log_std_min,
-                log_std_max,
+                actor, obs, action_low_tensor, action_high_tensor, log_std_min, log_std_max
             )
-            alpha_loss = -tf.reduce_mean(log_alpha * tf.stop_gradient(log_prob + target_entropy))
+            alpha_loss = -tf.reduce_mean(log_alpha * tf.stop_gradient(log_prob + target_entropy_c))
         alpha_grads = tape.gradient(alpha_loss, [log_alpha])
         alpha_optimizer.apply_gradients(zip(alpha_grads, [log_alpha]))
-        alpha_loss_value = float(alpha_loss.numpy())
+        return actor_loss, critic1_loss, critic2_loss, alpha_loss, tf.exp(log_alpha)
 
-    return (
-        actor_loss_value,
-        float(critic1_loss.numpy()),
-        float(critic2_loss.numpy()),
-        alpha_loss_value,
-        float(tf.exp(log_alpha).numpy()),
-    )
+    if compiled:
+        update_critics = tf.function(_update_critics_impl, reduce_retracing=True, jit_compile=xla)
+        update_all = tf.function(_update_all_impl, reduce_retracing=True, jit_compile=xla)
+    else:
+        update_critics = _update_critics_impl
+        update_all = _update_all_impl
+
+    def learner_step(obs, actions, rewards, next_obs, dones, update_policy=True):
+        obs = tf.convert_to_tensor(obs, dtype=tf.float32)
+        actions = tf.convert_to_tensor(actions, dtype=tf.float32)
+        rewards = tf.convert_to_tensor(np.asarray(rewards).reshape(-1, 1), dtype=tf.float32)
+        next_obs = tf.convert_to_tensor(next_obs, dtype=tf.float32)
+        dones = tf.convert_to_tensor(np.asarray(dones).reshape(-1, 1), dtype=tf.float32)
+        if update_policy:
+            actor_loss, critic1_loss, critic2_loss, alpha_loss, alpha_value = update_all(
+                obs, actions, rewards, next_obs, dones
+            )
+            return (
+                float(actor_loss.numpy()),
+                float(critic1_loss.numpy()),
+                float(critic2_loss.numpy()),
+                float(alpha_loss.numpy()),
+                float(alpha_value.numpy()),
+            )
+        critic1_loss, critic2_loss = update_critics(obs, actions, rewards, next_obs, dones)
+        return (
+            None,
+            float(critic1_loss.numpy()),
+            float(critic2_loss.numpy()),
+            None,
+            float(tf.exp(log_alpha).numpy()),
+        )
+
+    return learner_step
 
 
 def pretrain_actor_behavior_cloning(actor, demo_data, epochs, batch_size, learning_rate, action_low, action_high):
@@ -537,6 +564,31 @@ def run_async_sac(
     validate_async_arguments(args)
     obs_dim = envs[0].obs_dim
     action_size = envs[0].action_size
+    sac_learner = build_sac_learner_step(
+        actor,
+        critic1,
+        critic2,
+        target_critic1,
+        target_critic2,
+        actor_optimizer,
+        critic1_optimizer,
+        critic2_optimizer,
+        alpha_optimizer,
+        log_alpha,
+        target_entropy,
+        args.gamma,
+        action_low,
+        action_high,
+        args.log_std_min,
+        args.log_std_max,
+        compiled=args.tf_compile_learner,
+        xla=args.tf_xla,
+    )
+    print(
+        f"SAC learner: {'compiled graph' if args.tf_compile_learner else 'eager'}"
+        f"{' + XLA' if args.tf_compile_learner and args.tf_xla else ''}",
+        flush=True,
+    )
     with tf.device("/CPU:0"):
         local_models = [
             build_sac_actor(obs_dim=obs_dim, action_size=action_size)
@@ -651,27 +703,8 @@ def run_async_sac(
                         update_policy = warmup_complete and policy_update_candidates % args.policy_update_every == 0
                         if warmup_complete:
                             policy_update_candidates += 1
-                        losses = train_step(
-                            actor,
-                            critic1,
-                            critic2,
-                            target_critic1,
-                            target_critic2,
-                            actor_optimizer,
-                            critic1_optimizer,
-                            critic2_optimizer,
-                            alpha_optimizer,
-                            log_alpha,
-                            target_entropy,
-                            buffer,
-                            args.batch_size,
-                            args.gamma,
-                            action_low,
-                            action_high,
-                            args.log_std_min,
-                            args.log_std_max,
-                            update_policy=update_policy,
-                        )
+                        batch = buffer.sample(args.batch_size, action_dtype=np.float32)
+                        losses = sac_learner(*batch, update_policy=update_policy)
                         critic1_losses.append(losses[1])
                         critic2_losses.append(losses[2])
                         critic_updates_since_resume += 1
@@ -1044,6 +1077,32 @@ def main():
             print(f"Saved actor weights: {args.actor_weights_path}", flush=True)
             return
 
+        sac_learner = build_sac_learner_step(
+            actor,
+            critic1,
+            critic2,
+            target_critic1,
+            target_critic2,
+            actor_optimizer,
+            critic1_optimizer,
+            critic2_optimizer,
+            alpha_optimizer,
+            log_alpha,
+            target_entropy,
+            args.gamma,
+            action_low,
+            action_high,
+            args.log_std_min,
+            args.log_std_max,
+            compiled=args.tf_compile_learner,
+            xla=args.tf_xla,
+        )
+        print(
+            f"SAC learner: {'compiled graph' if args.tf_compile_learner else 'eager'}"
+            f"{' + XLA' if args.tf_compile_learner and args.tf_xla else ''}",
+            flush=True,
+        )
+
         last_saved_episode = None
         for episode in range(start_episode, args.num_episodes):
             opponent_match = opponent_pool.start_episode(actor, episode)
@@ -1271,27 +1330,8 @@ def main():
                         )
                         if warmup_complete:
                             policy_update_candidates += 1
-                        losses = train_step(
-                            actor,
-                            critic1,
-                            critic2,
-                            target_critic1,
-                            target_critic2,
-                            actor_optimizer,
-                            critic1_optimizer,
-                            critic2_optimizer,
-                            alpha_optimizer,
-                            log_alpha,
-                            target_entropy,
-                            buffer,
-                            args.batch_size,
-                            args.gamma,
-                            action_low,
-                            action_high,
-                            args.log_std_min,
-                            args.log_std_max,
-                            update_policy=update_policy,
-                        )
+                        batch = buffer.sample(args.batch_size, action_dtype=np.float32)
+                        losses = sac_learner(*batch, update_policy=update_policy)
                         critic1_losses.append(losses[1])
                         critic2_losses.append(losses[2])
                         critic_updates_since_resume += 1

@@ -12,6 +12,16 @@ Il confronto e' utile soltanto se tutto il resto rimane uguale. Usa la stessa pi
 le stesse reward e gli stessi seed per capire quanto la conoscenza privilegiata del
 percorso aiuti davvero.
 
+Il repository contiene gia' le due scene pronte per questo confronto:
+
+```text
+res://scenarios/cars/cars_scenario.tscn             sensor-only, obs_dim=14
+res://scenarios/cars/cars_path_aware_scenario.tscn  path-aware, obs_dim=24
+```
+
+Entrambe usano `res://agents/Car/car.tscn`. La seconda e' una scena ereditata che
+abilita soltanto `PathNavigation`, senza duplicare fisica, azioni o reward.
+
 ## 1. Una distinzione fondamentale
 
 Un Path3D puo' essere usato in due modi indipendenti:
@@ -104,9 +114,10 @@ Con nove RayCast, come nell'attuale Cars, otteniamo 14 valori.
 Non inserire la velocita' non normalizzata. I valori molto piu' grandi delle altre
 observation rendono l'ottimizzazione inutilmente difficile.
 
-## 5. Creare AutonomousVehicle.tscn
+## 5. Usare Car.tscn o creare un veicolo equivalente
 
-Puoi partire dalla scena Cars ripulita oppure creare:
+La scena `res://agents/Car/car.tscn` e' gia' configurata con questa struttura. Per un
+nuovo veicolo, riproduci lo stesso contratto:
 
 ```text
 AutonomousVehicle (CharacterBody3D) [autonomous_vehicle.gd]
@@ -354,7 +365,9 @@ TimePenalty:
   term_name = "time"
 
 SmoothnessPenalty:
+  input_names = ["move_input", "rotation_input"]
   penalty_scale = -0.01
+  normalize_by_input_count = true
   term_name = "action_smoothness"
 
 CollisionPenalty:
@@ -400,16 +413,25 @@ reset_progress_max = 0.03
 reset_lateral_jitter = 0.20
 reset_yaw_jitter_degrees = 5.0
 reset_align_to_progress = true
-max_steps = 1000
+max_steps = 4500
 ```
+
+Il `RoadGenerator` incluso misura circa 584 unita'. Con `max_speed=20`, 1000 tick
+fisici non basterebbero a percorrerlo dalla partenza neppure in condizioni ideali.
+Il limite di 4500 lascia tempo agli episodi riusciti; lo stall termina comunque molto
+prima le auto ferme o incapaci di progredire.
 
 Nel `ProgressProvider`, assegna `NavigationPath`. Nel `FinishReached`, assegna
 `FinishArea`, usa `event_name="finish_reached"` e
 `terminal_reason="finish_reached"`.
 
+Assegna ai collider dei bordi il gruppo `car_crash_obstacle`. `Car` considera sempre
+terminale un contatto con questo gruppo, senza dipendere dalla normale prodotta da
+mesh curve o CSG. Lascia il piano stradale fuori dal gruppo.
+
 ## 11. Reward di scenario comuni
 
-Un punto di partenza meno aggressivo dell'esempio Cars sperimentale:
+I valori usati dalla scena Cars di riferimento sono:
 
 ```text
 ProgressReward:
@@ -522,14 +544,14 @@ generalizzazione va misurata su layout non visti.
 
 ## 14. Due scene o un nodo abilitabile
 
-La soluzione piu' chiara e' creare:
+Nel repository sono presenti:
 
 ```text
-vehicle_sensor_only.tscn       obs_dim=14
-vehicle_path_aware.tscn        obs_dim=24
+cars_scenario.tscn             obs_dim=14
+cars_path_aware_scenario.tscn  obs_dim=24
 ```
 
-La seconda puo' ereditare dalla prima e aggiungere soltanto `PathNavigation`.
+La seconda eredita dalla prima e abilita soltanto `PathNavigation`.
 
 Non attivare o disattivare il nodo durante lo stesso training: cambiare `obs_dim`
 invalida il modello e il replay buffer. Usa directory e pesi separati.
@@ -554,10 +576,10 @@ python/.venv/bin/python python/train.py \
   --algorithm sac \
   --godot-bin /home/fedyfausto/Godot/Godot_v4.6.2-stable_linux.x86_64 \
   --godot-project godot \
-  --godot-scene res://scenarios/driving/path_aware_scenario.tscn \
+  --godot-scene res://scenarios/cars/cars_path_aware_scenario.tscn \
   --num-envs 4 \
   --num-episodes 3000 \
-  --max-steps-per-episode 1000 \
+  --max-steps-per-episode 4500 \
   --batch-size 128 \
   --replay-warmup 12000 \
   --random-exploration-episodes 40 \
@@ -580,10 +602,10 @@ python/.venv/bin/python python/train.py \
   --algorithm sac \
   --godot-bin /home/fedyfausto/Godot/Godot_v4.6.2-stable_linux.x86_64 \
   --godot-project godot \
-  --godot-scene res://scenarios/driving/sensor_only_scenario.tscn \
+  --godot-scene res://scenarios/cars/cars_scenario.tscn \
   --num-envs 4 \
   --num-episodes 3000 \
-  --max-steps-per-episode 1000 \
+  --max-steps-per-episode 4500 \
   --batch-size 128 \
   --replay-warmup 12000 \
   --random-exploration-episodes 40 \
@@ -673,7 +695,7 @@ Path-aware:
 python/.venv/bin/python python/tools/random_rollout.py \
   --godot-bin /home/fedyfausto/Godot/Godot_v4.6.2-stable_linux.x86_64 \
   --godot-project godot \
-  --godot-scene res://scenarios/driving/path_aware_scenario.tscn \
+  --godot-scene res://scenarios/cars/cars_path_aware_scenario.tscn \
   --steps 20 \
   --print-reward-terms \
   --no-headless
@@ -687,7 +709,7 @@ Sensor-only:
 python/.venv/bin/python python/tools/random_rollout.py \
   --godot-bin /home/fedyfausto/Godot/Godot_v4.6.2-stable_linux.x86_64 \
   --godot-project godot \
-  --godot-scene res://scenarios/driving/sensor_only_scenario.tscn \
+  --godot-scene res://scenarios/cars/cars_scenario.tscn \
   --steps 20 \
   --print-reward-terms \
   --no-headless
@@ -728,7 +750,7 @@ python/.venv/bin/python python/run.py \
   --algorithm sac \
   --godot-bin /home/fedyfausto/Godot/Godot_v4.6.2-stable_linux.x86_64 \
   --godot-project godot \
-  --godot-scene res://scenarios/driving/path_aware_scenario.tscn \
+  --godot-scene res://scenarios/cars/cars_path_aware_scenario.tscn \
   --actor-weights-path driving_path_aware_actor_v1.weights.h5 \
   --episodes 20 \
   --no-headless
@@ -741,7 +763,7 @@ python/.venv/bin/python python/run.py \
   --algorithm sac \
   --godot-bin /home/fedyfausto/Godot/Godot_v4.6.2-stable_linux.x86_64 \
   --godot-project godot \
-  --godot-scene res://scenarios/driving/sensor_only_scenario.tscn \
+  --godot-scene res://scenarios/cars/cars_scenario.tscn \
   --actor-weights-path driving_sensor_only_actor_v1.weights.h5 \
   --episodes 20 \
   --no-headless

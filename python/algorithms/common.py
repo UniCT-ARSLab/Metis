@@ -209,7 +209,7 @@ def parse_args(trainer_variant):
     add_opponent_pool_arguments(parser)
     add_best_checkpoint_arguments(parser)
     add_log_format_argument(parser)
-    add_tensorflow_runtime_arguments(parser)
+    add_tensorflow_runtime_arguments(parser, include_compile_learner=True)
     add_godot_render_argument(parser)
     args = parser.parse_args()
     args.trainer_variant = trainer_variant
@@ -678,13 +678,21 @@ def create_continuous_async_worker(
 
 
 def soft_update(target_model, source_model, tau):
-    target_weights = target_model.get_weights()
-    source_weights = source_model.get_weights()
-    updated = [
-        (1.0 - tau) * target_weight + tau * source_weight
-        for target_weight, source_weight in zip(target_weights, source_weights)
-    ]
-    target_model.set_weights(updated)
+    target_weights = target_model.weights
+    source_weights = source_model.weights
+    if len(target_weights) != len(source_weights):
+        raise ValueError("Target and source models must expose the same number of weights")
+
+    # Keep Polyak averaging on the TensorFlow device. get_weights()/set_weights()
+    # copies every tensor through NumPy, which stalls the GPU on every learner update.
+    for target_weight, source_weight in zip(target_weights, source_weights):
+        if target_weight.shape != source_weight.shape:
+            raise ValueError(
+                "Target and source model weights must have matching shapes: "
+                f"{target_weight.shape} != {source_weight.shape}"
+            )
+        tau_tensor = tf.cast(tau, target_weight.dtype)
+        target_weight.assign_add(tau_tensor * (source_weight - target_weight))
 
 
 def variant_uses_td3(variant):
@@ -872,6 +880,191 @@ def train_step(*args, **kwargs):
     """Backward-compatible DDPG update used by older imports and focused tests."""
     result = train_deterministic_step(*args, **kwargs)
     return result["actor_loss"], result["critic_loss"]
+
+
+def build_deterministic_learner_step(
+    actor,
+    critic,
+    target_actor,
+    target_critic,
+    actor_optimizer,
+    critic_optimizer,
+    gamma,
+    action_low,
+    action_high,
+    *,
+    variant="ddpg",
+    drive_indices=None,
+    actor_drive_regularization=0.0,
+    actor_drive_target=0.65,
+    critic2=None,
+    target_critic2=None,
+    critic2_optimizer=None,
+    target_policy_noise=0.2,
+    target_noise_clip=0.5,
+    policy_delay=2,
+    demo_data=None,
+    demo_batch_size=128,
+    demo_q_filter=False,
+    td3_bc_alpha=2.5,
+    ddpgfd_actor_priority_weight=1e-3,
+    batch_size=128,
+    compiled=True,
+    xla=False,
+):
+    """Build the DDPG/TD3 gradient step, optionally compiled into a tf.function.
+
+    Only the plain ``ddpg``/``td3`` variants compile: the demonstration variants
+    (``ddpg_bc``/``ddpgfd``/``td3_bc``) run Python side-effects mid-step -- prioritized
+    replay writeback (``buffer.update_priorities``) and demo sampling -- that do not graph
+    cleanly, so they fall back to the eager ``train_deterministic_step``. Sampling stays in
+    Python; only the tensor math is graphed. Mirrors build_sac_learner_step. Returns a
+    callable ``learner_step(buffer, *, update_actor, learner_update, bc_weight)`` yielding the
+    same dict as ``train_deterministic_step``.
+    """
+    uses_td3 = variant_uses_td3(variant)
+    can_compile = bool(compiled) and str(variant) in ("ddpg", "td3")
+
+    if not can_compile:
+        print(
+            f"Deterministic learner: eager (variant {variant} uses demo/prioritized replay)"
+            if compiled
+            else "Deterministic learner: eager",
+            flush=True,
+        )
+
+        def learner_step(buffer, *, update_actor, learner_update, bc_weight=0.0):
+            return train_deterministic_step(
+                actor,
+                critic,
+                target_actor,
+                target_critic,
+                actor_optimizer,
+                critic_optimizer,
+                buffer,
+                batch_size,
+                gamma,
+                action_low,
+                action_high,
+                drive_indices=drive_indices,
+                actor_drive_regularization=actor_drive_regularization,
+                actor_drive_target=actor_drive_target,
+                update_actor=update_actor,
+                variant=variant,
+                learner_update=learner_update,
+                critic2=critic2,
+                target_critic2=target_critic2,
+                critic2_optimizer=critic2_optimizer,
+                target_policy_noise=target_policy_noise,
+                target_noise_clip=target_noise_clip,
+                policy_delay=policy_delay,
+                demo_data=demo_data,
+                demo_batch_size=demo_batch_size,
+                bc_weight=bc_weight,
+                demo_q_filter=demo_q_filter,
+                td3_bc_alpha=td3_bc_alpha,
+                ddpgfd_actor_priority_weight=ddpgfd_actor_priority_weight,
+            )
+
+        return learner_step
+
+    print(f"Deterministic learner: compiled graph{' + XLA' if xla else ''}", flush=True)
+    gamma_c = tf.constant(float(gamma), dtype=tf.float32)
+    low = tf.constant(np.asarray(action_low, dtype=np.float32).reshape(1, -1))
+    high = tf.constant(np.asarray(action_high, dtype=np.float32).reshape(1, -1))
+    drive_idx = list(drive_indices) if drive_indices else None
+    drive_reg = float(actor_drive_regularization)
+    drive_target = float(actor_drive_target)
+    noise_scale = float(target_policy_noise)
+    noise_clip = float(target_noise_clip)
+    delay = max(1, int(policy_delay))
+
+    critic_optimizer.build(critic.trainable_variables)
+    actor_optimizer.build(actor.trainable_variables)
+    if uses_td3:
+        critic2_optimizer.build(critic2.trainable_variables)
+
+    def _compute_targets(rewards, next_obs, dones):
+        next_actions = scale_action_tensor(target_actor(next_obs, training=False), low, high)
+        if uses_td3:
+            half = 0.5 * (high - low)
+            noise = tf.random.normal(tf.shape(next_actions), dtype=tf.float32) * noise_scale * half
+            noise = tf.clip_by_value(noise, -noise_clip * half, noise_clip * half)
+            next_actions = tf.clip_by_value(next_actions + noise, low, high)
+        target_q = target_critic([next_obs, next_actions], training=False)
+        if uses_td3:
+            target_q = tf.minimum(target_q, target_critic2([next_obs, next_actions], training=False))
+        return tf.stop_gradient(rewards + (1.0 - dones) * gamma_c * target_q)
+
+    def _update_critics_impl(obs, actions, rewards, next_obs, dones):
+        y = _compute_targets(rewards, next_obs, dones)
+        with tf.GradientTape() as tape:
+            q = critic([obs, actions], training=True)
+            critic_loss = tf.reduce_mean(tf.square(y - q))
+        grads = tape.gradient(critic_loss, critic.trainable_variables)
+        critic_optimizer.apply_gradients(zip(grads, critic.trainable_variables))
+        critic2_loss = tf.constant(0.0, dtype=tf.float32)
+        if uses_td3:
+            with tf.GradientTape() as tape:
+                q2 = critic2([obs, actions], training=True)
+                critic2_loss = tf.reduce_mean(tf.square(y - q2))
+            grads2 = tape.gradient(critic2_loss, critic2.trainable_variables)
+            critic2_optimizer.apply_gradients(zip(grads2, critic2.trainable_variables))
+        return critic_loss, critic2_loss
+
+    def _update_all_impl(obs, actions, rewards, next_obs, dones):
+        critic_loss, critic2_loss = _update_critics_impl(obs, actions, rewards, next_obs, dones)
+        with tf.GradientTape() as tape:
+            policy_actions = scale_action_tensor(actor(obs, training=True), low, high)
+            policy_q = critic([obs, policy_actions], training=False)
+            q_loss = -tf.reduce_mean(policy_q)
+            actor_loss = q_loss
+            if drive_idx and drive_reg > 0.0:
+                drive_values = tf.gather(policy_actions, drive_idx, axis=1)
+                drive_deficit = tf.nn.relu(drive_target - drive_values)
+                actor_loss = actor_loss + drive_reg * tf.reduce_mean(tf.square(drive_deficit))
+        grads = tape.gradient(actor_loss, actor.trainable_variables)
+        actor_optimizer.apply_gradients(zip(grads, actor.trainable_variables))
+        return actor_loss, q_loss, critic_loss, critic2_loss
+
+    if compiled:
+        update_critics = tf.function(_update_critics_impl, reduce_retracing=True, jit_compile=xla)
+        update_all = tf.function(_update_all_impl, reduce_retracing=True, jit_compile=xla)
+    else:
+        update_critics = _update_critics_impl
+        update_all = _update_all_impl
+
+    def learner_step(buffer, *, update_actor, learner_update, bc_weight=0.0):
+        obs, actions, rewards, next_obs, dones = buffer.sample(batch_size, action_dtype=np.float32)
+        obs = tf.convert_to_tensor(obs, dtype=tf.float32)
+        actions = tf.convert_to_tensor(actions, dtype=tf.float32)
+        rewards = tf.convert_to_tensor(rewards.reshape(-1, 1), dtype=tf.float32)
+        next_obs = tf.convert_to_tensor(next_obs, dtype=tf.float32)
+        dones = tf.convert_to_tensor(dones.reshape(-1, 1), dtype=tf.float32)
+        policy_due = (not uses_td3) or (int(learner_update) % delay == 0)
+        do_actor = bool(update_actor) and policy_due
+        if do_actor:
+            actor_loss, q_loss, critic_loss, critic2_loss = update_all(
+                obs, actions, rewards, next_obs, dones
+            )
+            actor_loss_value = float(actor_loss.numpy())
+            q_loss_value = float(q_loss.numpy())
+        else:
+            critic_loss, critic2_loss = update_critics(obs, actions, rewards, next_obs, dones)
+            actor_loss_value = None
+            q_loss_value = None
+        target_update_due = (int(learner_update) % delay == 0) if uses_td3 else False
+        return {
+            "actor_loss": actor_loss_value,
+            "q_loss": q_loss_value,
+            "bc_loss": None,
+            "critic_loss": float(critic_loss.numpy()),
+            "critic2_loss": float(critic2_loss.numpy()) if uses_td3 else None,
+            "target_update_due": target_update_due,
+            "policy_updated": actor_loss_value is not None,
+        }
+
+    return learner_step
 
 
 def save_training_checkpoint(
@@ -1085,6 +1278,35 @@ def run_async_ddpg(
         f"max_updates_per_env_step={scheduler.max_updates_per_env_step}",
         flush=True,
     )
+    det_learner = build_deterministic_learner_step(
+        actor,
+        critic,
+        target_actor,
+        target_critic,
+        actor_optimizer,
+        critic_optimizer,
+        args.gamma,
+        action_low,
+        action_high,
+        variant=args.trainer_variant,
+        drive_indices=actor_drive_indices,
+        actor_drive_regularization=args.actor_drive_regularization,
+        actor_drive_target=args.actor_drive_target,
+        critic2=critic2,
+        target_critic2=target_critic2,
+        critic2_optimizer=critic2_optimizer,
+        target_policy_noise=args.td3_target_policy_noise,
+        target_noise_clip=args.td3_target_noise_clip,
+        policy_delay=args.td3_policy_delay,
+        demo_data=demo_data,
+        demo_batch_size=args.demo_bc_batch_size,
+        demo_q_filter=args.demo_q_filter,
+        td3_bc_alpha=args.td3_bc_alpha,
+        ddpgfd_actor_priority_weight=args.ddpgfd_actor_priority_weight,
+        batch_size=args.batch_size,
+        compiled=args.tf_compile_learner,
+        xla=args.tf_xla,
+    )
     completed = int(start_episode)
     done_workers = 0
     learner_updates = int(critic_optimizer.iterations.numpy())
@@ -1125,36 +1347,11 @@ def run_async_ddpg(
                             args.demo_bc_weight_end,
                             args.demo_bc_decay_updates,
                         )
-                        result = train_deterministic_step(
-                            actor,
-                            critic,
-                            target_actor,
-                            target_critic,
-                            actor_optimizer,
-                            critic_optimizer,
+                        result = det_learner(
                             buffer,
-                            args.batch_size,
-                            args.gamma,
-                            action_low,
-                            action_high,
-                            drive_indices=actor_drive_indices,
-                            actor_drive_regularization=args.actor_drive_regularization,
-                            actor_drive_target=args.actor_drive_target,
                             update_actor=update_actor,
-                            variant=args.trainer_variant,
                             learner_update=next_update,
-                            critic2=critic2,
-                            target_critic2=target_critic2,
-                            critic2_optimizer=critic2_optimizer,
-                            target_policy_noise=args.td3_target_policy_noise,
-                            target_noise_clip=args.td3_target_noise_clip,
-                            policy_delay=args.td3_policy_delay,
-                            demo_data=demo_data,
-                            demo_batch_size=args.demo_bc_batch_size,
                             bc_weight=bc_weight,
-                            demo_q_filter=args.demo_q_filter,
-                            td3_bc_alpha=args.td3_bc_alpha,
-                            ddpgfd_actor_priority_weight=args.ddpgfd_actor_priority_weight,
                         )
                         critic_losses.append(result["critic_loss"])
                         if result["critic2_loss"] is not None:
@@ -1701,6 +1898,36 @@ def main(trainer_variant):
                 print(f"Saved critic2 weights: {args.critic2_weights_path}", flush=True)
             return
 
+        det_learner = build_deterministic_learner_step(
+            actor,
+            critic,
+            target_actor,
+            target_critic,
+            actor_optimizer,
+            critic_optimizer,
+            args.gamma,
+            action_low,
+            action_high,
+            variant=args.trainer_variant,
+            drive_indices=actor_drive_indices,
+            actor_drive_regularization=args.actor_drive_regularization,
+            actor_drive_target=args.actor_drive_target,
+            critic2=critic2,
+            target_critic2=target_critic2,
+            critic2_optimizer=critic2_optimizer,
+            target_policy_noise=args.td3_target_policy_noise,
+            target_noise_clip=args.td3_target_noise_clip,
+            policy_delay=args.td3_policy_delay,
+            demo_data=demo_data,
+            demo_batch_size=args.demo_bc_batch_size,
+            demo_q_filter=args.demo_q_filter,
+            td3_bc_alpha=args.td3_bc_alpha,
+            ddpgfd_actor_priority_weight=args.ddpgfd_actor_priority_weight,
+            batch_size=args.batch_size,
+            compiled=args.tf_compile_learner,
+            xla=args.tf_xla,
+        )
+
         last_saved_episode = None
         for episode in range(start_episode, args.num_episodes):
             opponent_match = opponent_pool.start_episode(actor, episode)
@@ -1929,36 +2156,11 @@ def main(trainer_variant):
                             args.demo_bc_weight_end,
                             args.demo_bc_decay_updates,
                         )
-                        result = train_deterministic_step(
-                            actor,
-                            critic,
-                            target_actor,
-                            target_critic,
-                            actor_optimizer,
-                            critic_optimizer,
+                        result = det_learner(
                             buffer,
-                            args.batch_size,
-                            args.gamma,
-                            action_low,
-                            action_high,
-                            drive_indices=actor_drive_indices,
-                            actor_drive_regularization=args.actor_drive_regularization,
-                            actor_drive_target=args.actor_drive_target,
                             update_actor=update_actor,
-                            variant=args.trainer_variant,
                             learner_update=learner_update,
-                            critic2=critic2,
-                            target_critic2=target_critic2,
-                            critic2_optimizer=critic2_optimizer,
-                            target_policy_noise=args.td3_target_policy_noise,
-                            target_noise_clip=args.td3_target_noise_clip,
-                            policy_delay=args.td3_policy_delay,
-                            demo_data=demo_data,
-                            demo_batch_size=args.demo_bc_batch_size,
                             bc_weight=bc_weight,
-                            demo_q_filter=args.demo_q_filter,
-                            td3_bc_alpha=args.td3_bc_alpha,
-                            ddpgfd_actor_priority_weight=args.ddpgfd_actor_priority_weight,
                         )
                         critic_losses.append(result["critic_loss"])
                         if result["critic2_loss"] is not None:

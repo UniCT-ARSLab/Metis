@@ -109,6 +109,9 @@ dedotta solo dal fatto che il modello accetti batch.
 - Un checkpoint deve poter essere caricato da `run.py` senza dipendere dal replay.
 - Un resume di training off-policy deve poter ripristinare anche il replay.
 - Le metriche multi-agent contano agenti e transizioni, non soltanto step di ambiente.
+- La valutazione automatica del best checkpoint usa per default un solo thread CPU, per
+  non sottrarre risorse ai collector e al learner. Il limite si regola con
+  `--best-evaluation-cpu-threads`; `--no-best-checkpoint` disattiva la valutazione.
 - I moduli interni non sono nuovi entrypoint pubblici: i comandi documentati usano le
   quattro CLI nella radice di `python/`: `train.py`, `run.py`, `recorder.py` ed
   `export.py`.

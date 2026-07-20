@@ -139,7 +139,7 @@ def parse_args():
     add_parallel_env_arguments(parser)
     add_lockstep_tuning_arguments(parser)
     add_log_format_argument(parser)
-    add_tensorflow_runtime_arguments(parser)
+    add_tensorflow_runtime_arguments(parser, include_compile_learner=True)
     add_godot_render_argument(parser)
     return parser.parse_args()
 
@@ -496,6 +496,59 @@ def build_update_batch(trajectories, action_meta, gamma, gae_lambda):
     }
 
 
+_PPO_MINIBATCH_STEPS = {}
+
+
+def build_ppo_minibatch_step(model, log_std, optimizer, action_meta, args, *, compiled=True, xla=False):
+    """PPO minibatch update, optionally compiled into a tf.function.
+
+    Eager runs the forward/backward/apply as individual ops with a host sync per minibatch;
+    a traced graph fuses them (typically 5-10x). The epoch/shuffle/gather loop stays in
+    Python. Mirrors build_sac_learner_step / build_dqn_learner_step.
+    """
+    continuous_size = int(action_meta["continuous_size"])
+    train_vars = model.trainable_variables + ([log_std] if continuous_size > 0 else [])
+    clip_ratio = float(args.clip_ratio)
+    value_loss_coef = float(args.value_loss_coef)
+    entropy_coef = float(args.entropy_coef)
+
+    def minibatch_step(obs, discrete_actions, continuous_actions, old_log_probs, advantages, returns):
+        with tf.GradientTape() as tape:
+            new_log_probs, entropy, values = evaluate_actions(
+                model, log_std, obs, discrete_actions, continuous_actions, action_meta
+            )
+            ratio = tf.exp(new_log_probs - old_log_probs)
+            clipped_ratio = tf.clip_by_value(ratio, 1.0 - clip_ratio, 1.0 + clip_ratio)
+            policy_loss = -tf.reduce_mean(tf.minimum(ratio * advantages, clipped_ratio * advantages))
+            value_loss = tf.reduce_mean(tf.square(returns - values))
+            entropy_bonus = tf.reduce_mean(entropy)
+            loss = policy_loss + value_loss_coef * value_loss - entropy_coef * entropy_bonus
+        grads = tape.gradient(loss, train_vars)
+        optimizer.apply_gradients(zip(grads, train_vars))
+        return loss, policy_loss, value_loss, entropy_bonus
+
+    if compiled:
+        return tf.function(minibatch_step, reduce_retracing=True, jit_compile=xla)
+    return minibatch_step
+
+
+def _get_ppo_minibatch_step(model, log_std, optimizer, action_meta, args):
+    # Build once per (model, log_std, optimizer): rebuilding per rollout would re-trace the
+    # graph every update. One learner model per run, so this holds a single entry.
+    compiled = bool(getattr(args, "tf_compile_learner", True))
+    xla = bool(getattr(args, "tf_xla", False))
+    key = (id(model), id(log_std), id(optimizer), compiled, xla)
+    step = _PPO_MINIBATCH_STEPS.get(key)
+    if step is None:
+        step = build_ppo_minibatch_step(
+            model, log_std, optimizer, action_meta, args, compiled=compiled, xla=xla
+        )
+        _PPO_MINIBATCH_STEPS[key] = step
+        mode = "compiled graph" if compiled else "eager"
+        print(f"PPO learner: {mode}{' + XLA' if compiled and xla else ''}", flush=True)
+    return step
+
+
 def ppo_update(model, log_std, optimizer, batch, action_meta, args):
     obs = tf.convert_to_tensor(batch["obs"], dtype=tf.float32)
     discrete_actions = tf.convert_to_tensor(batch["discrete_actions"], dtype=tf.int32)
@@ -512,30 +565,19 @@ def ppo_update(model, log_std, optimizer, batch, action_meta, args):
     value_losses = []
     entropies = []
 
-    train_vars = model.trainable_variables + ([log_std] if action_meta["continuous_size"] > 0 else [])
+    minibatch_step = _get_ppo_minibatch_step(model, log_std, optimizer, action_meta, args)
     for _ in range(args.ppo_epochs):
         np.random.shuffle(indices)
         for start in range(0, count, args.batch_size):
             idx = indices[start:start + args.batch_size]
-            with tf.GradientTape() as tape:
-                new_log_probs, entropy, values = evaluate_actions(
-                    model,
-                    log_std,
-                    tf.gather(obs, idx),
-                    tf.gather(discrete_actions, idx),
-                    tf.gather(continuous_actions, idx),
-                    action_meta,
-                )
-                ratio = tf.exp(new_log_probs - tf.gather(old_log_probs, idx))
-                batch_advantages = tf.gather(advantages, idx)
-                clipped_ratio = tf.clip_by_value(ratio, 1.0 - args.clip_ratio, 1.0 + args.clip_ratio)
-                policy_loss = -tf.reduce_mean(tf.minimum(ratio * batch_advantages, clipped_ratio * batch_advantages))
-                value_loss = tf.reduce_mean(tf.square(tf.gather(returns, idx) - values))
-                entropy_bonus = tf.reduce_mean(entropy)
-                loss = policy_loss + args.value_loss_coef * value_loss - args.entropy_coef * entropy_bonus
-
-            grads = tape.gradient(loss, train_vars)
-            optimizer.apply_gradients(zip(grads, train_vars))
+            loss, policy_loss, value_loss, entropy_bonus = minibatch_step(
+                tf.gather(obs, idx),
+                tf.gather(discrete_actions, idx),
+                tf.gather(continuous_actions, idx),
+                tf.gather(old_log_probs, idx),
+                tf.gather(advantages, idx),
+                tf.gather(returns, idx),
+            )
             losses.append(float(loss.numpy()))
             policy_losses.append(float(policy_loss.numpy()))
             value_losses.append(float(value_loss.numpy()))

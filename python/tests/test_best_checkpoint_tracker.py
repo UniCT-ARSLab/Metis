@@ -32,6 +32,7 @@ def tracker_args(checkpoint_dir, **overrides):
         "best_evaluation_timeout": 30.0,
         "best_final_drain_timeout": 120.0,
         "best_evaluation_device": "cpu",
+        "best_evaluation_cpu_threads": 1,
         "best_metric": "auto",
         "checkpoint_dir": str(checkpoint_dir),
         "base_port": 6200,
@@ -116,6 +117,31 @@ class BestCheckpointTrackerTests(unittest.TestCase):
 
             max_steps_index = command.index("--max-steps") + 1
             self.assertEqual(command[max_steps_index], "10000")
+
+    def test_cpu_evaluator_limits_math_library_threads(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tracker = BestCheckpointTracker(
+                tracker_args(temp_dir, best_evaluation_cpu_threads=2), "dqn"
+            )
+            seen = {}
+
+            def fake_process(_command, child_env, _timeout):
+                seen.update(child_env)
+                return 1, "", "expected test failure"
+
+            tracker._run_evaluation_process = fake_process
+            tracker.evaluate("ckpt-100", 100)
+
+            self.assertEqual(seen["CUDA_VISIBLE_DEVICES"], "")
+            for variable in (
+                "OMP_NUM_THREADS",
+                "OPENBLAS_NUM_THREADS",
+                "MKL_NUM_THREADS",
+                "NUMEXPR_NUM_THREADS",
+                "TF_NUM_INTRAOP_THREADS",
+                "TF_NUM_INTEROP_THREADS",
+            ):
+                self.assertEqual(seen[variable], "2")
 
 
 def write_fake_checkpoint(prefix, marker):
