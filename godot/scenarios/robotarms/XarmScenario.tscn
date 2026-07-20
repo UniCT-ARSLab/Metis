@@ -1,0 +1,180 @@
+[gd_scene format=3 uid="uid://bhb3n6ohd2bwd"]
+
+[ext_resource type="Script" uid="uid://d38lybllmy6tq" path="res://scripts/bridge_server.gd" id="1_jfawp"]
+[ext_resource type="Script" uid="uid://b8wfataj6dyxj" path="res://scenarios/robotarms/xarm_scenario.gd" id="1_m16lm"]
+[ext_resource type="Script" uid="uid://cun4ha1fidr8n" path="res://scripts/agent/ScenarioController.gd" id="2_dw0os"]
+[ext_resource type="PackedScene" uid="uid://vaijuumklpqx" path="res://agents/RobotArms/xarm/x_arm_agent.tscn" id="3_nsb5c"]
+[ext_resource type="Script" uid="uid://dwsnfjalr8jc7" path="res://scripts/agent/progress/MethodProgressProvider.gd" id="4_1cwtp"]
+[ext_resource type="Script" uid="uid://b47ph323gt6gl" path="res://scripts/agent/events/ScenarioEventSystem.gd" id="5_j17jb"]
+[ext_resource type="Script" uid="uid://botsx3bwjduj2" path="res://scripts/agent/events/ManualScenarioEventSource.gd" id="6_pdjfy"]
+[ext_resource type="Script" uid="uid://tn1jug3aq4ll" path="res://scripts/agent/ScenarioRewardSystem.gd" id="7_x8tpn"]
+[ext_resource type="Script" uid="uid://bmmjchpjospjo" path="res://scripts/agent/scenario_reward_components/ProgressDeltaScenarioReward.gd" id="8_ywys0"]
+[ext_resource type="Script" uid="uid://5rg0xs5vr24r" path="res://scripts/agent/scenario_reward_components/ProgressStallScenarioReward.gd" id="9_qy6q5"]
+[ext_resource type="Script" uid="uid://b0mpnu83er6il" path="res://scripts/agent/scenario_reward_components/EventScenarioReward.gd" id="10_ts88v"]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_ko6j8"]
+sky_horizon_color = Color(0.66224277, 0.6717428, 0.6867428, 1)
+ground_horizon_color = Color(0.66224277, 0.6717428, 0.6867428, 1)
+
+[sub_resource type="Sky" id="Sky_f23b0"]
+sky_material = SubResource("ProceduralSkyMaterial_ko6j8")
+
+[sub_resource type="Environment" id="Environment_721ns"]
+background_mode = 2
+sky = SubResource("Sky_f23b0")
+tonemap_mode = 2
+glow_enabled = true
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_iyblc"]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_wchse"]
+albedo_color = Color(0.31599998, 0.6, 0.17400002, 1)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_m16lm"]
+size = Vector3(2, 0.001, 2)
+
+[sub_resource type="SphereMesh" id="SphereMesh_jfawp"]
+radius = 0.01
+height = 0.02
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_w0qjo"]
+albedo_color = Color(1, 0, 0.8000002, 1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_jfawp"]
+size = Vector3(0.13, 0.12, 0.24)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_dw0os"]
+size = Vector3(0.13, 0.12, 0.24)
+
+[node name="XarmScenario" type="Node3D" unique_id=575438428 node_paths=PackedStringArray("target_spawns")]
+script = ExtResource("1_m16lm")
+target_spawns = [NodePath("Spawns/Marker3D"), NodePath("Spawns/Marker3D2"), NodePath("Spawns/Marker3D3"), NodePath("Spawns/Marker3D4"), NodePath("Spawns/Marker3D5"), NodePath("Spawns/Marker3D6"), NodePath("Spawns/Marker3D7"), NodePath("Spawns/Marker3D8")]
+
+[node name="BridgeServer" type="Node" parent="." unique_id=831052347]
+script = ExtResource("1_jfawp")
+controller_path = NodePath("../ScenarioController")
+metadata/_custom_type_script = "uid://d38lybllmy6tq"
+
+[node name="ScenarioController" type="Node" parent="." unique_id=1131101038 node_paths=PackedStringArray("controlled_agents")]
+script = ExtResource("2_dw0os")
+controlled_agents = [NodePath("../RobotArm")]
+physics_frames_per_step = 3
+metadata/_custom_type_script = "uid://cun4ha1fidr8n"
+
+[node name="ProgressProvider" type="Node" parent="ScenarioController" unique_id=1761560080]
+script = ExtResource("4_1cwtp")
+metadata/_custom_type_script = "uid://dwsnfjalr8jc7"
+
+[node name="ScenarioEventSystem" type="Node" parent="ScenarioController" unique_id=1938388571]
+script = ExtResource("5_j17jb")
+metadata/_custom_type_script = "uid://b47ph323gt6gl"
+
+[node name="GoalReached" type="Node" parent="ScenarioController/ScenarioEventSystem" unique_id=80227875]
+script = ExtResource("6_pdjfy")
+event_name = "target_reached"
+terminal_reason = "target_reached"
+metadata/_custom_type_script = "uid://botsx3bwjduj2"
+
+[node name="Collision" type="Node" parent="ScenarioController/ScenarioEventSystem" unique_id=735569373]
+script = ExtResource("6_pdjfy")
+event_name = "collision"
+terminal_reason = "collision"
+metadata/_custom_type_script = "uid://botsx3bwjduj2"
+
+[node name="ScenarioRewardSystem" type="Node" parent="ScenarioController" unique_id=1091240584]
+script = ExtResource("7_x8tpn")
+metadata/_custom_type_script = "uid://tn1jug3aq4ll"
+
+[node name="Progress" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=1358041893]
+script = ExtResource("8_ywys0")
+backward_penalty_scale = 12.0
+term_name = "target_progress"
+metadata/_custom_type_script = "uid://bmmjchpjospjo"
+
+[node name="NoProgress" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=264087218]
+script = ExtResource("9_qy6q5")
+terminate_on_stalled_progress = true
+stalled_progress_window_steps = 120
+stalled_progress_penalty = -5.0
+metadata/_custom_type_script = "uid://5rg0xs5vr24r"
+
+[node name="GoalReward" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=13240732]
+script = ExtResource("10_ts88v")
+event_name = "target_reached"
+reward = 30.0
+metadata/_custom_type_script = "uid://b0mpnu83er6il"
+
+[node name="CollisionPenalty" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=35669876]
+script = ExtResource("10_ts88v")
+event_name = "collision"
+reward = -20.0
+metadata/_custom_type_script = "uid://b0mpnu83er6il"
+
+[node name="Environment" type="Node3D" parent="." unique_id=2095345585]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="Environment" unique_id=1848979732]
+environment = SubResource("Environment_721ns")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="Environment" unique_id=1714061833]
+transform = Transform3D(-0.8660254, -0.43301278, 0.25, 0, 0.49999997, 0.86602545, -0.50000006, 0.75, -0.43301266, 0, 0, 0)
+shadow_enabled = true
+
+[node name="Floor" type="StaticBody3D" parent="Environment" unique_id=1953206477]
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Environment/Floor" unique_id=2036448328]
+mesh = SubResource("PlaneMesh_iyblc")
+surface_material_override/0 = SubResource("StandardMaterial3D_wchse")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Environment/Floor" unique_id=1159525261]
+shape = SubResource("BoxShape3D_m16lm")
+
+[node name="Camera3D" type="Camera3D" parent="Environment" unique_id=1342671084]
+transform = Transform3D(0.8937797, -0.21330594, 0.3945358, 0, 0.8796661, 0.4755918, -0.44850636, -0.42507428, 0.78622764, 0.28993553, 0.49669093, 0.39805388)
+
+[node name="RobotArm" parent="." unique_id=118315022 node_paths=PackedStringArray("target") instance=ExtResource("3_nsb5c")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.0006389916, 0)
+target = NodePath("../Target")
+
+[node name="Target" type="MeshInstance3D" parent="." unique_id=1913792666]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.21230404, 0.13049985, 0.016337678)
+mesh = SubResource("SphereMesh_jfawp")
+surface_material_override/0 = SubResource("StandardMaterial3D_w0qjo")
+
+[node name="Workcell" type="Node3D" parent="." unique_id=637885706]
+
+[node name="Table" type="StaticBody3D" parent="Workcell" unique_id=131585194 groups=["robot_obstacle"]]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.22295205, 0, 0)
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Workcell/Table" unique_id=1505930290]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.060499847, 0)
+mesh = SubResource("BoxMesh_jfawp")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Workcell/Table" unique_id=1548327577]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.060499847, 0)
+shape = SubResource("BoxShape3D_dw0os")
+
+[node name="Spawns" type="Node3D" parent="." unique_id=1894243734]
+
+[node name="Marker3D" type="Marker3D" parent="Spawns" unique_id=863117836]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.20857948, 0.12542307, 0.07814151)
+
+[node name="Marker3D2" type="Marker3D" parent="Spawns" unique_id=1756042663]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.20857948, 0.12542307, 0.03946642)
+
+[node name="Marker3D3" type="Marker3D" parent="Spawns" unique_id=946833682]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.20857948, 0.12542307, 0.014478788)
+
+[node name="Marker3D4" type="Marker3D" parent="Spawns" unique_id=1074538314]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.20857948, 0.12542307, -0.029518962)
+
+[node name="Marker3D5" type="Marker3D" parent="Spawns" unique_id=720042448]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.20857948, 0.12542307, -0.07385257)
+
+[node name="Marker3D6" type="Marker3D" parent="Spawns" unique_id=1049433676]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.18545917, 0.12542307, -0.07385257)
+
+[node name="Marker3D7" type="Marker3D" parent="Spawns" unique_id=1055857737]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.18545917, 0.12542307, 0.09063281)
+
+[node name="Marker3D8" type="Marker3D" parent="Spawns" unique_id=2008720210]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.18545917, 0.12542307, 0.021793649)

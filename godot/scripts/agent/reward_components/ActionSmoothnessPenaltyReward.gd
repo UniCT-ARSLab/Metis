@@ -5,6 +5,7 @@ class_name ActionSmoothnessPenaltyReward
 @export var free_delta := 0.08
 @export var penalty_scale := -0.04
 @export var use_absolute_delta := true
+@export var normalize_by_input_count := false
 
 var _previous_values := {}
 var _has_previous := false
@@ -46,6 +47,8 @@ func compute_reward(context:Dictionary) -> float:
 		_previous_values[input_name] = current_value
 
 	_has_previous = true
+	if normalize_by_input_count and not input_names.is_empty():
+		penalty /= float(input_names.size())
 	return penalty * weight
 
 

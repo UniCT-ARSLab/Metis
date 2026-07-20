@@ -199,3 +199,10 @@ event_name = "invalid_fire"
 scale = -0.01
 term_name = "invalid_fire"
 metadata/_custom_type_script = "uid://dheahoedootoj"
+
+[node name="TeamLabel" type="Label3D" parent="." unique_id=551796481]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.26302534, 0)
+billboard = 1
+text = "TEAM "
+font_size = 12
+outline_size = 6

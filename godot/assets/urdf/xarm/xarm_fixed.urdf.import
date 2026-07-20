@@ -1,0 +1,16 @@
+[remap]
+
+importer="godot_urdf"
+type="PackedScene"
+uid="uid://cv7oo3gsq3wx3"
+path="res://.godot/imported/xarm_fixed.urdf-7462e43693d07f5ced660376fd9aedce.tscn"
+
+[deps]
+
+source_file="res://assets/urdf/xarm/xarm_fixed.urdf"
+dest_files=["res://.godot/imported/xarm_fixed.urdf-7462e43693d07f5ced660376fd9aedce.tscn"]
+
+[params]
+
+package_folder="/home/fedyfausto/Lavoro/GodotAgents/godot-gymnasium-keras-marl/godot/assets/urdf"
+scale=1.0

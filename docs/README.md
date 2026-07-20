@@ -26,6 +26,7 @@ Se e' la prima volta che apri il progetto:
 | Un veicolo che segue un percorso noto | [Guida autonoma con Path3D](tutorials/tutorial_guida_autonoma_path_vs_sensori.md) |
 | Un veicolo che conosce soltanto i propri sensori | [Guida autonoma sensor-only](tutorials/tutorial_guida_autonoma_path_vs_sensori.md) |
 | Squadre, palla fisica e controllo arcade 3D | [Soccer 3D](tutorials/tutorial_soccer_continuous_multi_agent.md) |
+| Un braccio robotico che raggiunge target evitando ostacoli | [Reaching robotico e sim-to-real](tutorials/tutorial_braccio_robotico_reaching_sim_to_real.md) |
 
 I tutorial non sono soltanto esempi di training. Mostrano come organizzare scene,
 reset, sensori, reward, eventi, curriculum, multi-agent e comandi di esecuzione del

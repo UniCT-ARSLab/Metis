@@ -25,6 +25,7 @@ signal destroyed(victim:BattleTank, killer:BattleTank)
 
 @onready var agent: Agent = $Agent
 @onready var muzzle: Marker3D = $Muzzle
+@onready var team_label: Label3D = $TeamLabel
 
 var _throttle_input := 0.0
 var _rotation_input := 0.0
@@ -40,6 +41,9 @@ func _ready() -> void:
 	_health = max_health
 	_initial_collision_layer = collision_layer
 	_initial_collision_mask = collision_mask
+	team_label.text = "RED" if team_id == 0 else "BLUE"
+	team_label.modulate = Color("red") if team_id == 0 else Color("blue")
+
 
 
 func _physics_process(delta:float) -> void:
