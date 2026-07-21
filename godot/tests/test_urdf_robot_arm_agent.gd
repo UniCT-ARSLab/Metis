@@ -22,11 +22,13 @@ func _initialize() -> void:
 	var end_effector := body.get_node("EndEffector") as Node3D
 	var initial_tcp := end_effector.global_position
 	var initial_link_position := tcp_link.global_position if tcp_link else Vector3.ZERO
+	var initial_collision_info: Dictionary = body.get_last_collision_info()
 	var passed := agent.get_action_type() == "continuous"
-	passed = passed and agent.get_action_size() == 6
-	passed = passed and agent.get_observation_size() == 21
-	passed = passed and body.get_joint_count() == 6
+	passed = passed and agent.get_action_size() == 7
+	passed = passed and agent.get_observation_size() == 33
+	passed = passed and body.get_joint_count() == 7
 	passed = passed and robot.get_actuated_joint_names().size() == 7
+	passed = passed and not body.has_collided()
 
 	body.apply_action([0.0, 1.0, 0.0, 0.0, 0.0, 0.0])
 	for _index in range(4):
@@ -63,7 +65,7 @@ func _initialize() -> void:
 	await physics_frame
 	passed = passed and is_zero_approx(
 		robot.get_joint_position("xarm_5_joint"))
-	passed = passed and agent.get_observation_size() == 21
+	passed = passed and agent.get_observation_size() == 33
 
 	var moving_target := Node3D.new()
 	root.add_child(moving_target)
@@ -79,6 +81,31 @@ func _initialize() -> void:
 	moving_target.free()
 	body.target = null
 	body.set_continue_after_success(false)
+
+	var grasp_target := RigidBody3D.new()
+	grasp_target.freeze = true
+	root.add_child(grasp_target)
+	var grasp_point := Marker3D.new()
+	grasp_target.add_child(grasp_point)
+	grasp_target.global_position = end_effector.global_position
+	body.task_mode = URDFRobotArmAgentBody.TaskMode.GRASPING
+	body.configure_grasp_target(grasp_target, grasp_point)
+	body.grasp_capture_distance = 0.05
+	body.required_lift_height = 0.02
+	body.grasp_hold_physics_frames = 1
+	body.set_grasp_target_spawn_transform(
+		Transform3D(grasp_target.global_basis, grasp_target.global_position - Vector3(0.0, 0.03, 0.0)))
+	robot.set_joint_target_position("grip_left", -1.0)
+	await physics_frame
+	passed = passed and body.is_object_grasped()
+	passed = passed and float(body.get_grasp_state_observation()[0]) > 0.5
+	await physics_frame
+	passed = passed and body.has_succeeded() and body.is_terminal()
+	body.prepare_grasp_target_reset()
+	grasp_target.free()
+	body.task_mode = URDFRobotArmAgentBody.TaskMode.REACHING
+	body.target = null
+	body.initialize_episode_from_current_state()
 
 	var robot_shape := body.get_node(
 		"xarm/xarm_6_joint/xarm_6_link_collision") as CollisionShape3D
@@ -109,9 +136,23 @@ func _initialize() -> void:
 	passed = passed and str(
 		preserved_reset.get("info", {}).get("reset", {}).get("mode", "")) == "current_state"
 
+	var non_adjacent_shapes := robot.get_link_node("xarm_4_link").find_children(
+		"*", "CollisionShape3D", true, false)
+	if not non_adjacent_shapes.is_empty():
+		var non_adjacent_shape := non_adjacent_shapes[0] as CollisionShape3D
+		var original_shape_transform := non_adjacent_shape.global_transform
+		non_adjacent_shape.global_transform = robot_shape.global_transform
+		body.call("_check_self_collisions")
+		passed = passed and body.has_self_collided()
+		passed = passed and str(
+			body.get_last_collision_info().get("type", "")) == "self"
+		non_adjacent_shape.global_transform = original_shape_transform
+	else:
+		passed = false
+
 	if not passed:
 		push_error(
-				"URDF robot arm test failed: action_size=%d obs_size=%d joint=%f reset=%f tcp_delta=%f link_delta=%f terms=%s collided=%s configured_tcp=%s physics=%s links=%s" %
+				"URDF robot arm test failed: action_size=%d obs_size=%d joint=%f reset=%f tcp_delta=%f link_delta=%f terms=%s collided=%s initial_collision=%s collision_info=%s configured_tcp=%s physics=%s links=%s" %
 				[
 					agent.get_action_size(),
 					agent.get_observation_size(),
@@ -121,6 +162,8 @@ func _initialize() -> void:
 					moved_link_position.distance_to(initial_link_position),
 					reward_terms,
 					body.has_collided(),
+					initial_collision_info,
+					body.get_last_collision_info(),
 					body.get("end_effector"),
 				body.is_physics_processing(),
 				robot.links.keys(),

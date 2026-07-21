@@ -553,20 +553,25 @@ class BestCheckpointTracker:
     def _write_checkpoint_state(self):
         """Keep tf.train.latest_checkpoint() working on the best directory.
 
-        run.py falls back to latest_checkpoint() when --checkpoint-path is
-        omitted, so this metafile is a user-facing contract even though a CheckpointManager
-        no longer writes it. Note the public compat.v1 entry point has no
-        save_relative_paths, so these are absolute: the best directory is not relocatable.
+        run.py falls back to latest_checkpoint() when --checkpoint-path is omitted, so this
+        metafile is a user-facing contract even though a CheckpointManager no longer writes
+        it. Written by hand as a text-format CheckpointState proto -- the exact format
+        tf.train.latest_checkpoint() parses -- to avoid the deprecated
+        tf.compat.v1.train.update_checkpoint_state. Paths stay absolute: the best directory
+        is not relocatable.
         """
         if not self._retained:
             return
-        import tensorflow as tf  # local: keeps training_support importable without TF
 
-        tf.compat.v1.train.update_checkpoint_state(
-            str(self.directory),
-            model_checkpoint_path=str(self._retained[-1][1]),
-            all_model_checkpoint_paths=[str(prefix) for _episode, prefix in self._retained],
-        )
+        def _escape(path):
+            return str(path).replace("\\", "\\\\").replace('"', '\\"')
+
+        lines = [f'model_checkpoint_path: "{_escape(self._retained[-1][1])}"']
+        lines += [
+            f'all_model_checkpoint_paths: "{_escape(prefix)}"'
+            for _episode, prefix in self._retained
+        ]
+        (self.directory / "checkpoint").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     def _clear_staging(self):
         for index_path in self.staging_directory.glob("ckpt-*.index"):

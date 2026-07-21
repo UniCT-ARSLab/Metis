@@ -33,12 +33,16 @@ albedo_color = Color(0.31599998, 0.6, 0.17400002, 1)
 [sub_resource type="BoxShape3D" id="BoxShape3D_m16lm"]
 size = Vector3(2, 0.001, 2)
 
-[sub_resource type="SphereMesh" id="SphereMesh_jfawp"]
-radius = 0.01
-height = 0.02
+[sub_resource type="CylinderMesh" id="CylinderMesh_m16lm"]
+top_radius = 0.05
+bottom_radius = 0.035
+height = 0.13
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_w0qjo"]
 albedo_color = Color(1, 0, 0.8000002, 1)
+
+[sub_resource type="ConvexPolygonShape3D" id="ConvexPolygonShape3D_1cwtp"]
+points = PackedVector3Array(0.047611453, 0.06280836, 0.01423818, -0.048287887, 0.052679747, -0.0053528324, -0.048098903, 0.05247152, 0.006320396, 0.033763107, -0.06261881, 0.010279905, 0.0103248395, 0.06288041, -0.048619002, -0.020788062, -0.061935183, -0.02853962, -0.011148739, -0.062132422, 0.033497155, 0.014237849, 0.06280696, 0.047610383, 0.025468044, -0.06151083, -0.024502728, -0.027011178, 0.062911436, 0.041787427, -0.03466027, -0.06251782, 0.0063550044, -0.028780678, 0.062487856, -0.040507086, 0.045909118, 0.06316955, -0.019223465, 0.021880155, -0.062225383, 0.027718734, -0.00727817, -0.062250458, -0.034514073, -0.04292766, 0.06319107, -0.02515904, 0.037023883, 0.05191968, 0.031258192, -0.032693632, -0.062501974, -0.013170181, -0.042417694, 0.062431958, 0.025856564, 0.03157726, 0.06218382, -0.038364317, -0.026545297, -0.059858784, 0.02366599, 0.035750978, -0.056802634, -0.003407433, 0.014031019, -0.0619241, -0.032405045, -0.013306812, 0.0631747, 0.047891937, 0.0043937173, -0.056622434, 0.035645418, -0.011216394, 0.06252629, -0.048347875, 0.04750733, 0.04504116, 0.00441798, 0.027683174, 0.062146906, 0.041273817, 0.029721363, -0.062354762, -0.018981656, -0.0053571933, 0.044919983, 0.047378242, -0.04861689, 0.06287765, 0.010324366, 0.010279909, -0.06261884, 0.033763126)
 
 [sub_resource type="BoxMesh" id="BoxMesh_jfawp"]
 size = Vector3(0.13, 0.12, 0.24)
@@ -46,9 +50,10 @@ size = Vector3(0.13, 0.12, 0.24)
 [sub_resource type="BoxShape3D" id="BoxShape3D_dw0os"]
 size = Vector3(0.13, 0.12, 0.24)
 
-[node name="XarmScenario" type="Node3D" unique_id=575438428 node_paths=PackedStringArray("target_spawns")]
+[node name="XarmScenario" type="Node3D" unique_id=575438428 node_paths=PackedStringArray("target_spawns", "target_spawns_root")]
 script = ExtResource("1_m16lm")
 target_spawns = [NodePath("Spawns/Marker3D"), NodePath("Spawns/Marker3D2"), NodePath("Spawns/Marker3D3"), NodePath("Spawns/Marker3D4"), NodePath("Spawns/Marker3D5"), NodePath("Spawns/Marker3D6"), NodePath("Spawns/Marker3D7"), NodePath("Spawns/Marker3D8")]
+target_spawns_root = NodePath("Spawns")
 
 [node name="BridgeServer" type="Node" parent="." unique_id=831052347]
 script = ExtResource("1_jfawp")
@@ -81,6 +86,23 @@ event_name = "collision"
 terminal_reason = "collision"
 metadata/_custom_type_script = "uid://botsx3bwjduj2"
 
+[node name="SelfCollision" type="Node" parent="ScenarioController/ScenarioEventSystem"]
+script = ExtResource("6_pdjfy")
+event_name = "self_collision"
+terminal_reason = "self_collision"
+metadata/_custom_type_script = "uid://botsx3bwjduj2"
+
+[node name="ObjectGrasped" type="Node" parent="ScenarioController/ScenarioEventSystem"]
+script = ExtResource("6_pdjfy")
+event_name = "object_grasped"
+metadata/_custom_type_script = "uid://botsx3bwjduj2"
+
+[node name="ObjectDropped" type="Node" parent="ScenarioController/ScenarioEventSystem"]
+script = ExtResource("6_pdjfy")
+event_name = "object_dropped"
+terminal_reason = "object_dropped"
+metadata/_custom_type_script = "uid://botsx3bwjduj2"
+
 [node name="ScenarioRewardSystem" type="Node" parent="ScenarioController" unique_id=1091240584]
 script = ExtResource("7_x8tpn")
 metadata/_custom_type_script = "uid://tn1jug3aq4ll"
@@ -94,19 +116,37 @@ metadata/_custom_type_script = "uid://bmmjchpjospjo"
 [node name="NoProgress" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=264087218]
 script = ExtResource("9_qy6q5")
 terminate_on_stalled_progress = true
-stalled_progress_window_steps = 120
+stalled_progress_window_steps = 180
 stalled_progress_penalty = -5.0
 metadata/_custom_type_script = "uid://5rg0xs5vr24r"
 
 [node name="GoalReward" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=13240732]
 script = ExtResource("10_ts88v")
 event_name = "target_reached"
-reward = 30.0
+reward = 40.0
+metadata/_custom_type_script = "uid://b0mpnu83er6il"
+
+[node name="GraspReward" type="Node" parent="ScenarioController/ScenarioRewardSystem"]
+script = ExtResource("10_ts88v")
+event_name = "object_grasped"
+reward = 8.0
 metadata/_custom_type_script = "uid://b0mpnu83er6il"
 
 [node name="CollisionPenalty" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=35669876]
 script = ExtResource("10_ts88v")
 event_name = "collision"
+reward = -20.0
+metadata/_custom_type_script = "uid://b0mpnu83er6il"
+
+[node name="SelfCollisionPenalty" type="Node" parent="ScenarioController/ScenarioRewardSystem"]
+script = ExtResource("10_ts88v")
+event_name = "self_collision"
+reward = -30.0
+metadata/_custom_type_script = "uid://b0mpnu83er6il"
+
+[node name="DropPenalty" type="Node" parent="ScenarioController/ScenarioRewardSystem"]
+script = ExtResource("10_ts88v")
+event_name = "object_dropped"
 reward = -20.0
 metadata/_custom_type_script = "uid://b0mpnu83er6il"
 
@@ -119,7 +159,7 @@ environment = SubResource("Environment_721ns")
 transform = Transform3D(-0.8660254, -0.43301278, 0.25, 0, 0.49999997, 0.86602545, -0.50000006, 0.75, -0.43301266, 0, 0, 0)
 shadow_enabled = true
 
-[node name="Floor" type="StaticBody3D" parent="Environment" unique_id=1953206477]
+[node name="Floor" type="StaticBody3D" parent="Environment" unique_id=1953206477 groups=["robot_obstacle", "robot_support_surface"]]
 
 [node name="MeshInstance3D" type="MeshInstance3D" parent="Environment/Floor" unique_id=2036448328]
 mesh = SubResource("PlaneMesh_iyblc")
@@ -131,14 +171,33 @@ shape = SubResource("BoxShape3D_m16lm")
 [node name="Camera3D" type="Camera3D" parent="Environment" unique_id=1342671084]
 transform = Transform3D(0.8937797, -0.21330594, 0.3945358, 0, 0.8796661, 0.4755918, -0.44850636, -0.42507428, 0.78622764, 0.28993553, 0.49669093, 0.39805388)
 
-[node name="RobotArm" parent="." unique_id=118315022 node_paths=PackedStringArray("target") instance=ExtResource("3_nsb5c")]
+[node name="RobotArm" parent="." unique_id=118315022 node_paths=PackedStringArray("target", "grasp_target_body") instance=ExtResource("3_nsb5c")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.0006389916, 0)
-target = NodePath("../Target")
+task_mode = 1
+target = NodePath("../Target/GraspPoint")
+grasp_target_body = NodePath("../Target")
+support_contact_link_names = PackedStringArray("xarm_6_link")
 
-[node name="Target" type="MeshInstance3D" parent="." unique_id=1913792666]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.21230404, 0.13049985, 0.016337678)
-mesh = SubResource("SphereMesh_jfawp")
+[node name="Target" type="RigidBody3D" parent="." unique_id=1048856628 groups=["graspable"]]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.23149951, 0.15180902, 0)
+mass = 0.02
+continuous_cd = true
+contact_monitor = true
+max_contacts_reported = 8
+linear_damp = 0.2
+angular_damp = 0.2
+
+[node name="Mesh" type="MeshInstance3D" parent="Target" unique_id=1913792666]
+transform = Transform3D(0.5, 0, 0, 0, 0.5, 0, 0, 0, 0.5, 0, 0, 0)
+mesh = SubResource("CylinderMesh_m16lm")
+skeleton = NodePath("../..")
 surface_material_override/0 = SubResource("StandardMaterial3D_w0qjo")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Target" unique_id=33409472]
+transform = Transform3D(0.5, 0, 0, 0, 0.5, 0, 0, 0, 0.5, 0, 0, 0)
+shape = SubResource("ConvexPolygonShape3D_1cwtp")
+
+[node name="GraspPoint" type="Marker3D" parent="Target"]
 
 [node name="Workcell" type="Node3D" parent="." unique_id=637885706]
 
@@ -156,25 +215,88 @@ shape = SubResource("BoxShape3D_dw0os")
 [node name="Spawns" type="Node3D" parent="." unique_id=1894243734]
 
 [node name="Marker3D" type="Marker3D" parent="Spawns" unique_id=863117836]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.20857948, 0.12542307, 0.07814151)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.20857948, 0.152, 0.07814151)
 
 [node name="Marker3D2" type="Marker3D" parent="Spawns" unique_id=1756042663]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.20857948, 0.12542307, 0.03946642)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.20857948, 0.152, 0.03946642)
 
 [node name="Marker3D3" type="Marker3D" parent="Spawns" unique_id=946833682]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.20857948, 0.12542307, 0.014478788)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.20857948, 0.152, 0.014478788)
 
 [node name="Marker3D4" type="Marker3D" parent="Spawns" unique_id=1074538314]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.20857948, 0.12542307, -0.029518962)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.20857948, 0.152, -0.029518962)
 
 [node name="Marker3D5" type="Marker3D" parent="Spawns" unique_id=720042448]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.20857948, 0.12542307, -0.07385257)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.20857948, 0.152, -0.07385257)
 
 [node name="Marker3D6" type="Marker3D" parent="Spawns" unique_id=1049433676]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.18545917, 0.12542307, -0.07385257)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.18545917, 0.152, -0.07385257)
 
 [node name="Marker3D7" type="Marker3D" parent="Spawns" unique_id=1055857737]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.18545917, 0.12542307, 0.09063281)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.18545917, 0.152, 0.09063281)
 
 [node name="Marker3D8" type="Marker3D" parent="Spawns" unique_id=2008720210]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.18545917, 0.12542307, 0.021793649)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.18545917, 0.152, 0.021793649)
+
+[node name="Marker3D9" type="Marker3D" parent="Spawns" unique_id=1900345072]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.18545917, 0.152, -0.02617602)
+
+[node name="Marker3D10" type="Marker3D" parent="Spawns" unique_id=1756356737]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.1845, 0.152, -0.02617602)
+
+[node name="Marker3D11" type="Marker3D" parent="Spawns" unique_id=338334981]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.1845, 0.152, 0.006370399)
+
+[node name="Marker3D12" type="Marker3D" parent="Spawns" unique_id=1622837323]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.1845, 0.152, 0.046721935)
+
+[node name="Marker3D13" type="Marker3D" parent="Spawns" unique_id=89234466]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.1845, 0.152, 0.07821558)
+
+[node name="Marker3D14" type="Marker3D" parent="Spawns" unique_id=1820488970]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.1845, 0.152, -0.068996064)
+
+[node name="Marker3D15" type="Marker3D" parent="Spawns" unique_id=1699088434]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.22945379, 0.152, 0.08077664)
+
+[node name="Marker3D16" type="Marker3D" parent="Spawns" unique_id=39188452]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.22945379, 0.152, 0.094)
+
+[node name="Marker3D17" type="Marker3D" parent="Spawns" unique_id=275692307]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.22945379, 0.152, 0.050474577)
+
+[node name="Marker3D18" type="Marker3D" parent="Spawns" unique_id=173671949]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.25131655, 0.152, -0.051785596)
+
+[node name="Marker3D19" type="Marker3D" parent="Spawns" unique_id=16935310]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.25131655, 0.152, 0.006564066)
+
+[node name="Marker3D20" type="Marker3D" parent="Spawns" unique_id=151390152]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.25131655, 0.152, 0.042367764)
+
+[node name="Marker3D21" type="Marker3D" parent="Spawns" unique_id=999983915]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.25131655, 0.152, 0.07248084)
+
+[node name="Marker3D22" type="Marker3D" parent="Spawns" unique_id=485688596]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.25131655, 0.152, 0.094)
+
+[node name="Marker3D23" type="Marker3D" parent="Spawns" unique_id=22858784]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.19601372, 0.152, 0.094)
+
+[node name="Marker3D24" type="Marker3D" parent="Spawns" unique_id=1778372883]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.261, 0.152, 0.094)
+
+[node name="Marker3D25" type="Marker3D" parent="Spawns" unique_id=1475694308]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.261, 0.152, 0.07865207)
+
+[node name="Marker3D26" type="Marker3D" parent="Spawns" unique_id=343385000]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.261, 0.152, 0.042420246)
+
+[node name="Marker3D27" type="Marker3D" parent="Spawns" unique_id=1014748267]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.261, 0.152, 0.001877062)
+
+[node name="Marker3D28" type="Marker3D" parent="Spawns" unique_id=621776505]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.261, 0.152, -0.047710083)
+
+[node name="Marker3D29" type="Marker3D" parent="Spawns" unique_id=1415153513]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.261, 0.152, -0.085)

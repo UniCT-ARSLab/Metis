@@ -1,4 +1,4 @@
-# Braccio robotico: reaching, ostacoli e sim-to-real
+# Braccio robotico: reaching, presa assistita, ostacoli e sim-to-real
 
 Questo tutorial costruisce il digital twin di una cella robotica in cui un braccio
 raggiunge target noti evitando ostacoli fissi. Geometria, frame, limiti e controllo
@@ -15,9 +15,11 @@ Il risultato finale usa:
 - TD3+BC / DDPG+BC da traiettorie esperte, con SAC come confronto;
 - una safety layer esterna alla policy per l'esecuzione sul robot.
 
-Il tutorial si ferma al reaching. Presa, gripper e contatti con oggetti sono un secondo
-problema: richiedono una simulazione dinamica e un modello di contatto molto piu'
-accurati.
+Il percorso principale costruisce prima il reaching. La scena XArm inclusa aggiunge poi
+una presa assistita di un `RigidBody3D`: il gripper deve raggiungere e chiudersi attorno
+all'oggetto, quindi sollevarlo stabilmente. Questa modalita' e' adatta a validare task,
+observation e policy; una presa basata su attrito e forze reali richiede invece una
+simulazione dinamica piu' accurata.
 
 ## 1. E' fattibile con Metis?
 
@@ -434,6 +436,7 @@ enum ArmatureBackend {
 
 signal target_reached
 signal obstacle_collision
+signal self_collision
 
 @export_category("Armature")
 @export_enum("Node chain", "Skeleton3D") var armature_backend := ArmatureBackend.NODE_CHAIN
@@ -474,6 +477,7 @@ var _pending_reset_offsets: Array[float] = []
 var _terminal := false
 var _succeeded := false
 var _collided := false
+var _self_collided := false
 var _success_frames := 0
 var _training_active := true
 
@@ -543,6 +547,7 @@ func reset_all(original_transform:Variant, reset_rewards := true) -> void:
     _terminal = false
     _succeeded = false
     _collided = false
+    _self_collided = false
     _success_frames = 0
     for index in range(get_joint_count()):
         var offset := _pending_reset_offsets[index] if index < _pending_reset_offsets.size() else 0.0
@@ -671,7 +676,7 @@ func _update_success_state() -> void:
 func _on_safety_body_entered(body:Node) -> void:
     if _terminal or not body.is_in_group(obstacle_group):
         return
-    _register_collision()
+    _register_collision(false)
 
 
 func _on_safety_area_entered(other:Area3D, source:Area3D) -> void:
@@ -684,15 +689,19 @@ func _on_safety_area_entered(other:Area3D, source:Area3D) -> void:
     # Volumi consecutivi appartengono a link adiacenti e possono toccarsi normalmente.
     if absi(source_index - other_index) <= 1:
         return
-    _register_collision()
+    _register_collision(true)
 
 
-func _register_collision() -> void:
+func _register_collision(is_self_collision := false) -> void:
     if _terminal:
         return
     _collided = true
+    _self_collided = is_self_collision
     _terminal = true
-    obstacle_collision.emit()
+    if is_self_collision:
+        self_collision.emit()
+    else:
+        obstacle_collision.emit()
 
 
 func _target_distance() -> float:
@@ -839,7 +848,8 @@ controlled_joint_names = [
     xarm_4_joint,
     xarm_3_joint,
     xarm_2_joint,
-    wrist_roll
+    wrist_roll,
+    grip_left
 ]
 use_kinematic_control = true
 tcp_link_name = hand_link
@@ -848,9 +858,9 @@ workspace_scale = 0.5
 success_distance = 0.02
 ```
 
-Questi sono sei comandi per il reaching. `grip_left` e' il settimo attuatore
-indipendente e va aggiunto soltanto in un task di presa. `grip_right`, tendini e dita
-non entrano nell'action space: sono follower `mimic` di `grip_left`.
+La scena XArm di grasping usa sette comandi. Per un puro reaching puoi omettere
+`grip_left`; `grip_right`, tendini e dita non entrano mai nell'action space perche'
+sono follower `mimic` del giunto master `grip_left`.
 
 La modalita' cinematica e' la baseline raccomandata: la posa letta nelle observation
 coincide con quella applicata e il reset e' deterministico. Le collision shape
@@ -928,9 +938,18 @@ Configura i quattro `MethodObservationSource`:
 Lascia `source_path` vuoto: la source usera' il corpo padre dell'`Agent`.
 
 `auto_detect_environment_collisions` usa le shape URDF per gli ostacoli esterni ed
-esclude intenzionalmente tutti i corpi del robot dalla query. Per la self-collision
-servono ancora `SafetyVolumes` dedicati oppure un collision checker che conosca le
-coppie di link adiacenti da ignorare.
+esclude intenzionalmente i corpi del robot dalla query ambientale.
+`auto_detect_self_collisions` esegue una seconda query dedicata tra i link del robot:
+le coppie parent-child definite dai joint URDF sono ignorate automaticamente. Usa
+`self_collision_ignored_link_pairs` per singole eccezioni nel formato
+`link_a:link_b` e `self_collision_ignored_link_sets` per meccanismi composti da piu'
+link che possono toccarsi normalmente, separando i nomi con virgole. Non inserire
+l'intero robot in un set ignorato, altrimenti disattiveresti di fatto la protezione.
+
+Una superficie di appoggio puo' appartenere sia a `robot_obstacle` sia a
+`robot_support_surface`. In `support_contact_link_names` elenca soltanto i link che
+possono appoggiarsi legalmente: nello XArm e' ammesso `xarm_6_link`, mentre il contatto
+del polso o della pinza con il pavimento resta una collisione.
 
 La policy riceve soltanto stato articolare, target e azione precedente. In una cella
 fissa la geometria degli ostacoli e' implicita nei dati di training. Il manifest
@@ -1321,17 +1340,20 @@ RobotArmReachingScenario              Node3D, script scenario
 │   ├── ProgressProvider              MethodProgressProvider.gd
 │   ├── ScenarioEventSystem           ScenarioEventSystem.gd
 │   │   ├── GoalReached               ManualScenarioEventSource.gd
-│   │   └── Collision                 ManualScenarioEventSource.gd
+│   │   ├── Collision                 ManualScenarioEventSource.gd
+│   │   └── SelfCollision             ManualScenarioEventSource.gd
 │   └── ScenarioRewardSystem          ScenarioRewardSystem.gd
 │       ├── Progress                  ProgressDeltaScenarioReward.gd
 │       ├── GoalReward                EventScenarioReward.gd
 │       ├── CollisionPenalty          EventScenarioReward.gd
+│       ├── SelfCollisionPenalty      EventScenarioReward.gd
 │       └── NoProgress                ProgressStallScenarioReward.gd
 ├── RobotArm                          istanza di robot_arm.tscn
 ├── Target                            Marker3D o MeshInstance3D
 ├── Workcell                          Node3D con geometria calibrata
 │   ├── Table                      StaticBody3D, gruppo robot_obstacle
 │   └── Fixtures                   StaticBody3D, gruppo robot_obstacle
+├── Floor                             StaticBody3D, gruppi robot_obstacle e robot_support_surface
 ├── TargetSpawns                      Node3D con Marker3D validati
 ├── Camera3D
 └── WorldEnvironment
@@ -1370,6 +1392,9 @@ GoalReached.terminal_reason = target_reached
 
 Collision.event_name = collision
 Collision.terminal_reason = collision
+
+SelfCollision.event_name = self_collision
+SelfCollision.terminal_reason = self_collision
 ```
 
 Reward di scenario:
@@ -1384,6 +1409,9 @@ GoalReward.reward = 30.0
 
 CollisionPenalty.event_name = collision
 CollisionPenalty.reward = -20.0
+
+SelfCollisionPenalty.event_name = self_collision
+SelfCollisionPenalty.reward = -30.0
 
 NoProgress.terminate_on_stalled_progress = true
 NoProgress.stalled_progress_window_steps = 120
@@ -1402,10 +1430,109 @@ Il totale per un agente diventa:
 - costo temporale
 + 30 al successo
 - 20 alla collisione
+- 30 all'autocollisione
 - 5 allo stall
 ```
 
+### 10.1 Variante XArm: prendere e sollevare un oggetto
+
+La scena `res://scenarios/robotarms/XarmScenario.tscn` usa un target dinamico:
+
+```text
+Target                         RigidBody3D, gruppo graspable
+|- Mesh                        MeshInstance3D
+|- CollisionShape3D
+`- GraspPoint                  Marker3D
+```
+
+`RobotArm.target` punta a `GraspPoint`, mentre `grasp_target_body` punta al
+`RigidBody3D`. Il target non appartiene a `robot_obstacle`: il contatto delle dita deve
+essere consentito. Tavolo e ostacoli restano in `robot_obstacle` e terminano l'episodio
+quando vengono colpiti dal robot.
+
+Il contratto concreto della scena e':
+
+```text
+azioni       7 = 6 velocita' del braccio + velocita' grip_left
+observation 33 = 7 posizioni + 7 velocita' + 3 errore target
+                 + 7 azioni precedenti + 6 moto target + 3 stato presa
+```
+
+Lo stato presa contiene chiusura normalizzata, oggetto afferrato e altezza di
+sollevamento. L'oggetto viene considerato afferrato soltanto se il TCP e' entro
+`grasp_capture_distance`, il gripper supera `grasp_close_threshold` e l'oggetto non si
+sta muovendo troppo rapidamente. Con `assisted_grasp=true` viene allora mantenuta la
+trasformazione relativa TCP-oggetto. La presa riesce solo dopo un sollevamento mantenuto
+per `grasp_hold_physics_frames`; la semplice vicinanza non e' un successo.
+
+Gli eventi aggiuntivi sono:
+
+```text
+object_grasped  +8, non terminale
+target_reached +40, terminale dopo il sollevamento stabile
+object_dropped -20, terminale
+collision      -20, terminale
+self_collision -30, terminale
+```
+
+`TargetDisturbance` penalizza velocita' lineare e angolare prima della presa;
+`PrematureGrip` penalizza il gripper chiuso quando il TCP e' ancora lontano. Se
+l'oggetto viene spinto oltre `max_pregrasp_planar_displacement`, l'episodio termina come
+`object_dropped`. In questo modo la policy non puo' ottenere progresso limitandosi a
+urtare il cilindro.
+
+I marker vengono scoperti automaticamente tra tutti i figli `Marker3D` del nodo
+assegnato a `target_spawns_root`. Al reset lo scenario scollega una eventuale presa,
+congela temporaneamente il `RigidBody3D`, azzera velocita' lineare e angolare, applica
+la posa scelta e riattiva la fisica. Aggiungere un marker sotto `Spawns` basta quindi a
+renderlo disponibile al curriculum.
+
+Questa variante cambia sia `action_size` sia `obs_dim`: usa una nuova directory e non
+riprendere checkpoint, replay o dimostrazioni del reaching.
+
+Prima verifica il contratto e le singole reward:
+
+```bash
+python/.venv/bin/python python/tools/random_rollout.py \
+  --godot-bin /home/fedyfausto/Godot/Godot_v4.6.2-stable_linux.x86_64 \
+  --godot-project godot \
+  --godot-scene res://scenarios/robotarms/XarmScenario.tscn \
+  --steps 400 \
+  --print-reward-terms \
+  --no-headless
+```
+
+Poi avvia SAC da zero, senza `--resume` e senza `--multi-agent`:
+
+```bash
+python/.venv/bin/python python/train.py \
+  --algorithm sac \
+  --godot-bin /home/fedyfausto/Godot/Godot_v4.6.2-stable_linux.x86_64 \
+  --godot-project godot \
+  --godot-scene res://scenarios/robotarms/XarmScenario.tscn \
+  --num-envs 4 \
+  --num-episodes 3000 \
+  --max-steps-per-episode 500 \
+  --batch-size 128 \
+  --replay-warmup 15000 \
+  --random-exploration-episodes 40 \
+  --action-smoothing 0.10 \
+  --collector-mode async \
+  --checkpoint-dir checkpoints/xarm_grasp_sac_v1 \
+  --actor-weights-path xarm_grasp_sac_actor_v1.weights.h5 \
+  --critic1-weights-path xarm_grasp_sac_critic1_v1.weights.h5 \
+  --critic2-weights-path xarm_grasp_sac_critic2_v1.weights.h5 \
+  --headless
+```
+
+Le quattro istanze raccolgono esperienze per una sola policy condivisa. Non usare
+`--multi-agent`: in ogni scenario e' presente un solo `RobotArm`.
+
 ## 11. Reset e curriculum nella cella reale
+
+Lo script seguente resta la variante generica per il reaching. Per il grasping usa lo
+script gia' completo `res://scenarios/robotarms/xarm_scenario.gd`, che aggiunge reset
+del `RigidBody3D`, discovery automatica dei marker e curriculum di presa/sollevamento.
 
 Inizia con target pre-validati da un planner o da prove manuali. Gli ostacoli della
 cella non cambiano tra le fasi: rimuoverli nei primi episodi insegnerebbe scorciatoie
@@ -1427,6 +1554,7 @@ extends Node3D
 @onready var target: Node3D = $Target
 @onready var goal_event = $ScenarioController/ScenarioEventSystem/GoalReached
 @onready var collision_event = $ScenarioController/ScenarioEventSystem/Collision
+@onready var self_collision_event = $ScenarioController/ScenarioEventSystem/SelfCollision
 
 var _training_episode := 0
 
@@ -1435,6 +1563,7 @@ func _ready() -> void:
     arm.target = target
     arm.target_reached.connect(_on_target_reached)
     arm.obstacle_collision.connect(_on_obstacle_collision)
+    arm.self_collision.connect(_on_self_collision)
     controller.scenario_configured.connect(_on_scenario_configured)
     controller.episode_reset_started.connect(_on_episode_reset_started)
 
@@ -1484,6 +1613,10 @@ func _on_target_reached() -> void:
 
 func _on_obstacle_collision() -> void:
     collision_event.trigger(str(arm.name))
+
+
+func _on_self_collision() -> void:
+    self_collision_event.trigger(str(arm.name))
 ```
 
 Ogni ostacolo deve essere uno `StaticBody3D` o `Area3D`, appartenere al gruppo
@@ -1491,6 +1624,12 @@ Ogni ostacolo deve essere uno `StaticBody3D` o `Area3D`, appartenere al gruppo
 collision shape devono provenire da CAD o misure reali, poi essere ingrandite del
 margine di sicurezza stabilito. Per un URDF con collision shape valide non devi
 compilare manualmente `safety_volumes` per rilevare gli ostacoli esterni.
+
+Anche il terreno deve essere in `robot_obstacle`. Se sostiene la base, aggiungilo pure
+a `robot_support_surface` e configura sull'agente il solo link di appoggio in
+`support_contact_link_names`. Verifica manualmente ogni eccezione di self-collision:
+deve descrivere un contatto meccanico previsto dal modello URDF, non una scorciatoia
+per nascondere una collision shape errata.
 
 Mantieni un secondo insieme di target mai usati dal curriculum. Servira' per misurare
 interpolazione nello stesso spazio operativo. Se la disposizione fisica della cella
@@ -1519,6 +1658,10 @@ Prima di allenare verifica:
 - nessun giunto salta al primo step;
 - segni e assi delle azioni corrispondono al robot reale;
 - collisione produce `terminal_reason=collision` e reward negativa;
+- un link non di base contro il terreno produce `terminal_reason=collision`;
+- due link non adiacenti producono `terminal_reason=self_collision` e la penalita'
+  dedicata;
+- la base appoggiata al terreno non produce un falso positivo;
 - successo richiede di restare sul target e produce `target_reached`;
 - il reset non lascia collisioni nello stato precedente;
 - target e posa iniziale sono deterministici a seed uguale;
