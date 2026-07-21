@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+authors:
+  - family-names: "Santoro"
+    given-names: "Federico Fausto"
+  - name: "ARSLab"
+title: "Metis"
+version: "1.0.0"
+date-released: "2026-07-21"
+url: "https://github.com/UniCT-ARSLab/Metis"

@@ -1,0 +1,27 @@
+=========================================================================
+NOTICE file corresponding to the section 4(d) of the Apache License, 
+Version 2.0, for this project.
+=========================================================================
+
+Metis
+Copyright 2026 Federico Fausto Santoro, ARSLab, and contributors.
+
+This software is the original work of the authors listed above.
+
+CITATION AND ATTRIBUTION REQUIREMENTS:
+Pursuant to Section 4(d) of the Apache License 2.0, anyone using, 
+modifying, or distributing this software (or substantial portions thereof) 
+is legally required to retain this notice and ensure the visibility of the 
+original work's credits.
+
+Furthermore, the authors expressly require that:
+1. SCIENTIFIC PUBLICATIONS: Any research paper, academic article, thesis, 
+   or publication utilizing or relying on this software MUST explicitly 
+   cite this original work in the bibliographic references.
+2. PATENT APPLICATIONS: Any patent filing for inventions that incorporate, 
+   derive from, or utilize this software MUST include this technology 
+   as "Prior Art", explicitly citing the original authors.
+
+To facilitate formal citation, please use the following format:
+Federico Fausto Santoro, ARSLab, "Metis", version 1.0.0, 2026. 
+Official Repository: https://github.com/UniCT-ARSLab/Metis
