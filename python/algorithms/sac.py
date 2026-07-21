@@ -93,6 +93,16 @@ def parse_args():
         help="Entropy-temperature learning rate used after restoring a checkpoint.",
     )
     parser.add_argument("--initial-alpha", type=float, default=0.2)
+    parser.add_argument(
+        "--tune-alpha",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Auto-tune the SAC entropy coefficient alpha toward --target-entropy. The tuner "
+            "is unstable on some tasks (alpha runs away up or collapses); use --no-tune-alpha "
+            "with --initial-alpha to hold it fixed."
+        ),
+    )
     parser.add_argument("--target-entropy", type=float, default=None)
     parser.add_argument("--log-std-min", type=float, default=-20.0)
     parser.add_argument("--log-std-max", type=float, default=2.0)
@@ -333,6 +343,7 @@ def build_sac_learner_step(
     *,
     compiled=True,
     xla=False,
+    tune_alpha=True,
 ):
     """Build the SAC gradient step, optionally compiled into a tf.function.
 
@@ -394,13 +405,18 @@ def build_sac_learner_step(
         actor_grads = tape.gradient(actor_loss, actor.trainable_variables)
         actor_optimizer.apply_gradients(zip(actor_grads, actor.trainable_variables))
 
-        with tf.GradientTape() as tape:
-            _, log_prob, _ = sample_actor(
-                actor, obs, action_low_tensor, action_high_tensor, log_std_min, log_std_max
-            )
-            alpha_loss = -tf.reduce_mean(log_alpha * tf.stop_gradient(log_prob + target_entropy_c))
-        alpha_grads = tape.gradient(alpha_loss, [log_alpha])
-        alpha_optimizer.apply_gradients(zip(alpha_grads, [log_alpha]))
+        if tune_alpha:
+            with tf.GradientTape() as tape:
+                _, log_prob, _ = sample_actor(
+                    actor, obs, action_low_tensor, action_high_tensor, log_std_min, log_std_max
+                )
+                alpha_loss = -tf.reduce_mean(log_alpha * tf.stop_gradient(log_prob + target_entropy_c))
+            alpha_grads = tape.gradient(alpha_loss, [log_alpha])
+            alpha_optimizer.apply_gradients(zip(alpha_grads, [log_alpha]))
+        else:
+            # Fixed alpha: skip the entropy-coefficient update entirely. The auto-tuner is
+            # unstable on this task (alpha runs away up or collapses), so hold it constant.
+            alpha_loss = tf.constant(0.0, dtype=tf.float32)
         return actor_loss, critic1_loss, critic2_loss, alpha_loss, tf.exp(log_alpha)
 
     if compiled:
@@ -583,6 +599,7 @@ def run_async_sac(
         args.log_std_max,
         compiled=args.tf_compile_learner,
         xla=args.tf_xla,
+        tune_alpha=args.tune_alpha,
     )
     print(
         f"SAC learner: {'compiled graph' if args.tf_compile_learner else 'eager'}"
@@ -1096,6 +1113,7 @@ def main():
             args.log_std_max,
             compiled=args.tf_compile_learner,
             xla=args.tf_xla,
+            tune_alpha=args.tune_alpha,
         )
         print(
             f"SAC learner: {'compiled graph' if args.tf_compile_learner else 'eager'}"

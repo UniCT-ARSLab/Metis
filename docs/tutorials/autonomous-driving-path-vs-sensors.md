@@ -301,9 +301,9 @@ python/.venv/bin/python python/train.py \
   --headless
 ```
 
-Do not add `--multi-agent` for the single-car scene. `--num-envs 4` already collects
-four independent trajectories. Once one car is validated, you may replicate
-non-colliding cars in each environment and enable multi-agent collection.
+Do not add `--multi-agent` while the scene still contains one car. `--num-envs 4`
+already collects four independent trajectories. Section 13 shows how to add several
+non-colliding cars to each environment after the single-car contract is validated.
 
 ## 12. Train the path-aware policy
 
@@ -334,7 +334,94 @@ python/.venv/bin/python python/train.py \
 The path-aware model should usually learn faster. That is expected: it receives a local
 route plan in addition to obstacle sensing.
 
-## 13. Train across several tracks
+## 13. Collect with several cars per environment
+
+Multi-environment and multi-agent collection solve different scaling problems:
+
+- `--num-envs 4` starts four Godot processes;
+- six cars in each process produce up to 24 agent transitions per simulation step;
+- `--multi-agent` tells Python to keep those transitions separate while training one
+  shared policy.
+
+Metis does not select the best car and it does not create one model per replica. Every
+car uses the same actor, and every learner-controlled car contributes observations,
+actions, rewards, and terminal states to the same replay buffer. This is parameter
+sharing and is appropriate because all cars expose the same contract.
+
+First validate the task with one car. Then select `ScenarioController` in the Cars
+scene and configure:
+
+```text
+agent_to_replicate       = ../Agents/Car
+agents_container         = ../Agents
+number_of_replications   = 5
+```
+
+`number_of_replications` counts additional copies, so this example creates six cars in
+total. Each replica receives a stable ID and an agent-specific reset seed. The supplied
+`Car` is on collision layer 1 and uses mask 6, which excludes layer 1; replicas therefore
+collide with the road and finish area but not with one another. Keep that arrangement
+for parallel experience collection. Enabling car-to-car contact changes the task into
+traffic interaction and also requires observations describing nearby vehicles.
+
+Check the resulting contract before training:
+
+```bash
+python/.venv/bin/python python/tools/random_rollout.py \
+  --godot-bin /path/to/Godot \
+  --godot-project godot \
+  --godot-scene res://scenarios/cars/cars_scenario.tscn \
+  --multi-agent \
+  --steps 300 \
+  --no-headless
+```
+
+The spec should report six distinct agent IDs. Their initial positions should differ,
+and one crashed car should become inactive without ending the other five trajectories.
+
+Train the shared sensor-only policy with:
+
+```bash
+python/.venv/bin/python python/train.py \
+  --algorithm sac \
+  --godot-bin /path/to/Godot \
+  --godot-project godot \
+  --godot-scene res://scenarios/cars/cars_scenario.tscn \
+  --num-envs 4 \
+  --num-episodes 3000 \
+  --max-steps-per-episode 4500 \
+  --batch-size 128 \
+  --replay-warmup 30000 \
+  --random-exploration-episodes 40 \
+  --action-smoothing 0.25 \
+  --reset-progress-curriculum \
+  --reset-progress-start-max 0.02 \
+  --reset-progress-end-max 0.60 \
+  --reset-progress-ramp-episodes 1600 \
+  --collector-mode async \
+  --async-update-basis transitions \
+  --async-max-updates-per-env-step 2 \
+  --checkpoint-dir checkpoints/driving_sensor_only_multi_agent_sac_v1 \
+  --multi-agent \
+  --headless
+```
+
+Transition-based update scheduling is already the Metis default; it is written here to
+make the multi-agent behavior explicit. Watch `transitions_step`, `updates_s`,
+`updates_throttled`, queue saturation, CPU usage, and GPU usage. Increase replicas only
+while environment throughput and learner updates remain healthy. More correlated cars
+inside one world do not replace independent Godot processes, so a mix such as four
+environments with six cars is usually preferable to one environment with 24 cars.
+
+Use a new checkpoint directory when switching from single-agent collection. The policy
+shape is unchanged, but a clean comparison makes it much easier to tell whether extra
+cars improved sample efficiency or merely increased correlated replay data.
+
+The same setup works with `cars_path_aware_scenario.tscn`: replicate its `Car`, keep
+`--multi-agent`, and use a separate path-aware checkpoint directory. Do not mix its
+replay or policy with the sensor-only version because the observation vectors differ.
+
+## 14. Train across several tracks
 
 Generalization requires a distribution of geometry. Create each layout as a separate
 scene and instantiate one active layout per episode. Pair it with the matching
@@ -351,7 +438,7 @@ For the sensor-only policy, route diversity is the main defense against track
 memorization. For the path-aware policy, it tests whether look-ahead geometry is used
 as intended rather than as a proxy for one fixed track.
 
-## 14. Evaluate the comparison
+## 15. Evaluate the comparison
 
 Use deterministic actions and the same seeds for both policies. Record:
 
@@ -370,7 +457,7 @@ Add two stress tests:
 The path-aware controller should plan curves earlier. The sensor-only controller may be
 more robust to route-model errors, provided it has seen enough varied geometry.
 
-## 15. Run the policies
+## 16. Run the policies
 
 Sensor-only:
 
@@ -400,7 +487,7 @@ python/.venv/bin/python python/run.py \
 
 The policies are not interchangeable because their input dimensions differ.
 
-## 16. Choose the right design
+## 17. Choose the right design
 
 Use the path-aware version when the final system has a route and reliable localization.
 It is appropriate for a known circuit, warehouse route, or autonomous vehicle with a
