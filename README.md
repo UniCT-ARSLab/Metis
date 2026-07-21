@@ -4,7 +4,14 @@
   <img src="docs/logo.svg" alt="Metis logo" width="640">
 </p>
 
-**Modular Environment for Training Intelligent Systems**
+**METIS: Modular Environment for Training Intelligent Systems**
+
+<p align="center">
+  Made by  ARSLab of University of Catania 
+</p>
+<p align="center">
+  Powered by Godot Engine, Gymnasium, Keras/Tensorflow
+</p>
 
 Metis connects Godot simulations to reinforcement-learning code written with
 Gymnasium and TensorFlow/Keras. Agents, sensors, rewards, episode rules, and world
@@ -472,3 +479,6 @@ cd python
 The design rule behind the project is simple: Godot describes the problem, Python
 learns to solve it, and the boundary should remain clean enough that a new task does
 not require another training stack.
+
+
+## References

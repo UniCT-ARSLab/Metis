@@ -94,6 +94,9 @@ func _initialize() -> void:
 	grasp_target.add_child(grasp_point)
 	grasp_target.global_position = end_effector.global_position
 	body.task_mode = URDFRobotArmAgentBody.TaskMode.GRASPING
+	# Synthetic target has no colliders/contact_monitor: exercise the assisted capture->lift
+	# state machine here, not the real finger-contact enclosure gate (covered in the scene).
+	body.require_finger_contact = false
 	body.configure_grasp_target(grasp_target, grasp_point)
 	body.grasp_capture_distance = 0.05
 	body.required_lift_height = 0.02

@@ -49,6 +49,18 @@ enum TaskMode {
 @export var target_angular_velocity_scale := 8.0
 @export var max_grasp_target_speed := 0.15
 @export var assisted_grasp := true
+# Real-grasp gate: the glass must sit BETWEEN the two fingers and be touched by BOTH before
+# the assisted capture triggers. Stops the "close in the air near the glass" fake grasp and
+# the glued-object exploit; the disturbance penalty then stays active until a genuine grasp.
+@export var require_finger_contact := true
+@export var grasp_finger_link_names := PackedStringArray(["finger_left_link", "finger_right_link"])
+# Max perpendicular distance from the glass to the line between the two fingers (the gripper
+# "mouth" centerline) for the glass to count as enclosed. Slack added to the finger span.
+@export var grasp_enclosure_tolerance := 0.02
+@export var grasp_enclosure_span_margin := 0.01
+# Finger-tip separation below which the two fingers have closed onto each other with nothing
+# between them (empty close / missed target). Set below the glass diameter.
+@export var grasp_empty_close_distance := 0.02
 
 @export_category("Safety")
 @export var safety_volumes: Array[Area3D] = []
@@ -96,6 +108,8 @@ var _grasp_target_offset := Transform3D.IDENTITY
 var _grasp_target_spawn_transform := Transform3D.IDENTITY
 var _grasp_target_was_frozen := false
 var _grasp_target_previous_freeze_mode := RigidBody3D.FREEZE_MODE_STATIC
+var _grasp_finger_bodies: Array[Node3D] = []
+var _grasp_finger_bodies_cached := false
 
 
 func _ready() -> void:
@@ -420,6 +434,84 @@ func get_premature_gripper_penalty() -> float:
 	return -_gripper_closed_fraction()
 
 
+func get_empty_grasp_penalty() -> float:
+	# Fingers closed onto each other with no glass between them = grasp attempted, target
+	# missed. Kinematic fingers do not stop on contact, so this is detected geometrically.
+	if task_mode != TaskMode.GRASPING or _grasped:
+		return 0.0
+	if _fingers_closed_on_nothing():
+		return -1.0
+	return 0.0
+
+
+func _ensure_grasp_finger_bodies() -> void:
+	# Lazy: resolving the fingers inside _ready shifted the first physics frame and tripped a
+	# borderline self-collision in the reaching test. Do it on first grasp use instead, once.
+	if _grasp_finger_bodies_cached:
+		return
+	_grasp_finger_bodies_cached = true
+	_cache_grasp_finger_bodies()
+
+
+func _cache_grasp_finger_bodies() -> void:
+	# Resolve from the already-built collision map (populated by _cache_robot_collision_geometry,
+	# which must run first). NOT _robot.get_link_node(): a cache miss there rebuilds the link
+	# index and re-adds every joint, corrupting the self-collision RIDs cached just before.
+	_grasp_finger_bodies.clear()
+	for link_name in grasp_finger_link_names:
+		var node := _robot_body_by_link_name.get(str(link_name)) as Node3D
+		if node:
+			_grasp_finger_bodies.append(node)
+	if require_finger_contact and _grasp_finger_bodies.size() < 2:
+		push_warning(
+			("URDFRobotArmAgentBody: grasp finger links %s not resolved; "
+			+ "falling back to distance-only capture.") % [grasp_finger_link_names])
+
+
+func _glass_between_fingers() -> bool:
+	# The glass must lie inside the gripper "mouth": between the two fingers along the closing
+	# axis, and close to the line joining them. Unresolved fingers -> skip (old behavior).
+	if not require_finger_contact:
+		return true
+	if _grasp_finger_bodies.size() < 2 or not grasp_target_body:
+		return true
+	var left := _grasp_finger_bodies[0].global_position
+	var right := _grasp_finger_bodies[1].global_position
+	var separation := right - left
+	var separation_length := separation.length()
+	if separation_length < 0.0001:
+		return false
+	var axis := separation / separation_length
+	var center := (left + right) * 0.5
+	var offset := grasp_target_body.global_position - center
+	var lateral := offset.dot(axis)
+	var perpendicular := (offset - axis * lateral).length()
+	return (
+		absf(lateral) <= separation_length * 0.5 + grasp_enclosure_span_margin
+		and perpendicular <= grasp_enclosure_tolerance)
+
+
+func _both_fingers_contact_glass() -> bool:
+	if not require_finger_contact:
+		return true
+	# Unresolved fingers -> skip (warned at startup); otherwise both must touch the glass.
+	if _grasp_finger_bodies.size() < 2:
+		return true
+	if not grasp_target_body or not grasp_target_body.contact_monitor:
+		return false
+	var touching := grasp_target_body.get_colliding_bodies()
+	return _grasp_finger_bodies[0] in touching and _grasp_finger_bodies[1] in touching
+
+
+func _fingers_closed_on_nothing() -> bool:
+	_ensure_grasp_finger_bodies()
+	if _grasp_finger_bodies.size() < 2:
+		return false
+	var separation := _grasp_finger_bodies[0].global_position.distance_to(
+		_grasp_finger_bodies[1].global_position)
+	return separation <= grasp_empty_close_distance
+
+
 func get_control_input(input_name: String) -> float:
 	if not input_name.begins_with("joint_velocity_"):
 		return 0.0
@@ -522,6 +614,7 @@ func _update_reaching_success_state() -> void:
 func _update_grasping_state() -> void:
 	if _terminal or not grasp_target_body or not target or not end_effector:
 		return
+	_ensure_grasp_finger_bodies()
 
 	if _grasped:
 		_sync_grasp_target()
@@ -543,7 +636,9 @@ func _update_grasping_state() -> void:
 
 	var can_capture := (
 		_target_distance() <= grasp_capture_distance
+		and _glass_between_fingers()
 		and _gripper_closed_fraction() >= grasp_close_threshold
+		and _both_fingers_contact_glass()
 		and grasp_target_body.linear_velocity.length() <= max_grasp_target_speed
 	)
 	if can_capture:

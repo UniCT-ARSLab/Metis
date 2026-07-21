@@ -113,6 +113,13 @@ weight = 0.01
 method_name = &"get_premature_gripper_penalty"
 node_caller = NodePath("../../..")
 
+[node name="EmptyGrasp" type="Node" parent="Agent/RewardSystem" node_paths=PackedStringArray("node_caller")]
+script = ExtResource("8_function_reward")
+term_name = "empty_grasp"
+weight = 0.05
+method_name = &"get_empty_grasp_penalty"
+node_caller = NodePath("../../..")
+
 [node name="Time" type="Node" parent="Agent/RewardSystem" unique_id=1426812260]
 script = ExtResource("10_time")
 term_name = "time"

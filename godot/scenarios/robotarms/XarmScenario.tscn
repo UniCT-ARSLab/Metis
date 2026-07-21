@@ -180,12 +180,12 @@ support_contact_link_names = PackedStringArray("xarm_6_link")
 
 [node name="Target" type="RigidBody3D" parent="." unique_id=1048856628 groups=["graspable"]]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.23149951, 0.15180902, 0)
-mass = 0.02
+mass = 0.05
 continuous_cd = true
 contact_monitor = true
-max_contacts_reported = 8
-linear_damp = 0.2
-angular_damp = 0.2
+max_contacts_reported = 16
+linear_damp = 1.5
+angular_damp = 2.0
 
 [node name="Mesh" type="MeshInstance3D" parent="Target" unique_id=1913792666]
 transform = Transform3D(0.5, 0, 0, 0, 0.5, 0, 0, 0, 0.5, 0, 0, 0)
