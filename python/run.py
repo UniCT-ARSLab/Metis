@@ -69,7 +69,7 @@ SUCCESS_EVENTS = {"level_cleared", "target_reached", "finish_reached", "goal_sco
 SUCCESS_TERMINAL_REASONS = SUCCESS_EVENTS
 
 
-def parse_args():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Run a trained policy on any Godot BridgeServer scenario.")
     parser.add_argument(
         "--algorithm",
@@ -112,6 +112,25 @@ def parse_args():
         help="Maximum episode steps; use 0 or --no-time-limit to rely on terminal conditions.",
     )
     parser.add_argument("--infinite", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--reset",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Start a new episode after a terminal state. Use --no-reset to keep Godot "
+            "open in the final state."
+        ),
+    )
+    parser.add_argument(
+        "--initial-reset",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Physically reset the scenario before the first inference. With "
+            "--no-initial-reset Metis initializes observations and episode bookkeeping "
+            "from the current Godot state without moving agents or targets."
+        ),
+    )
     parser.add_argument(
         "--continue-after-success",
         action=argparse.BooleanOptionalAction,
@@ -164,7 +183,7 @@ def parse_args():
         default=None,
         help="Optional path where the aggregate evaluation summary is written as JSON.",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def iter_episode_numbers(args):
@@ -178,6 +197,11 @@ def configured_max_steps(args):
     if args.time_limit:
         return args.max_steps
     return 0
+
+
+def wait_without_reset(sleeper=time.sleep):
+    while True:
+        sleeper(1.0)
 
 
 def wait_for_realtime_tick(previous_deadline, frequency_hz, clock=time.monotonic, sleeper=time.sleep):
@@ -625,11 +649,24 @@ def main():
             )
         if args.infinite:
             print("Running indefinitely. Stop with Ctrl+C.", flush=True)
+        if not args.reset:
+            print(
+                "Automatic episode reset disabled; terminal states remain visible until Ctrl+C.",
+                flush=True,
+            )
+        if not args.initial_reset:
+            print(
+                "Initial physical reset disabled; initializing from the current Godot state.",
+                flush=True,
+            )
         if not args.time_limit:
             print("Episode time limit disabled; episodes end only on terminal scenario state.", flush=True)
 
         for episode in iter_episode_numbers(args):
-            obs, info = env.reset(seed=args.seed + episode)
+            reset_options = {
+                "preserve_state": bool(episode == 0 and not args.initial_reset),
+            }
+            obs, info = env.reset(seed=args.seed + episode, options=reset_options)
             realtime_deadline = time.monotonic()
             total_reward = 0.0
             steps_taken = 0
@@ -696,6 +733,13 @@ def main():
                 f"success={success_count}/{trial_count} terminal={terminal_label}",
                 flush=True,
             )
+            if not args.reset:
+                print(
+                    "Episode ended. Keeping the final Godot state without resetting; "
+                    "stop with Ctrl+C.",
+                    flush=True,
+                )
+                wait_without_reset()
         emit_evaluation_summary(
             args,
             evaluation_rewards,

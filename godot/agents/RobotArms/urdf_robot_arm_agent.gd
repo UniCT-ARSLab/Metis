@@ -149,6 +149,20 @@ func reset_all(original_transform: Variant, reset_rewards := true) -> void:
 		agent.reset_reward({"body": self})
 
 
+func initialize_episode_from_current_state() -> void:
+	_terminal = false
+	_succeeded = false
+	_collided = false
+	_success_frames = 0
+	set_training_active(true)
+	for index in range(get_joint_count()):
+		_commands[index] = 0.0
+		_previous_action[index] = 0.0
+	_robot.stop_all_joints()
+	_update_end_effector()
+	agent.reset_observation_sources()
+
+
 func set_reset_joint_offsets(offsets_radians: Array) -> void:
 	_pending_reset_offsets.clear()
 	for offset in offsets_radians:

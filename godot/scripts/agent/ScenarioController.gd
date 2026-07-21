@@ -251,7 +251,8 @@ func step(actions:Variant):
 
 func reset_episode_with_request(request:Dictionary):
 	var _seed := int(request.get("seed", 0))
-	return await reset_episode(_seed)
+	var preserve_state := bool(request.get("preserve_state", false))
+	return await reset_episode(_seed, preserve_state)
 
 
 func configure(config:Dictionary) -> Dictionary:
@@ -310,7 +311,7 @@ func configure(config:Dictionary) -> Dictionary:
 	}
 
 
-func reset_episode(_seed := 0):
+func reset_episode(_seed := 0, preserve_state := false):
 	_refresh_agents()
 	_scenario_reward_system = get_node_or_null(scenario_reward_system_path)
 	_progress_provider = get_node_or_null(progress_provider_path)
@@ -319,7 +320,8 @@ func reset_episode(_seed := 0):
 	_last_reset_info.clear()
 	_done_agents.clear()
 	_cached_done_step_results.clear()
-	episode_reset_started.emit(_seed)
+	if not preserve_state:
+		episode_reset_started.emit(_seed)
 	if _scenario_reward_system != null and _scenario_reward_system.has_method("reset_rewards"):
 		_scenario_reward_system.reset_rewards()
 	if _progress_provider != null and _progress_provider.has_method("reset_provider"):
@@ -334,17 +336,24 @@ func reset_episode(_seed := 0):
 	for agent in _agents:
 		var agent_id := _agent_id(agent)
 		var rng := _reset_rng_for_agent(int(_seed), agent_id) if use_agent_specific_reset_seed else shared_rng
-		
-		_done_agents[agent_id] = false
 
-		var original_transform: Variant = null
-		if agent is Node3D or agent is Node2D:
-			original_transform = agent.transform
-		if _original_agent_transforms.has(agent_id):
-			original_transform = _original_agent_transforms[agent_id]
-		var reset_transform: Variant = _build_reset_transform(agent_id, original_transform, rng)
+		_done_agents[agent_id] = false
 		_set_agent_training_active(agent, true)
-		agent.reset_all(reset_transform, false)
+		if preserve_state:
+			_last_reset_info[agent_id] = {
+				"mode": "current_state",
+				"preserved": true
+			}
+			if agent.has_method("initialize_episode_from_current_state"):
+				agent.initialize_episode_from_current_state()
+		else:
+			var original_transform: Variant = null
+			if agent is Node3D or agent is Node2D:
+				original_transform = agent.transform
+			if _original_agent_transforms.has(agent_id):
+				original_transform = _original_agent_transforms[agent_id]
+			var reset_transform: Variant = _build_reset_transform(agent_id, original_transform, rng)
+			agent.reset_all(reset_transform, false)
 		var reset_context := {"agent_id": agent_id, "step": step_count}
 		if _event_system != null and _event_system.has_method("reset_agent"):
 			_event_system.reset_agent(agent, reset_context)
@@ -371,13 +380,17 @@ func reset_episode(_seed := 0):
 	if channels.size() == 1:
 		var single: Dictionary = channels[0].duplicate(true)
 		single["agents"] = channels
+		var single_info: Dictionary = single.get("info", {})
+		single_info["preserve_state"] = preserve_state
+		single["info"] = single_info
 		return single
 
 	return {
 		"agents": channels,
 		"info": {
 			"step": step_count,
-			"reset": _last_reset_info.duplicate(true)
+			"reset": _last_reset_info.duplicate(true),
+			"preserve_state": preserve_state
 		}
 	}
 

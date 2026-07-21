@@ -1707,6 +1707,8 @@ python/.venv/bin/python python/run.py \
   --continue-after-success \
   --infinite \
   --no-time-limit \
+  --no-initial-reset \
+  --no-reset \
   --no-headless
 ```
 
@@ -1715,6 +1717,13 @@ l'episodio. Quando il target viene spostato oltre la distanza di riarmo, il rile
 attivo e il braccio continua a ricevere osservazioni e azioni. Collisioni e condizioni di
 sicurezza rimangono terminali. Durante il training, dove l'opzione non viene passata,
 `target_reached` continua a terminare normalmente l'episodio.
+
+`--no-initial-reset` evita anche il reset fisico iniziale: observation, reward, eventi e
+progress vengono inizializzati rispetto alla posa corrente, senza spostare il braccio o il
+target. `--no-reset` impedisce poi qualunque reset automatico. Se avviene una collisione,
+il controllo viene fermato per sicurezza e la scena resta nella posa terminale fino a
+`Ctrl+C`; non viene avviato un altro episodio. Rimane una inizializzazione logica iniziale,
+necessaria per costruire la prima observation, ma non modifica lo stato fisico della scena.
 
 Valuta almeno quattro suite:
 

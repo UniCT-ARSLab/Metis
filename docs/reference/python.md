@@ -19,7 +19,11 @@ Carica per default `policy.keras` e `policy.json`, oppure un modello `.h5`, i ve
 e applica la policy senza training. Supporta esecuzione lockstep per valutazioni riproducibili e
 realtime per osservare il comportamento a velocita' naturale. Con
 `--continue-after-success` chiede agli scenari compatibili di mantenere attive inferenza e
-simulazione dopo un obiettivo riuscito; collisioni e altri errori restano terminali.
+simulazione dopo un obiettivo riuscito; collisioni e altri errori restano terminali. Con
+`--no-reset`, un terminale mantiene Godot aperto nello stato finale fino a `Ctrl+C` invece
+di avviare un nuovo episodio. `--no-initial-reset` inizializza observation e bookkeeping
+dalla posa corrente senza chiamare il reset fisico dello scenario; le due opzioni insieme
+evitano ogni reset fisico durante la run.
 
 ### `python/export.py`
 

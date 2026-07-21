@@ -10,6 +10,9 @@ func _initialize() -> void:
 
 	var body := packed.instantiate() as Node3D
 	root.add_child(body)
+	var controller := ScenarioController.new()
+	controller.controlled_agents.append(body)
+	root.add_child(controller)
 	await process_frame
 	await physics_frame
 
@@ -90,6 +93,21 @@ func _initialize() -> void:
 	await physics_frame
 	passed = passed and body.has_collided()
 	obstacle.free()
+	var preserved_joint_position := robot.get_joint_position("xarm_5_joint")
+	var reset_started_count := [0]
+	controller.episode_reset_started.connect(
+		func(_seed:int) -> void: reset_started_count[0] += 1)
+	var preserved_reset: Dictionary = await controller.reset_episode_with_request({
+		"seed": 123,
+		"preserve_state": true
+	})
+	passed = passed and not body.has_collided() and not body.is_terminal()
+	passed = passed and is_equal_approx(
+		robot.get_joint_position("xarm_5_joint"), preserved_joint_position)
+	passed = passed and reset_started_count[0] == 0
+	passed = passed and bool(preserved_reset.get("info", {}).get("preserve_state", false))
+	passed = passed and str(
+		preserved_reset.get("info", {}).get("reset", {}).get("mode", "")) == "current_state"
 
 	if not passed:
 		push_error(
@@ -110,6 +128,7 @@ func _initialize() -> void:
 		body.free()
 		quit(1)
 		return
+	controller.free()
 	body.free()
 	print("URDF robot arm agent test passed")
 	quit(0)

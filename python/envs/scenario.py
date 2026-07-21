@@ -231,7 +231,10 @@ class ScenarioGymEnv(gym.Env):
     def reset(self, *, seed=None, options=None):
         if seed is not None:
             self.seed_value = int(seed)
-        self._send({"cmd": "reset", "seed": self.seed_value})
+        request = {"cmd": "reset", "seed": self.seed_value}
+        if options:
+            request["preserve_state"] = bool(options.get("preserve_state", False))
+        self._send(request)
         msg = self._recv()
 
         if self.multi_agent:

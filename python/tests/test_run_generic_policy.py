@@ -10,6 +10,7 @@ from run import (
     agent_succeeded,
     checkpoint_episode,
     normalize_checkpoint_path,
+    parse_args,
     resolve_algorithm,
     summarize_episode_outcome,
     wait_for_realtime_tick,
@@ -17,6 +18,14 @@ from run import (
 
 
 class RunGenericPolicyTests(unittest.TestCase):
+    def test_no_reset_cli_disables_automatic_episode_reset(self):
+        self.assertFalse(parse_args(["--no-reset"]).reset)
+        self.assertTrue(parse_args([]).reset)
+
+    def test_no_initial_reset_preserves_the_current_scene_state(self):
+        self.assertFalse(parse_args(["--no-initial-reset"]).initial_reset)
+        self.assertTrue(parse_args([]).initial_reset)
+
     def test_normalize_checkpoint_path_accepts_prefix_and_index_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             checkpoint_prefix = Path(temp_dir) / "ckpt-42"
