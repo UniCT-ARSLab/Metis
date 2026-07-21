@@ -117,8 +117,8 @@ def parse_args(argv=None):
         action=argparse.BooleanOptionalAction,
         default=True,
         help=(
-            "Start a new episode after a terminal state. Use --no-reset to keep Godot "
-            "open in the final state."
+            "Physically reset the scenario after a terminal state. With --no-reset, "
+            "Metis starts the next logical episode from the current Godot state."
         ),
     )
     parser.add_argument(
@@ -199,9 +199,10 @@ def configured_max_steps(args):
     return 0
 
 
-def wait_without_reset(sleeper=time.sleep):
-    while True:
-        sleeper(1.0)
+def should_preserve_state(args, episode):
+    if episode == 0:
+        return not args.initial_reset
+    return not args.reset
 
 
 def wait_for_realtime_tick(previous_deadline, frequency_hz, clock=time.monotonic, sleeper=time.sleep):
@@ -651,7 +652,8 @@ def main():
             print("Running indefinitely. Stop with Ctrl+C.", flush=True)
         if not args.reset:
             print(
-                "Automatic episode reset disabled; terminal states remain visible until Ctrl+C.",
+                "Physical resets after terminal states disabled; inference resumes from the "
+                "current state in the next logical episode.",
                 flush=True,
             )
         if not args.initial_reset:
@@ -664,7 +666,7 @@ def main():
 
         for episode in iter_episode_numbers(args):
             reset_options = {
-                "preserve_state": bool(episode == 0 and not args.initial_reset),
+                "preserve_state": should_preserve_state(args, episode),
             }
             obs, info = env.reset(seed=args.seed + episode, options=reset_options)
             realtime_deadline = time.monotonic()
@@ -733,13 +735,12 @@ def main():
                 f"success={success_count}/{trial_count} terminal={terminal_label}",
                 flush=True,
             )
-            if not args.reset:
+            if not args.reset and (args.infinite or episode + 1 < args.episodes):
                 print(
-                    "Episode ended. Keeping the final Godot state without resetting; "
-                    "stop with Ctrl+C.",
+                    "Terminal boundary cleared logically; continuing from the current "
+                    "physical state.",
                     flush=True,
                 )
-                wait_without_reset()
         emit_evaluation_summary(
             args,
             evaluation_rewards,

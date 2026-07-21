@@ -12,6 +12,7 @@ from run import (
     normalize_checkpoint_path,
     parse_args,
     resolve_algorithm,
+    should_preserve_state,
     summarize_episode_outcome,
     wait_for_realtime_tick,
 )
@@ -25,6 +26,19 @@ class RunGenericPolicyTests(unittest.TestCase):
     def test_no_initial_reset_preserves_the_current_scene_state(self):
         self.assertFalse(parse_args(["--no-initial-reset"]).initial_reset)
         self.assertTrue(parse_args([]).initial_reset)
+
+    def test_no_reset_preserves_state_after_every_terminal_boundary(self):
+        args = parse_args(["--no-initial-reset", "--no-reset"])
+        self.assertTrue(should_preserve_state(args, 0))
+        self.assertTrue(should_preserve_state(args, 1))
+
+        args = parse_args([])
+        self.assertFalse(should_preserve_state(args, 0))
+        self.assertFalse(should_preserve_state(args, 1))
+
+        args = parse_args(["--no-reset"])
+        self.assertFalse(should_preserve_state(args, 0))
+        self.assertTrue(should_preserve_state(args, 1))
 
     def test_normalize_checkpoint_path_accepts_prefix_and_index_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:

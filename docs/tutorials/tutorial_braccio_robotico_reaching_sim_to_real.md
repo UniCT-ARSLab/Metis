@@ -1720,10 +1720,10 @@ sicurezza rimangono terminali. Durante il training, dove l'opzione non viene pas
 
 `--no-initial-reset` evita anche il reset fisico iniziale: observation, reward, eventi e
 progress vengono inizializzati rispetto alla posa corrente, senza spostare il braccio o il
-target. `--no-reset` impedisce poi qualunque reset automatico. Se avviene una collisione,
-il controllo viene fermato per sicurezza e la scena resta nella posa terminale fino a
-`Ctrl+C`; non viene avviato un altro episodio. Rimane una inizializzazione logica iniziale,
-necessaria per costruire la prima observation, ma non modifica lo stato fisico della scena.
+target. `--no-reset` conserva la posa anche ai terminali successivi. Una collisione chiude
+ancora l'episodio logico e viene registrata nei risultati, ma con `--infinite` Metis ripulisce
+il terminale e continua subito l'inferenza dalla stessa configurazione fisica. Se il robot
+rimane a contatto con l'ostacolo, la collisione puo' naturalmente essere rilevata di nuovo.
 
 Valuta almeno quattro suite:
 

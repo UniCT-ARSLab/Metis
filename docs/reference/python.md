@@ -20,10 +20,11 @@ e applica la policy senza training. Supporta esecuzione lockstep per valutazioni
 realtime per osservare il comportamento a velocita' naturale. Con
 `--continue-after-success` chiede agli scenari compatibili di mantenere attive inferenza e
 simulazione dopo un obiettivo riuscito; collisioni e altri errori restano terminali. Con
-`--no-reset`, un terminale mantiene Godot aperto nello stato finale fino a `Ctrl+C` invece
-di avviare un nuovo episodio. `--no-initial-reset` inizializza observation e bookkeeping
-dalla posa corrente senza chiamare il reset fisico dello scenario; le due opzioni insieme
-evitano ogni reset fisico durante la run.
+`--no-reset`, dopo un terminale Metis apre un nuovo episodio logico dalla posa corrente:
+eventi e reward vengono ripuliti, mentre agenti e target non vengono riposizionati.
+`--no-initial-reset` applica lo stesso comportamento alla prima inizializzazione; le due
+opzioni insieme evitano ogni reset fisico durante la run. Per continuare senza un limite al
+numero di episodi occorre anche `--infinite`.
 
 ### `python/export.py`
 
