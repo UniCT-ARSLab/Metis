@@ -62,6 +62,21 @@ func _initialize() -> void:
 		robot.get_joint_position("xarm_5_joint"))
 	passed = passed and agent.get_observation_size() == 21
 
+	var moving_target := Node3D.new()
+	root.add_child(moving_target)
+	body.target = moving_target
+	body.success_hold_physics_frames = 1
+	body.set_continue_after_success(true)
+	moving_target.global_position = end_effector.global_position
+	await physics_frame
+	passed = passed and body.has_succeeded() and not body.is_terminal()
+	moving_target.global_position += Vector3(body.success_distance * 3.0, 0.0, 0.0)
+	await physics_frame
+	passed = passed and not body.has_succeeded() and not body.is_terminal()
+	moving_target.free()
+	body.target = null
+	body.set_continue_after_success(false)
+
 	var robot_shape := body.get_node(
 		"xarm/xarm_6_joint/xarm_6_link_collision") as CollisionShape3D
 	var obstacle := StaticBody3D.new()

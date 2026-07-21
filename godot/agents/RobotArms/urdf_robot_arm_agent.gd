@@ -21,6 +21,8 @@ signal obstacle_collision
 @export var workspace_scale := 1.0
 @export var success_distance := 0.05
 @export var success_hold_physics_frames := 10
+@export var terminate_on_success := true
+@export_range(1.0, 10.0, 0.1) var success_rearm_distance_multiplier := 1.5
 
 @export_category("Safety")
 @export var safety_volumes: Array[Area3D] = []
@@ -173,6 +175,13 @@ func has_succeeded() -> bool:
 
 func has_collided() -> bool:
 	return _collided
+
+
+func set_continue_after_success(enabled: bool) -> void:
+	terminate_on_success = not enabled
+	if enabled and _succeeded and not _collided:
+		_terminal = false
+		set_training_active(true)
 
 
 func get_progress() -> float:
@@ -329,15 +338,25 @@ func _update_end_effector() -> void:
 func _update_success_state() -> void:
 	if _terminal or not target or not end_effector:
 		return
-	if _target_distance() <= success_distance:
+	var distance := _target_distance()
+	if _succeeded:
+		if (
+			not terminate_on_success
+			and distance > success_distance * success_rearm_distance_multiplier
+		):
+			_succeeded = false
+			_success_frames = 0
+		return
+	if distance <= success_distance:
 		_success_frames += 1
 	else:
 		_success_frames = 0
 	if _success_frames < success_hold_physics_frames:
 		return
 	_succeeded = true
-	_terminal = true
-	_robot.stop_all_joints()
+	if terminate_on_success:
+		_terminal = true
+		_robot.stop_all_joints()
 	target_reached.emit()
 
 

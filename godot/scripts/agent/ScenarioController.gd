@@ -25,6 +25,7 @@ signal scenario_configured(config:Dictionary)
 @export var max_steps:= 500 # Zero disables step-based truncation.
 @export_range(1, 16, 1) var physics_frames_per_step := 1
 @export var manage_agent_cameras := true
+@export var continue_after_success := false
 
 @export_category("Training Optimization")
 @export var auto_optimize_in_headless := true
@@ -283,6 +284,8 @@ func configure(config:Dictionary) -> Dictionary:
 		disable_replication_in_recording = bool(config["disable_replication_in_recording"])
 	if config.has("manage_agent_cameras"):
 		manage_agent_cameras = bool(config["manage_agent_cameras"])
+	if config.has("continue_after_success"):
+		continue_after_success = bool(config["continue_after_success"])
 	if _scenario_reward_system != null:
 		_apply_config_to_node_tree(_scenario_reward_system, config)
 	_update_current_agent_camera()
@@ -302,7 +305,8 @@ func configure(config:Dictionary) -> Dictionary:
 		"recording_mode": recording_mode,
 		"recording_agent_id": recording_agent_id,
 		"disable_replication_in_recording": disable_replication_in_recording,
-		"manage_agent_cameras": manage_agent_cameras
+		"manage_agent_cameras": manage_agent_cameras,
+		"continue_after_success": continue_after_success
 	}
 
 

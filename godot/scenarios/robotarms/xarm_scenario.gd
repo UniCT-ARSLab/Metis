@@ -12,9 +12,11 @@ extends Node3D
 @onready var collision_event = $ScenarioController/ScenarioEventSystem/Collision
 
 var _training_episode := 0
+var _goal_terminal_reason := "target_reached"
 
 
 func _ready() -> void:
+	_goal_terminal_reason = str(goal_event.terminal_reason)
 	arm.target = target
 	arm.target_reached.connect(_on_target_reached)
 	arm.obstacle_collision.connect(_on_obstacle_collision)
@@ -24,6 +26,11 @@ func _ready() -> void:
 
 func _on_scenario_configured(config:Dictionary) -> void:
 	_training_episode = int(config.get("training_episode", _training_episode))
+	var continue_after_success := bool(config.get(
+		"continue_after_success", controller.continue_after_success))
+	if arm.has_method("set_continue_after_success"):
+		arm.set_continue_after_success(continue_after_success)
+	goal_event.terminal_reason = "" if continue_after_success else _goal_terminal_reason
 
 
 func _on_episode_reset_started(_seed:int) -> void:

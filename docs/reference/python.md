@@ -17,7 +17,9 @@ DDPG per continue e PPO per ibride. Gli algoritmi alternativi si selezionano per
 
 Carica per default `policy.keras` e `policy.json`, oppure un modello `.h5`, i vecchi pesi/checkpoint,
 e applica la policy senza training. Supporta esecuzione lockstep per valutazioni riproducibili e
-realtime per osservare il comportamento a velocita' naturale.
+realtime per osservare il comportamento a velocita' naturale. Con
+`--continue-after-success` chiede agli scenari compatibili di mantenere attive inferenza e
+simulazione dopo un obiettivo riuscito; collisioni e altri errori restano terminali.
 
 ### `python/export.py`
 

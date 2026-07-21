@@ -1241,7 +1241,7 @@ python/.venv/bin/python python/train.py \
   --algorithm sac \
   --godot-bin /home/fedyfausto/Godot/Godot_v4.6.2-stable_linux.x86_64 \
   --godot-project godot \
-  --godot-scene res://scenarios/robot_arm_reaching/robot_arm_reaching_scenario.tscn \
+  --godot-scene res://scenarios/robotarms/XarmScenario.tscn \
   --num-envs 8 \
   --num-episodes 4000 \
   --max-steps-per-episode 300 \
@@ -1690,6 +1690,31 @@ python/.venv/bin/python python/run.py \
   --execution-mode realtime \
   --no-headless
 ```
+
+Il comando precedente e' una valutazione: dopo ogni successo o fallimento avvia un nuovo
+episodio. Per spostare il target a mano e verificare che la policy continui a inseguirlo senza
+resettare il robot, usa `--continue-after-success`, `--infinite` e `--no-time-limit`:
+
+```bash
+python/.venv/bin/python python/run.py \
+  --algorithm auto \
+  --load-from policy \
+  --policy-path checkpoints/robot_arm_reaching_td3_bc_v1 \
+  --godot-bin /home/fedyfausto/Godot/Godot_v4.6.2-stable_linux.x86_64 \
+  --godot-project godot \
+  --godot-scene res://scenarios/robotarms/XarmScenario.tscn \
+  --execution-mode realtime \
+  --continue-after-success \
+  --infinite \
+  --no-time-limit \
+  --no-headless
+```
+
+In questa modalita' `target_reached` produce ancora l'evento di successo, ma non termina
+l'episodio. Quando il target viene spostato oltre la distanza di riarmo, il rilevatore torna
+attivo e il braccio continua a ricevere osservazioni e azioni. Collisioni e condizioni di
+sicurezza rimangono terminali. Durante il training, dove l'opzione non viene passata,
+`target_reached` continua a terminare normalmente l'episodio.
 
 Valuta almeno quattro suite:
 

@@ -112,6 +112,15 @@ def parse_args():
         help="Maximum episode steps; use 0 or --no-time-limit to rely on terminal conditions.",
     )
     parser.add_argument("--infinite", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--continue-after-success",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Ask the scenario to report successful goals without terminating the episode, "
+            "so inference can continue when a target moves. Scenario support is required."
+        ),
+    )
     parser.add_argument("--time-limit", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--epsilon", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=0)
@@ -579,7 +588,24 @@ def main():
         training_episode = args.training_episode
         if training_episode is None:
             training_episode = inferred_episode if inferred_episode is not None else 0
-        env.configure(max_steps=env_max_steps, training_episode=training_episode)
+        scenario_config = {
+            "max_steps": env_max_steps,
+            "training_episode": training_episode,
+        }
+        if args.continue_after_success:
+            scenario_config.update(
+                continue_after_success=True,
+                terminate_on_stalled_progress=False,
+            )
+        config_reply = env.configure(**scenario_config)
+        if args.continue_after_success and not bool(
+            config_reply.get("continue_after_success", False)
+        ):
+            print(
+                "WARNING: the scenario did not confirm continue_after_success; "
+                "successful states may remain terminal.",
+                flush=True,
+            )
         env.set_execution_mode(
             args.execution_mode,
             simulation_fps=args.realtime_simulation_fps,
