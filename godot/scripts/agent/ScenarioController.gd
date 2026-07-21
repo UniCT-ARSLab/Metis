@@ -434,18 +434,17 @@ func get_spec() -> Dictionary:
 
 
 func _advance_physics_frames(frame_count:int) -> void:
-	# Se l'albero era in pausa (lockstep), assicuriamoci che sia sbloccato prima di aspettare la fisica
+	# A lockstep tree must be running before physics-frame signals can advance.
 	var was_paused := get_tree().paused
 	if was_paused:
 		get_tree().paused = false
 		
 	for _frame in range(maxi(frame_count, 1)):
-		# Usiamo sia il frame di processo che quello di fisica per garantire 
-		# che la pipeline di rendering e di fisica di Godot completino il ciclo di tick
+		# Wait for both physics and process frames so Godot completes the full tick.
 		await get_tree().physics_frame
 		await get_tree().process_frame
 
-	# Ripristiniamo lo stato di pausa se necessario (verrà poi gestito dal BridgeServer)
+	# Restore the pause state; BridgeServer will manage it after the request.
 	if was_paused:
 		get_tree().paused = true
 

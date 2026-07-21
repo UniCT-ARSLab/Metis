@@ -1,76 +1,76 @@
 # Metis
 
+<p align="center">
+  <img src="docs/logo.svg" alt="Metis logo" width="640">
+</p>
+
 **Modular Environment for Training Intelligent Systems**
 
-Metis e' un piccolo framework di reinforcement learning che mette insieme Godot,
-Gymnasium e TensorFlow/Keras.
+Metis connects Godot simulations to reinforcement-learning code written with
+Gymnasium and TensorFlow/Keras. Agents, sensors, rewards, episode rules, and world
+physics live in Godot. Python reads that contract and handles data collection,
+optimization, checkpoints, evaluation, and inference.
 
-Nasce da un'esigenza pratica: poter costruire un agente e il suo mondo in Godot, usando
-scene, fisica e Inspector, senza dover scrivere un nuovo programma Python per ogni
-esperimento. Lo scenario descrive cosa osserva l'agente, quali azioni puo' compiere,
-come viene premiato e quando termina un episodio. Python legge questo contratto e si
-occupa del training.
+The aim is straightforward: changing the task should usually mean building a new
+Godot scene, not writing another Python training program.
 
-Il progetto e' ancora in evoluzione, ma non e' piu' soltanto una demo: comprende
-training discreto, continuo e ibrido, scenari con piu' agenti, raccolta asincrona,
-checkpoint, dimostrazioni manuali, self-play ed esportazione dei modelli.
+Metis is under active development, but it already supports discrete, continuous, and
+hybrid control; multi-agent environments; asynchronous collection; demonstrations;
+self-play; and portable policy exports.
 
-La documentazione completa si trova in [docs/README.md](docs/README.md). Per costruire
-subito qualcosa, il punto di partenza migliore e'
-[Creare un nuovo scenario e agente](docs/tutorials/tutorial_nuovo_scenario_agente_rl.md).
+Start with the [documentation index](docs/README.md). If you are building a task for
+the first time, read [Build a new agent and scenario](docs/tutorials/new-agent-and-scenario.md).
 
-## Cosa offre oggi
+## What is included
 
-| Area | Supporto |
+| Area | Current support |
 |---|---|
-| Simulazione | Godot 4, scene 2D e 3D, fisica e reset deterministici |
-| API ambiente | wrapper Gymnasium generico e bridge TCP JSON con `TCP_NODELAY` |
-| Action space | discreti, continui, multi-discreti e ibridi |
-| Observation | metodi, property, cinematica, velocita', RayCast, target, team e Path3D |
-| Reward | componenti locali per agente e componenti globali di scenario |
-| Algoritmi | DQN, PPO, DDPG, DDPG+BC, DDPGfD, TD3, TD3+BC e SAC |
-| Raccolta | uno o piu' environment, collector sincrono o asincrono |
-| Multi-agent | transizioni separate per agente e parameter sharing |
-| Competizione | self-play simultaneo e opponent pool con policy storiche |
-| Dimostrazioni | registrazione manuale, replay prefill e behavior cloning |
-| Salvataggio | checkpoint completi, replay buffer, best checkpoint e policy Keras |
-| Esecuzione | lockstep riproducibile oppure realtime per osservare la policy |
-| Esportazione | Keras, TensorFlow Lite e ONNX opzionale |
-| Piattaforme | Linux CPU/CUDA e macOS Apple Silicon con TensorFlow Metal |
+| Simulation | Godot 4, 2D and 3D scenes, physics, seeded resets |
+| Environment API | Generic Gymnasium wrapper and newline-delimited JSON over TCP |
+| Action spaces | Discrete, continuous, multi-discrete, and hybrid |
+| Observations | Methods, properties, body state, ray casts, targets, teams, and paths |
+| Rewards | Per-agent components and scenario-level components |
+| Algorithms | DQN, PPO, DDPG, DDPG+BC, DDPGfD, TD3, TD3+BC, and SAC |
+| Collection | One or more Godot processes, synchronous or asynchronous |
+| Multi-agent | Separate transitions with parameter sharing |
+| Competition | Simultaneous self-play and historical opponent pools |
+| Demonstrations | Manual recording, replay prefill, and behavior cloning |
+| Persistence | Full checkpoints, replay snapshots, best-policy tracking, Keras bundles |
+| Inference | Reproducible lockstep or real-time execution |
+| Export | Keras, TensorFlow Lite, and optional ONNX |
+| Platforms | Linux CPU/CUDA and Apple Silicon with TensorFlow Metal |
 
-Metis usa trainer TensorFlow/Keras propri. Gymnasium definisce l'interfaccia
-dell'ambiente, ma il progetto non dipende da Stable-Baselines3.
+Metis ships its own TensorFlow/Keras trainers. Gymnasium defines the environment
+interface; Stable-Baselines3 is not a runtime dependency.
 
-## Come e' diviso il lavoro
+## How the pieces fit
 
-Godot e Python hanno responsabilita' diverse e abbastanza nette.
+Godot owns the simulation:
 
-**Godot possiede il mondo:**
+- bodies, collision shapes, physics, and game rules;
+- sensors and observations;
+- action-space declarations;
+- rewards, progress, events, and terminal conditions;
+- reset randomization and task curriculum.
 
-- fisica, collisioni, oggetti e regole del gioco;
-- corpi controllati e sensori;
-- observation e action space;
-- reward, eventi e condizioni terminali;
-- reset, randomizzazione e curriculum dello scenario.
+Python owns learning and orchestration:
 
-**Python possiede l'apprendimento:**
+- starting and stopping Godot processes;
+- exposing each process as a Gymnasium environment;
+- collecting replay or rollout data;
+- updating Keras models;
+- saving, evaluating, and running policies.
 
-- avvio delle istanze Godot;
-- adattamento Gymnasium;
-- raccolta di replay o rollout;
-- reti Keras, optimizer e aggiornamenti;
-- checkpoint, valutazione e inferenza.
-
-Tra i due c'e' `BridgeServer`, che espone `spec`, `configure`, `reset` e `step` via
-TCP. Il server vive in Godot perche' e' Godot ad avere lo stato autorevole della
-simulazione. Python resta il client che orchestra gli environment e il learner.
+`BridgeServer` sits between them. Godot acts as the server because it owns the
+authoritative world state. Python connects as a client and decides when the world
+should reset or advance.
 
 ```text
 python/train.py
     |
-    +-- GodotProcessManager -> uno o piu' processi Godot
-    +-- ScenarioGymEnv      -> ambiente Gymnasium
-    +-- algorithms/*        -> learner Keras
+    +-- GodotProcessManager -> one or more Godot processes
+    +-- ScenarioGymEnv      -> Gymnasium interface
+    +-- algorithms/*        -> Keras learner
                                 |
 Godot                           |
     BridgeServer <--------------+
@@ -81,12 +81,16 @@ Godot                           |
             ProgressProvider
 ```
 
-## Installazione
+The protocol exposes four operations: `spec`, `configure`, `reset`, and `step`.
+`TCP_NODELAY` is enabled to avoid adding latency to the many small messages exchanged
+during training.
 
-Il progetto e' sviluppato con Godot 4.6.2. Versioni Godot 4 vicine possono funzionare,
-ma la 4.6.2 e' quella verificata durante lo sviluppo.
+## Installation
 
-Da root del repository:
+The project is tested with Godot 4.6.2. Nearby Godot 4 releases may work, but they are
+not part of the regular test setup.
+
+Create the virtual environment from the repository root:
 
 ```bash
 python3 -m venv python/.venv
@@ -94,33 +98,32 @@ python/.venv/bin/python -m pip install --upgrade pip
 python/.venv/bin/python -m pip install -r python/requirements.txt
 ```
 
-Per una GPU NVIDIA su Linux:
+For NVIDIA CUDA on Linux:
 
 ```bash
 python/.venv/bin/python -m pip install -r python/requirements-linux-cuda.txt
 ```
 
-Per Apple Silicon e Metal:
+For Apple Silicon:
 
 ```bash
 xcode-select --install
 python/.venv/bin/python -m pip install -r python/requirements-macos-metal.txt
 ```
 
-Il file macOS usa intenzionalmente `tensorflow==2.18.1` e
-`tensorflow-metal==1.2.0`. Il plugin Metal attuale non e' compatibile con le ABI delle
-versioni TensorFlow piu' recenti.
+The macOS requirements intentionally pin `tensorflow==2.18.1` and
+`tensorflow-metal==1.2.0`. That Metal plugin does not match the ABI of newer
+TensorFlow releases.
 
-Puoi evitare di ripetere il percorso di Godot impostando:
+Set `GODOT_BIN` if Godot is not on `PATH`:
 
 ```bash
-export GODOT_BIN=/percorso/del/eseguibile/Godot
+export GODOT_BIN=/path/to/Godot
 ```
 
-## Primo giro completo
+## A first run
 
-Prima di allenare conviene verificare che lo scenario rispetti il contratto. Questo
-comando avvia Pong, legge la spec e applica azioni casuali:
+Before training, use a random rollout to check the scene contract and reset behavior:
 
 ```bash
 python/.venv/bin/python python/tools/random_rollout.py \
@@ -132,7 +135,7 @@ python/.venv/bin/python python/tools/random_rollout.py \
   --no-headless
 ```
 
-Un training DQN per Breakout puo' partire cosi:
+This example trains Breakout with DQN:
 
 ```bash
 python/.venv/bin/python python/train.py \
@@ -146,8 +149,8 @@ python/.venv/bin/python python/train.py \
   --headless
 ```
 
-Durante i checkpoint Metis salva anche `policy.keras` e `policy.json`. Per guardare la
-policy, senza dover ricordare l'architettura del modello:
+Checkpoints also contain a portable `policy.keras` and a `policy.json` manifest. Run
+the resulting policy with:
 
 ```bash
 python/.venv/bin/python python/run.py \
@@ -158,178 +161,162 @@ python/.venv/bin/python python/run.py \
   --no-headless
 ```
 
-`run.py` legge algoritmo, observation e action contract da `policy.json`.
+`run.py` reads the algorithm and the observation/action contract from `policy.json`.
 
-## Costruire un agente in Godot
+## Building an agent in Godot
 
-L'albero consigliato e' questo:
+A typical agent scene looks like this:
 
 ```text
 AgentBody
-└── Agent
-    ├── ActionSpace
-    ├── ObservationSystem
-    └── RewardSystem
+`-- Agent
+    |-- ActionSpace
+    |-- ObservationSystem
+    `-- RewardSystem
 ```
 
-Il corpo rimane un normale `CharacterBody`, `RigidBody` o nodo scelto dal progetto.
-Continua a contenere movimento, collisioni, animazioni e logica concreta. Il figlio
-`Agent` descrive soltanto l'interfaccia RL.
+`AgentBody` remains an ordinary Godot body and contains the task-specific mechanics:
+movement, collisions, animation, projectiles, and manual controls. The child `Agent`
+describes the RL interface.
 
-### Azioni
+### Actions
 
-`ActionSpace` puo' contenere:
+`ActionSpace` accepts:
 
-- `DiscreteActionSet`, con figli `DiscreteAction` collegati a metodi Godot;
-- `ContinuousAction`, con nome, dimensione, limiti e limiti di esplorazione;
-- entrambi, quando l'agente ha uno spazio ibrido.
+- `DiscreteActionSet`, containing one or more `DiscreteAction` nodes;
+- `ContinuousAction`, with a name, size, bounds, and optional exploration bounds;
+- both at once for a hybrid agent.
 
-Un tank, per esempio, puo' usare accelerazione e sterzo continui insieme a uno sparo
-discreto. Python riceve la struttura completa dalla scena; non contiene nomi speciali
-come `accelerate`, `steer` o `shoot`.
+A tank can therefore expose continuous throttle and steering together with a discrete
+fire command. Python discovers those components from the scene. It has no built-in
+knowledge of names such as `accelerate`, `steer`, or `shoot`.
 
-### Observation
+### Observations
 
-`ObservationSystem` conserva ordine e dimensione delle observation. Le source incluse
-coprono:
+`ObservationSystem` keeps observation order and size stable. The supplied sources can
+read methods and properties, body kinematics, ray casts, visible targets, team state,
+and path-relative data.
 
-- property e metodi del corpo o di un altro nodo;
-- posizione, velocita' e cinematica;
-- distanza e stato di uno o piu' RayCast;
-- target visibili e appartenenza a team;
-- informazioni locali rispetto a un Path3D.
+The optional **Metis Inspector** editor plugin adds pickers for compatible methods and
+properties. The selected values are stored as regular Godot scene properties, so the
+runtime does not depend on the editor plugin.
 
-Il plugin editor **Metis Inspector** aggiunge menu per scegliere metodi e property
-compatibili senza doverli digitare a memoria. Le scene restano normali file Godot e il
-runtime non dipende dal plugin.
+Changing an observation's order, size, normalization, or meaning changes the model
+contract. Existing policies are normally incompatible after such a change.
 
-Le observation devono avere ordine e dimensione stabili. Cambiare una source, la sua
-normalizzazione o il suo significato rende normalmente incompatibile un modello gia'
-allenato.
+### Rewards, events, and progress
 
-### Reward, eventi e progresso
+Put body-local terms under `Agent/RewardSystem`: motion cost, control smoothness,
+sensor clearance, or a small time penalty. Put task rules under
+`ScenarioRewardSystem`: goals, score, shared-world collisions, wins, and progress.
 
-Le reward locali stanno sotto `Agent/RewardSystem`. Sono adatte a movimento, velocita',
-input, sensori, penalita' per step e funzioni personalizzate.
+Each agent receives its own reward. A multi-agent scene does not silently sum every
+agent's score.
 
-Le reward che appartengono al compito stanno in `ScenarioRewardSystem`: punti, goal,
-progresso, vittorie, collisioni globali o assenza di avanzamento. Ogni agente riceve il
-proprio totale; in multi-agent le reward non vengono sommate automaticamente tra tutti.
+`ScenarioEventSystem` separates facts from values. The scene can emit `ball_hit`; a
+reward component decides whether that event is worth `0.02`, `1.0`, or nothing.
 
-`ScenarioEventSystem` separa il fatto dal suo valore. Una collisione puo' emettere
-`ball_hit`; un componente reward decide se vale `0.02`, `1.0` o niente. Questa divisione
-rende piu' semplice ritoccare lo shaping senza riscrivere la logica del gioco.
+`ProgressProvider` is simply an ordered task metric. It may represent distance along a
+track, bricks destroyed, an object's lift height, remaining health, or a phase of a
+larger task. It does not have to use a `Path3D`.
 
-`ProgressProvider` non significa necessariamente percorso. Puo' rappresentare metri
-percorsi, mattoni distrutti, salute rimanente o una fase del compito. Metis include un
-provider Path3D e uno che chiama un metodo personalizzato.
+See the [Godot reference](docs/reference/godot.md) for the complete node contract.
 
-La reference completa dei nodi e' in [Metis in Godot](docs/reference/godot.md).
+## Algorithms
 
-## Algoritmi
+`python/train.py` is the public training entry point.
 
-`python/train.py` e' l'unico entrypoint pubblico del training.
-
-| Algoritmo | Action space | Quando usarlo |
+| Algorithm | Action space | Good starting point for |
 |---|---|---|
-| `dqn` | discreto | baseline semplice per poche azioni categoriche |
-| `ppo` | discreto, continuo, ibrido | rollout on-policy e spazi composti |
-| `ddpg` | continuo | actor-critic deterministico essenziale |
-| `sac` | continuo | esplorazione entropica e policy stocastica |
-| `td3` | continuo | DDPG con twin critics e aggiornamenti ritardati |
-| `ddpg_bc` | continuo + demo | DDPG regolarizzato con behavior cloning |
-| `ddpgfd` | continuo + demo | demo protette in replay e pretraining |
-| `td3_bc` | continuo + demo | TD3 con loss BC adattiva |
+| `dqn` | discrete | A small set of categorical actions |
+| `ppo` | discrete, continuous, hybrid | On-policy rollouts and composed spaces |
+| `ddpg` | continuous | A minimal deterministic actor-critic baseline |
+| `sac` | continuous | Stochastic exploration and robust continuous control |
+| `td3` | continuous | Deterministic control with twin critics |
+| `ddpg_bc` | continuous + demos | DDPG regularized by behavior cloning |
+| `ddpgfd` | continuous + demos | Protected demonstration replay and pretraining |
+| `td3_bc` | continuous + demos | TD3 with an adaptive behavior-cloning loss |
 
-Con `--algorithm auto`, Metis sceglie DQN per spazi discreti, DDPG per continui e PPO
-per ibridi. Gli altri algoritmi vanno richiesti esplicitamente: la scelta dipende dal
-problema, non soltanto dalla forma delle azioni.
+With `--algorithm auto`, Metis selects DQN for discrete spaces, DDPG for continuous
+spaces, and PPO for hybrid spaces. Select other algorithms explicitly; action shape
+alone is not enough to choose the best learner for a task.
 
-## Episodi e frequenza delle decisioni
+## Episodes and decision frequency
 
-`--max-steps-per-episode` e' comunicato anche al `ScenarioController`, quindi Python e
-Godot condividono lo stesso limite. Con `0` il limite e' disabilitato e l'episodio
-termina soltanto per una condizione dello scenario:
+`--max-steps-per-episode` is sent to Godot as well as enforced by Python. Set it to
+zero when the scenario has reliable terminal or stall conditions and should have no
+external step limit:
 
 ```text
 --max-steps-per-episode 0
 ```
 
-Va usato solo quando esiste una conclusione affidabile o un controllo di stall.
+`--physics-frames-per-step N` holds one action for `N` physics ticks. At 60 Hz,
+`N=4` gives the policy a 15 Hz decision rate. Step penalties, timeouts, and stall
+windows count decisions rather than raw physics frames, so changing `N` also changes
+their real-world duration.
 
-`--physics-frames-per-step N` mantiene la stessa azione per `N` tick fisici. Con fisica
-a 60 Hz e `N=4`, la policy decide a 15 Hz. Reward per step, timeout e finestre di stall
-sono misurati in decision step, quindi cambiare questo valore cambia anche la loro
-durata fisica.
+## Collection and rendering
 
-## Uno o molti environment
-
-`--num-envs` avvia processi Godot indipendenti. Il collector predefinito e' asincrono:
-un environment lento non ferma gli altri e il learner continua a consumare transizioni
-dalla coda.
+`--num-envs` starts independent Godot processes. The default asynchronous collector
+lets each process advance at its own pace while the learner consumes transitions from
+a queue:
 
 ```text
 --num-envs 4 --collector-mode async
 ```
 
-DQN, DDPG, TD3 e SAC usano replay buffer e copie CPU della policy nei collector. PPO
-usa rollout congelati per generazione: gli environment sono asincroni durante la
-raccolta, ma l'update avviene soltanto quando i dati appartengono alla stessa versione
-della policy.
+DQN and the continuous off-policy algorithms use replay buffers and lightweight CPU
+policy copies in collector workers. PPO collects asynchronously but only updates from
+a rollout produced by one frozen policy generation.
 
-Il learner resta unico. Su una singola GPU e' in genere piu' efficiente raccogliere da
-piu' simulatori e addestrare una rete centrale che far competere piu' learner per la
-stessa GPU. Le reti piccole possono comunque mostrare un utilizzo GPU basso: spesso il
-collo di bottiglia e' nella simulazione, nelle socket o nei batch ridotti.
+There is one learner. On a single GPU, multiple simulators feeding one model are
+usually more useful than several learners competing for the same device. Small neural
+networks may still show low GPU utilization because physics, sockets, and batch
+assembly dominate the wall-clock time.
 
-Per una raccolta piu' facile da riprodurre puoi usare:
+Use synchronous collection when reproducibility matters more than throughput:
 
 ```text
 --collector-mode sync --parallel-env-steps
 ```
 
-Il rendering e' indipendente dal collector:
+Rendering is independent of collection mode:
 
 ```text
---headless                                      # nessuna finestra
---num-envs 4 --no-headless                     # quattro finestre
---num-envs 4 --no-headless --render-env-count 1 # una preview
+--headless
+--num-envs 4 --no-headless
+--num-envs 4 --no-headless --render-env-count 1
 ```
 
-Per le istanze visibili, `--render-mode` permette di scegliere quanto lavoro grafico
-lasciare a Godot durante il training:
+Visible instances support these render modes:
 
-| Valore | Comportamento | Quando usarlo |
-|---|---|---|
-| `light-gpu` | OpenGL compatibility con fallback PRIME | default del training; se Linux ricade su llvmpipe, prova automaticamente la GPU discreta esposta da `switcherooctl` |
-| `project` | usa il renderer configurato nel progetto Godot | quando vuoi vedere lo scenario esattamente come e' stato progettato |
-| `cpu` | OpenGL software tramite Mesa llvmpipe | per liberare del tutto la GPU, accettando piu' carico CPU e meno FPS |
-| `gpu` | Vulkan Forward+ | per controllare la resa completa; in genere non serve durante un training |
+| Mode | Behavior |
+|---|---|
+| `light-gpu` | OpenGL Compatibility; training default, with a Linux PRIME fallback |
+| `project` | Uses the renderer configured by the Godot project |
+| `cpu` | Mesa software rendering, mainly useful on Linux |
+| `gpu` | Vulkan Forward+, mostly for visual inspection |
 
-Ad esempio, questo avvia quattro environment asincroni ma mostra soltanto il primo con
-il renderer leggero:
+For example:
 
 ```text
 --num-envs 4 --collector-mode async --no-headless \
   --render-env-count 1 --render-mode light-gpu
 ```
 
-`--render-mode` viene ignorato dalle istanze headless. Con `--render-env-count`, inoltre,
-la scelta si applica soltanto alle finestre effettivamente renderizzate: gli altri
-processi continuano senza interfaccia grafica. La modalita' `cpu` dipende da Mesa ed e'
-pensata soprattutto per Linux; se il driver software non e' disponibile conviene usare
-`light-gpu`. Il fallback di `light-gpu` non viene applicato quando OpenGL e' gia'
-accelerato o quando l'utente ha impostato esplicitamente variabili PRIME/DRI.
+`--render-mode` only affects visible processes. If OpenGL falls back to `llvmpipe` on
+Linux, `light-gpu` tries the discrete GPU reported by `switcherooctl`, unless PRIME or
+DRI variables were already set explicitly.
 
-## Multi-agent e self-play
+## Multi-agent and self-play
 
-Con `--multi-agent`, ogni step puo' produrre una transizione per ciascun agente attivo.
-Se observation e action space sono compatibili, gli agenti condividono la stessa rete
-ma conservano reward, terminalita' e diagnostica separate. Aggiungere agenti aumenta la
-raccolta di esperienza; non crea automaticamente modelli diversi e non sceglie il
-"migliore" tra gli agenti.
+With `--multi-agent`, each active agent contributes its own transition. Compatible
+agents share model parameters while retaining separate observations, rewards,
+terminal states, and diagnostics. Adding agents increases experience collection; it
+does not create one model per agent or select a winner among them.
 
-Negli scenari a due squadre puoi aggiungere un opponent pool:
+Team scenarios can use a historical opponent pool:
 
 ```text
 --multi-agent \
@@ -339,31 +326,25 @@ Negli scenari a due squadre puoi aggiungere un opponent pool:
 --opponent-current-probability 0.2
 ```
 
-Una squadra usa la policy corrente, l'altra una snapshot storica congelata. Le
-transizioni dell'avversario non entrano nel batch del learner. DQN supporta opponent
-pool anche con collector asincrono; PPO, SAC e la famiglia DDPG/TD3 richiedono per ora
-`--collector-mode sync` quando il pool e' attivo.
+One team uses the current policy and the other uses a frozen snapshot. Opponent
+transitions are excluded from the learner batch. DQN supports the opponent pool with
+asynchronous collection. PPO, SAC, and the DDPG/TD3 family currently require a
+synchronous collector when the pool is active.
 
-Il parameter sharing non equivale a un sistema generico multi-policy. Allenare nello
-stesso scenario piu' policy indipendenti, con reti e optimizer distinti, richiede ancora
-un'estensione esplicita del trainer.
+Parameter sharing is not general multi-policy training. Independent policies with
+separate networks and optimizers still require an explicit trainer extension.
 
-## Curriculum e randomizzazione
+## Curriculum and demonstrations
 
-Python comunica a Godot `training_episode`, seed dell'environment e seed per agente.
-Lo scenario puo' usarli per aumentare difficolta', velocita', variabilita' dello spawn o
-porzione di percorso disponibile. Il curriculum resta quindi parte dello scenario e
-viene ripreso in modo deterministico da un checkpoint.
+Python sends `training_episode`, an environment seed, and per-agent seeds to Godot.
+Scenes can use them to expand spawn ranges, increase speed, randomize layouts, or
+adjust tolerances. Curriculum state therefore follows the checkpoint episode.
 
-`ScenarioController` include anche replica degli agenti, randomizzazione di posizione e
-rotazione, spawn tramite progress provider e disattivazione di camera/UI in headless.
-Durante una registrazione manuale la replica viene disabilitata per lasciare un solo
-agente controllabile.
+`ScenarioController` also supports agent replication, randomized transforms,
+progress-based spawning, and disabling cameras or UI in headless runs. Replication is
+disabled while recording so that one agent remains under manual control.
 
-## Dimostrazioni manuali
-
-`python/recorder.py` salva dataset `.npz` con observation, azione applicata, reward,
-stato successivo, terminalita', agente, episodio e step.
+Record demonstrations with `python/recorder.py`:
 
 ```bash
 python/.venv/bin/python python/recorder.py \
@@ -376,129 +357,118 @@ python/.venv/bin/python python/recorder.py \
   --no-headless
 ```
 
-DQN, SAC e la famiglia DDPG/TD3 possono usare le demo per prefill e behavior cloning.
-Le varianti `ddpg_bc`, `ddpgfd` e `td3_bc` richiedono almeno un `--demo-path`.
+The dataset contains observations, applied actions, rewards, next observations,
+terminal flags, agent IDs, episodes, and steps. See
+[Manual demonstrations](docs/guides/manual-demonstrations.md) for prefill,
+pretraining, and behavior-cloning workflows.
 
-La guida [Dimostrazioni manuali](docs/guides/manual_demonstrations.md) spiega formato,
-append, pretraining e uso nel replay.
+## Checkpoints and policies
 
-## Checkpoint, policy e resume
+Metis writes two kinds of artifacts:
 
-Metis salva due tipi di artefatto, con scopi diversi:
+- `ckpt-*` and `replay-*.npz` resume training;
+- `policy.keras` and `policy.json` run or export a policy.
 
-- `ckpt-*` e `replay-*.npz` servono a riprendere il training;
-- `policy.keras` e `policy.json` servono a eseguire o esportare la policy.
+`--resume` selects the latest checkpoint in a directory. `--resume-checkpoint` selects
+an exact checkpoint. `--policy-path` only warm-starts the policy network; optimizers,
+critics, replay data, and episode counters start fresh. It accepts Metis bundles,
+`.keras`, full `.h5` models, and `.weights.h5` files.
 
-`--resume` riprende l'ultimo checkpoint della directory. `--resume-checkpoint` ne sceglie
-uno preciso. `--policy-path` fa invece un warm start della sola rete, con optimizer,
-critic, replay ed episodio nuovi. Accetta bundle Metis, `.keras`, modelli completi `.h5`
-e file `.weights.h5`.
+Trainers can evaluate frozen checkpoints and keep the best candidate under
+`CHECKPOINT_DIR/best/`. Automatic scoring prefers success rate and uses mean reward as
+a tie-breaker or as the primary metric when a scene exposes no success signal.
 
-Ogni trainer puo' valutare periodicamente checkpoint congelati e mantenere il migliore
-in `CHECKPOINT_DIR/best/`. Il criterio automatico privilegia il tasso di successo e usa
-la reward media per gli spareggi o quando lo scenario non espone successi.
+On `Ctrl+C`, the trainer saves the latest consistent state and closes its Godot
+processes and sockets. Wait for the confirmation message before closing the terminal.
 
-Con `Ctrl+C` il trainer salva l'ultimo stato consistente e chiude processi e socket.
-Conviene aspettare il messaggio di conferma prima di chiudere il terminale.
-
-## Eseguire ed esportare una policy
-
-`python/run.py` usa lockstep nelle valutazioni headless e realtime quando la finestra e'
-visibile. Le modalita' si possono forzare con `--execution-mode`.
-
-Per eseguire un file specifico:
+Run a policy file directly with:
 
 ```bash
 python/.venv/bin/python python/run.py \
-  --policy-path exports/mia_policy/policy.keras \
+  --policy-path exports/my_policy/policy.keras \
   --godot-project godot \
-  --godot-scene res://scenarios/mio_scenario.tscn \
+  --godot-scene res://scenarios/my_scenario.tscn \
   --infinite \
   --no-time-limit \
   --no-headless
 ```
 
-Con un bundle dotato di `policy.json` non serve indicare l'algoritmo. Per un vecchio
-`.h5` senza manifest puo' essere necessario specificarlo.
-
-TFLite e ONNX si producono con:
+Export TensorFlow Lite and ONNX models with:
 
 ```bash
 python/.venv/bin/python python/export.py \
-  --policy checkpoints/nome_run \
+  --policy checkpoints/my_run \
   --format all
 ```
 
-TFLite e' disponibile con TensorFlow. ONNX richiede prima
-`python/requirements-export.txt`. Il manifest descrive ordine delle observation,
-action space e decoder, ma l'applicazione finale deve comunque ricostruire le stesse
-observation e normalizzazioni usate durante il training.
+TFLite uses TensorFlow. ONNX requires `python/requirements-export.txt`. The manifest
+records observation order, action components, and decoding metadata. A deployment
+outside Metis must still reproduce the sensor values and preprocessing performed in
+Godot.
 
-## Esempi e tutorial
+## Tutorials
 
-- [Breakout](docs/tutorials/tutorial_breakout_da_zero.md): single-agent discreto,
-  eventi, reward sparse e shaping opzionale.
-- [Pong](docs/tutorials/tutorial_pong_multi_agent.md): due agenti, policy condivisa,
-  reward personali e opponent pool.
-- [Tanks](docs/tutorials/tutorial_tanks_hybrid_multi_agent.md): squadre 3D, sensori
-  locali e azioni ibride.
-- [Guida autonoma](docs/tutorials/tutorial_guida_autonoma_path_vs_sensori.md): confronto
-  tra percorso noto e guida basata soltanto sui sensori.
-- [Soccer](docs/tutorials/tutorial_soccer_continuous_multi_agent.md): gioco di squadra
-  3D con palla fisica e controllo continuo.
+- [Breakout from scratch](docs/tutorials/breakout-from-scratch.md): a discrete
+  single-agent task with sparse events and optional shaping.
+- [Pong multi-agent](docs/tutorials/pong-multi-agent.md): two identical agents,
+  parameter sharing, self-play, and an opponent pool.
+- [Tanks 2v2](docs/tutorials/tanks-hybrid-multi-agent.md): local sensors, teams, and a
+  hybrid action space.
+- [Autonomous driving](docs/tutorials/autonomous-driving-path-vs-sensors.md): compare
+  path-aware control with a sensor-only policy.
+- [3D soccer](docs/tutorials/soccer-continuous-multi-agent.md): continuous arcade
+  movement around a physical ball.
+- [Robot-arm reaching and grasping](docs/tutorials/robot-arm-reaching-sim-to-real.md):
+  URDF import, joint control, IK, collision checks, demonstrations, and sim-to-real.
 
-## Limiti da conoscere
+## Current boundaries
 
-Metis prova ad automatizzare la parte ripetitiva, non a nascondere le scelte di RL.
-Oggi restano questi confini:
+- Agents sharing one policy must expose the same observation and action contract.
+- General independent multi-policy training is not implemented yet.
+- Asynchronous historical opponent sampling is currently limited to DQN.
+- A Keras model stores the mapping from numeric observations to actions. It does not
+  contain the Godot scene, sensors, or scene-side preprocessing.
+- The trainers are Metis implementations built with TensorFlow/Keras. They are not
+  wrappers around Stable-Baselines3, and SB3 PyTorch checkpoints cannot be loaded
+  directly.
 
-- agenti che condividono una policy devono avere lo stesso contratto;
-- il multi-policy indipendente non e' ancora un flusso generico;
-- l'opponent pool asincrono e' disponibile soltanto per DQN;
-- una policy Keras contiene la trasformazione da observation ad azioni, ma non esporta
-  la scena, i sensori o il preprocessing implementato in Godot: fuori da Metis bisogna
-  riprodurre lo stesso contratto di input e output;
-- i trainer sono implementati direttamente in Metis con TensorFlow/Keras. Il progetto
-  non usa Stable-Baselines3 e i suoi modelli PyTorch non sono caricabili direttamente.
+These are extension points rather than hidden assumptions. See
+[Adding an RL algorithm](docs/guides/adding-an-rl-algorithm.md) and
+[Extending the Godot side](docs/guides/extending-godot.md).
 
-Queste limitazioni non impediscono di estendere il framework. Le guide
-[Aggiungere un algoritmo RL](docs/guides/aggiungere_algoritmo_rl.md) e
-[Estendere Metis in Godot](docs/guides/estendere_framework_godot.md) descrivono i punti
-di estensione e i test attesi.
-
-## Struttura del repository
+## Repository layout
 
 ```text
 godot/
-  agents/       scene degli agenti
-  scenarios/    ambienti e regole dei task
-  scripts/      bridge e componenti Metis
-  addons/       plugin Metis Inspector
+  agents/       reusable agent scenes
+  scenarios/    environments and task rules
+  scripts/      bridge and Metis components
+  addons/       editor plugins and third-party Godot add-ons
 
 python/
-  train.py      training
-  run.py        inferenza e valutazione
-  recorder.py   dimostrazioni manuali
-  export.py     TFLite e ONNX
-  algorithms/   backend RL
-  core/         replay, modelli, checkpoint, async e opponent pool
-  envs/         Gymnasium e process manager Godot
-  tools/        diagnostica
-  tests/        test automatici
+  train.py      training entry point
+  run.py        inference and evaluation
+  recorder.py   manual demonstrations
+  export.py     TFLite and ONNX export
+  algorithms/   RL backends
+  core/         models, replay, checkpoints, async collection, opponent pool
+  envs/         Gymnasium wrapper and Godot process manager
+  tools/        diagnostics and benchmarks
+  tests/        Python test suite
 
 docs/
-  tutorials/    scenari completi costruiti passo passo
-  guides/       procedure riusabili ed estensioni
-  reference/    contratti e architettura
+  tutorials/    complete task walkthroughs
+  guides/       reusable procedures and extension points
+  reference/    runtime contracts and architecture
 ```
 
-Per eseguire i test Python:
+Run the Python tests with:
 
 ```bash
 cd python
 .venv/bin/python -m unittest discover -s tests -p 'test_*.py'
 ```
 
-La direzione del progetto resta semplice: Godot descrive il problema, Python impara a
-risolverlo, e il confine tra i due deve rimanere abbastanza pulito da poter cambiare
-scenario senza ricominciare ogni volta dal framework.
+The design rule behind the project is simple: Godot describes the problem, Python
+learns to solve it, and the boundary should remain clean enough that a new task does
+not require another training stack.

@@ -1,152 +1,172 @@
-# Metis in Godot
+# Godot reference
 
-Il lato Godot di Metis descrive agenti e scenari attraverso nodi componibili configurati
-dall'Inspector. Godot resta la fonte di verita' per fisica, observation, action, reward
-ed eventi terminali.
+The Godot side of Metis declares agents and tasks with composable nodes configured in
+the Inspector. Godot remains authoritative for physics, actions, observations,
+rewards, and episode state.
 
-## Albero consigliato
+## Recommended scene tree
 
 ```text
 Scenario
-├── ScenarioController
-│   ├── ScenarioRewardSystem
-│   ├── ProgressProvider
-│   └── ScenarioEventSystem
-├── Agents
-│   └── AgentBody
-│       └── Agent
-│           ├── ActionSpace
-│           ├── ObservationSystem
-│           └── RewardSystem
-└── BridgeServer
+|-- ScenarioController
+|   |-- ScenarioRewardSystem
+|   |-- ProgressProvider
+|   `-- ScenarioEventSystem
+|-- Agents
+|   `-- AgentBody
+|       `-- Agent
+|           |-- ActionSpace
+|           |-- ObservationSystem
+|           `-- RewardSystem
+`-- BridgeServer
 ```
 
-I nomi possono cambiare; i `NodePath` esportati devono puntare ai nodi corretti.
+Node names may differ. Exported `NodePath` properties must still point to the correct
+objects.
 
 ## `Agent`
 
-`Agent` e' il contenitore RL del corpo fisico. Mantiene l'ordine delle observation,
-delega le action ad `ActionSpace` e le reward a `RewardSystem`. Il padre resta
-responsabile della dinamica concreta: velocita', animazioni, collisioni, proiettili e
-controlli manuali.
+`Agent` is the RL-facing container attached to a physical body. It preserves
+observation order, delegates action decoding to `ActionSpace`, and asks
+`RewardSystem` for local reward terms.
 
-Le API imperative `add_action()` e `add_observation()` restano disponibili. Per scene
-riusabili e configurabili da Inspector sono preferibili i componenti figli.
+Its parent owns concrete behavior: movement, animation, collision callbacks,
+projectiles, and manual controls. Older imperative APIs such as `add_action()` and
+`add_observation()` still work, but child components are easier to inspect and reuse.
 
 ## `ActionSpace`
 
-Figli disponibili:
+Available components:
 
-- `ContinuousAction`: nome, dimensione, limiti policy e limiti opzionali di esplorazione;
-- `DiscreteActionSet`: componente discreta composta da figli `DiscreteAction`;
-- `DiscreteAction`: nome, target, metodo e argomenti da invocare.
+- `ContinuousAction`: component name, size, policy bounds, and optional exploration
+  bounds;
+- `DiscreteActionSet`: one categorical component containing `DiscreteAction` nodes;
+- `DiscreteAction`: display name, target node, method, and method arguments.
 
-L'applicazione delle continue resta nel corpo: `apply_action()` decodifica il vettore e
-lo assegna agli input fisici. Le discrete possono essere eseguite automaticamente dal
-set oppure gestite dal corpo quando serve una logica particolare.
+Discrete actions can invoke their target methods automatically. Continuous values are
+decoded by the body in `apply_action()` and assigned to its controls. A scene may
+combine both forms to create a hybrid action space.
 
 ## `ObservationSystem`
 
-Ogni `ObservationSource` registra una o piu' callable nell'Agent. Fonti esistenti:
+An `ObservationSource` registers one or more numeric values. Supplied sources cover:
 
-- cinematica e velocita' del corpo;
-- raycast normalizzati e clearance frontale;
-- target e appartenenza a team;
-- navigazione rispetto a un Path3D;
-- chiamata di un metodo personalizzato con `MethodObservationSource`;
-- lettura diretta di una property con `PropertyObservationSource`.
+- body transform, velocity, and kinematics;
+- normalized ray-cast distances and front clearance;
+- target visibility and team-relative state;
+- path-relative navigation;
+- method calls through `MethodObservationSource`;
+- direct property reads through `PropertyObservationSource`.
 
-`MethodObservationSource` e `PropertyObservationSource` espongono un `source_path`
-opzionale relativo al corpo agente. Se resta vuoto leggono direttamente il corpo.
-Il plugin `Metis Inspector`, abilitato nel progetto, aggiunge al campo testuale un
-menu `Select...` che elenca soltanto metodi o property compatibili. Il valore resta
-comunque modificabile manualmente e viene serializzato nella scena come `StringName` o
-`NodePath`: il runtime non dipende dal plugin editor.
+Method and property sources accept an optional `source_path` relative to the agent
+body. An empty path reads the body itself.
 
-`PropertyObservationSource` puo' leggere anche sottoproprieta' tramite un percorso come
-`velocity:x`. Per valori numerici offre una trasformazione opzionale tra intervalli con
-clamp, utile per normalizzare una property senza aggiungere un metodo al corpo.
+The **Metis Inspector** plugin adds `Select...` menus for compatible methods and
+properties. Selections are stored as ordinary `StringName` and `NodePath` values; the
+runtime has no dependency on the editor plugin.
 
-Le observation devono essere numeriche, finite, normalizzate quando possibile e con
-dimensione stabile. Lo scenario chiama reset/refresh delle source per evitare dati fisici
-stantii dopo un teletrasporto.
+`PropertyObservationSource` also accepts sub-properties such as `velocity:x` and can
+map numeric values from a source range to a normalized output range.
 
-## Reward locali e di scenario
+Observations should be finite, stable in size, and normalized where practical.
+Resetting or teleporting a body must also reset and refresh its sources so a new
+episode does not start with cached data from the previous physics frame.
 
-`RewardSystem` valuta figli derivati da `RewardComponent`. Il context include almeno:
+## Local and scenario rewards
 
-- `agent`: nodo `Agent`;
-- `body`: corpo controllato;
-- `observations`: dictionary corrente;
-- `events`: eventi locali accumulati;
-- dati aggiunti dal controller, come step, progress e stato terminale.
+`RewardSystem` evaluates children derived from `RewardComponent`. Its context normally
+contains:
 
-Ogni componente restituisce il valore gia' pesato e puo' implementare
-`reset_reward(context)`. I valori sono esposti separatamente nei log come reward terms.
+- `agent`: the `Agent` node;
+- `body`: the controlled body;
+- `observations`: the current observation dictionary;
+- `events`: accumulated local events;
+- controller data such as step, progress, and terminal state.
 
-`ScenarioRewardSystem` valuta `ScenarioRewardComponent` per ogni agente. Il context
-aggiunge `agent_id`, progress, eventi di scenario come chiavi dirette, terminalita' e truncation. I metodi
-opzionali `is_agent_stalled()` e `get_terminal_reason()` possono terminare il singolo
-canale senza terminare automaticamente gli altri agenti.
+Each component returns its weighted value and may implement
+`reset_reward(context)`. Named values are included in diagnostics.
 
-## Eventi
+`ScenarioRewardSystem` evaluates `ScenarioRewardComponent` once per agent. Its context
+adds `agent_id`, progress, scenario events as direct keys, and terminal/truncation
+state. Optional `is_agent_stalled()` and `get_terminal_reason()` methods may finish one
+agent without ending every other channel.
 
-`ScenarioEventSystem` aggrega figli `ScenarioEventSource`. Una source mantiene stato per
-agent id e restituisce un dictionary. Le source incluse coprono:
+Use local rewards for behavior intrinsic to a body. Use scenario rewards for task
+rules involving the shared world.
 
-- ingresso in un'Area;
-- soglia di una observation;
-- eventi impostati manualmente dallo scenario.
+## Events
 
-Un evento descrive un fatto; una reward decide quanto quel fatto vale. Separare i due
-consente di cambiare shaping senza riscrivere collisioni e trigger.
+`ScenarioEventSystem` aggregates `ScenarioEventSource` children. Event sources keep
+state per agent ID and return named values. Built-in sources cover:
+
+- entering an `Area`;
+- crossing an observation threshold;
+- events triggered directly by scenario code.
+
+An event records what happened. A reward component decides what that event is worth,
+and an event source may independently declare a terminal reason.
 
 ## Progress
 
-`ProgressProvider` astrae una metrica ordinabile. Non implica necessariamente un
-Path3D: puo' rappresentare distanza completata, blocchi distrutti, salute del boss o una
-fase del compito. Implementazioni incluse:
+`ProgressProvider` exposes an ordered task metric. Included implementations are:
 
 - `Path3DProgressProvider`;
-- `MethodProgressProvider`, che delega a un metodo della scena.
+- `MethodProgressProvider`, which calls a scene method.
 
-Il controller usa il progress per reward, diagnostica e reset curriculum. Evita di
-inserirlo nelle observation quando vuoi che la policy resti indipendente dalla mappa.
+Progress may mean track completion, bricks removed, target approach, object lift, or
+another task phase. Avoid adding it to policy observations when the policy is intended
+to remain independent of a particular map.
 
 ## `ScenarioController`
 
-Responsabilita' principali:
+The controller handles:
 
-- registrazione e replica degli agenti;
-- reset deterministico con seed globale e seed specifico per agente;
-- applicazione delle action e avanzamento dei frame fisici;
-- composizione dei canali di risposta;
-- terminalita' per agente e cache degli agenti conclusi;
-- curriculum di spawn tramite progress provider;
-- disattivazione di camera e UI in headless;
-- modalita' recording senza replica.
+- agent registration and replication;
+- deterministic reset with environment and per-agent seeds;
+- action application and physics-frame advancement;
+- response assembly;
+- per-agent terminal state and completed-agent caching;
+- curriculum spawning through a progress provider;
+- camera and UI shutdown in headless runs;
+- single-agent manual recording mode.
 
-Lo scenario puo' estenderlo, ma dovrebbe usare gli hook e i componenti prima di
-duplicare `step()` o il formato di risposta.
+Prefer controller hooks and child components to replacing `step()` or changing the
+wire response format.
+
+`physics_frames_per_step` sets the action repeat. `max_steps=0` disables the controller
+step limit, so the scene must then provide reliable terminal or stall behavior.
 
 ## `BridgeServer`
 
-Il bridge accetta un client TCP, abilita `TCP_NODELAY`, interpreta messaggi JSON per
-riga e inoltra `spec`, `configure`, `reset` e `step` al controller. In lockstep la scena
-avanza soltanto durante una richiesta; in realtime continua a processare mantenendo
-l'ultima action.
+The bridge accepts one TCP client, enables `TCP_NODELAY`, reads one JSON object per
+line, and forwards `spec`, `configure`, `reset`, and `step` requests to the controller.
 
-Il bridge non deve conoscere reward, action names o classi concrete degli agenti.
+In lockstep mode the world advances only while serving a step. In real-time mode it
+keeps processing with the latest action. The bridge does not know concrete agent
+classes, reward values, or action names.
 
-## Reset fisico corretto
+## Physical reset checklist
 
-Dopo un teletrasporto:
+After teleporting a body or dynamic object:
 
-1. azzera velocita' lineare e angolare;
-2. azzera gli input dell'action precedente;
-3. ripristina transform di corpo e oggetti dinamici;
-4. forza l'aggiornamento di raycast e sensori;
-5. resetta observation source, reward, eventi e progress;
-6. attendi il numero minimo di frame fisici necessario soltanto se la scena lo richiede.
+1. Clear linear and angular velocity.
+2. Clear current and previous control inputs.
+3. Restore transforms for every dynamic object owned by the episode.
+4. Force ray casts and sensors to refresh.
+5. Reset observation sources, rewards, events, and progress.
+6. Wait for extra physics frames only when the scene genuinely needs them.
 
-Un reset incompleto produce observation del vecchio episodio e contamina il replay.
+An incomplete reset can return stale observations and contaminate replay with a
+transition between two different episodes.
+
+## Robot-arm collision handling
+
+`URDFRobotArmAgentBody` performs separate environment and self-collision queries.
+Parent-child links are ignored automatically. Additional mechanical overlaps can be
+declared through `self_collision_ignored_link_pairs` or
+`self_collision_ignored_link_sets`.
+
+Support surfaces can belong to both `robot_obstacle` and
+`robot_support_surface`. Only links listed in `support_contact_link_names` may touch
+them. This lets a fixed base rest on the floor while keeping floor contact terminal
+for the arm and tool.

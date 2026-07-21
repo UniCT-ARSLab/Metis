@@ -49,6 +49,7 @@ func _initialize() -> void:
 		passed = passed and marker.global_position.z <= 0.096
 
 	scenario.call("_on_episode_reset_started", 123)
+	passed = passed and target.freeze
 	var matches_spawn := false
 	for marker in spawn_pool:
 		var planar_distance := Vector2(
@@ -60,6 +61,24 @@ func _initialize() -> void:
 	passed = passed and matches_spawn
 	passed = passed and target.linear_velocity.is_zero_approx()
 	passed = passed and target.angular_velocity.is_zero_approx()
+	scenario.call("_on_episode_reset_completed", 123)
+	passed = passed and not target.freeze
+
+	var controller: ScenarioController = scenario.get_node("ScenarioController")
+	await controller.reset_episode(456)
+	passed = passed and not target.freeze
+	passed = passed and not arm.is_terminal()
+	passed = passed and not arm.has_collided()
+	passed = passed and is_equal_approx(arm.grasp_capture_distance, 0.060)
+	passed = passed and is_equal_approx(arm.required_lift_height, 0.020)
+	passed = passed and arm.grasp_hold_physics_frames == 10
+
+	scenario.call("_on_scenario_configured", {"training_episode": 10000})
+	await controller.reset_episode(789)
+	passed = passed and not arm.is_terminal()
+	passed = passed and is_equal_approx(arm.grasp_capture_distance, 0.032)
+	passed = passed and is_equal_approx(arm.required_lift_height, 0.050)
+	passed = passed and arm.grasp_hold_physics_frames == 30
 
 	var hand_shapes := robot.get_link_node("hand_link").find_children(
 		"*", "CollisionShape3D", true, false)

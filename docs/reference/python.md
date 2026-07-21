@@ -1,86 +1,98 @@
-# Metis Python Runtime
+# Python reference
 
-Il runtime Python di Metis scopre il contratto dichiarato dallo scenario Godot e lo
-collega al backend RL selezionato, senza introdurre trainer specifici per scenario.
+The Python runtime discovers the contract declared by a Godot scene and connects it
+to the selected RL backend. Scenario-specific trainers are deliberately avoided.
 
-## Entry point pubblici
+## Public commands
 
 ### `python/train.py`
 
-Legge gli argomenti comuni, rileva eventualmente lo spazio di azione e carica in modo
-lazy un modulo in `python/algorithms`. Con `--algorithm auto` sceglie DQN per discrete,
-DDPG per continue e PPO per ibride. Gli algoritmi alternativi si selezionano per nome.
-`--policy-path` esegue un warm start della sola policy da `.keras`, modello `.h5` o
-`.weights.h5`; non sostituisce il resume dello stato completo.
+Parses shared arguments, probes the action space when necessary, and lazily loads a
+module from `python/algorithms`.
+
+`--algorithm auto` selects DQN for discrete actions, DDPG for continuous actions, and
+PPO for hybrid actions. Other algorithms are selected by name.
+
+`--policy-path` warm-starts only the policy from a Metis bundle, `.keras` model, full
+`.h5` model, or `.weights.h5` file. It does not restore optimizer, critic, replay, or
+episode state.
 
 ### `python/run.py`
 
-Carica per default `policy.keras` e `policy.json`, oppure un modello `.h5`, i vecchi pesi/checkpoint,
-e applica la policy senza training. Supporta esecuzione lockstep per valutazioni riproducibili e
-realtime per osservare il comportamento a velocita' naturale. Con
-`--continue-after-success` chiede agli scenari compatibili di mantenere attive inferenza e
-simulazione dopo un obiettivo riuscito; collisioni e altri errori restano terminali. Con
-`--no-reset`, dopo un terminale Metis apre un nuovo episodio logico dalla posa corrente:
-eventi e reward vengono ripuliti, mentre agenti e target non vengono riposizionati.
-`--no-initial-reset` applica lo stesso comportamento alla prima inizializzazione; le due
-opzioni insieme evitano ogni reset fisico durante la run. Per continuare senza un limite al
-numero di episodi occorre anche `--infinite`.
+Loads `policy.keras` and `policy.json` by default. It can also load an explicit policy
+file, legacy H5 weights, or a training checkpoint.
+
+Lockstep execution is used for reproducible evaluation. Real-time execution is useful
+for watching a policy at the scene's natural pace.
+
+- `--continue-after-success` asks compatible scenes to keep simulation and inference
+  active after a successful goal.
+- `--no-reset` starts a new logical episode at the current pose after terminal events.
+- `--no-initial-reset` preserves the scene's initial state before first inference.
+- `--infinite` removes the episode-count limit.
+- `--no-time-limit` removes the run-side step limit.
+
+Collision and failure behavior still belongs to the scenario. A scene may stop a body
+at a terminal state even when no physical reset is requested.
 
 ### `python/export.py`
 
-Converte il bundle Keras prodotto dai trainer in TensorFlow Lite e/o ONNX. TFLite usa
-TensorFlow; ONNX richiede le dipendenze opzionali in `requirements-export.txt`.
+Exports a Keras policy bundle to TensorFlow Lite, ONNX, or both. TFLite uses the main
+TensorFlow installation. ONNX requires the optional packages in
+`requirements-export.txt`.
 
 ### `python/recorder.py`
 
-Avvia uno scenario in controllo manuale e salva tuple `obs`, `actions`, `rewards`,
-`next_obs`, `terminated` e `truncated` in un dataset `.npz`.
+Starts one manually controlled Godot agent and writes an `.npz` dataset containing
+observations, applied actions, rewards, next observations, `terminated`, `truncated`,
+agent IDs, episodes, and steps.
 
-## Package interni
+## Internal packages
 
 ### `python/algorithms/`
 
-- `dqn.py`: Q-learning per azioni discrete;
-- `ppo.py`: actor-critic on-policy per discrete e ibride;
-- `sac.py`: actor-critic entropico per continue;
-- `ddpg.py`, `td3.py`: entrypoint deterministici;
-- `ddpg_bc.py`, `td3_bc.py`: behavior cloning insieme al learning online;
-- `ddpgfd.py`: replay dimostrativo prioritario;
-- `common.py`: implementazione condivisa dalla famiglia DDPG/TD3.
+- `dqn.py`: value learning for discrete actions;
+- `ppo.py`: on-policy actor-critic for discrete, continuous, and hybrid spaces;
+- `sac.py`: entropy-regularized continuous actor-critic;
+- `ddpg.py` and `td3.py`: deterministic actor-critic entry points;
+- `ddpg_bc.py` and `td3_bc.py`: online learning with behavior cloning;
+- `ddpgfd.py`: prioritized demonstration replay;
+- `common.py`: shared DDPG/TD3-family implementation.
 
-Ogni backend espone `main()` e possiede parser, ciclo sync/async, checkpoint e log.
+Each backend owns its parser additions, sync and async loop, checkpoint state, and
+logs, and exposes `main()` to the dispatcher.
 
 ### `python/core/`
 
-- `models.py`: factory Keras e funzioni di inferenza compilate;
-- `policy_artifact.py`: salvataggio atomico di `policy.keras` e relativo manifest;
-- `replay_buffer.py`: replay uniforme/prioritizzato, demo protette e snapshot;
-- `opponent_pool.py`: snapshot storiche e sampling degli avversari;
-- `training.py`: collector async, parallel stepper, TensorFlow runtime, best checkpoint,
-  stampa metriche e utility condivise.
+- `models.py`: Keras model factories and compiled inference functions;
+- `policy_artifact.py`: atomic `policy.keras` and manifest output;
+- `replay_buffer.py`: uniform/prioritized replay, protected demonstrations, snapshots;
+- `opponent_pool.py`: historical policy snapshots and opponent sampling;
+- `training.py`: async collection, parallel stepping, TensorFlow setup, best-policy
+  evaluation, metrics, and shared utilities.
 
-Il package core non deve conoscere scene come Cars, Tanks o Breakout.
+Core modules must not know about concrete scenes such as Cars, Tanks, or Breakout.
 
 ### `python/envs/`
 
-- `scenario.py`: wrapper Gymnasium del protocollo TCP;
-- `process_manager.py`: avvio, readiness, log e chiusura dei processi Godot.
+- `scenario.py`: Gymnasium wrapper around the TCP protocol;
+- `process_manager.py`: Godot startup, readiness checks, logs, and shutdown.
 
-Questa e' la frontiera I/O. Gli algoritmi non devono aprire socket o costruire comandi
-Godot direttamente.
+This is the I/O boundary. Algorithm modules do not open sockets or construct Godot
+commands directly.
 
 ### `python/tools/`
 
-Contiene rollout casuale e benchmark del bridge. Sono strumenti diagnostici, non backend
-di training.
+Contains random rollout and bridge benchmarks. These are diagnostic utilities, not
+training backends.
 
 ### `python/tests/`
 
-I test coprono buffer, target e truncation, action packing, async collector, opponent
-pool, checkpoint e dispatcher. Un nuovo backend deve aggiungere test della propria
-semantica, non soltanto un test di import.
+Tests cover replay semantics, targets and truncation, action packing, asynchronous
+collection, opponent pools, checkpoints, and dispatch. A new algorithm should add
+tests for its learning and transition semantics, not only an import test.
 
-## Dipendenze consentite
+## Dependency direction
 
 ```text
 CLI -> algorithms -> core
@@ -88,37 +100,36 @@ CLI -> algorithms -> core
  +---------+--------> envs
 ```
 
-`core` non importa algoritmi concreti. `envs` non importa TensorFlow. Godot non dipende
-da una classe Python specifica. Mantenere queste direzioni evita dipendenze circolari e
-permette ai collector di funzionare senza caricare il learner.
+`core` does not import concrete algorithms. `envs` does not import TensorFlow. Godot
+does not depend on a Python learner class. Keeping this direction prevents circular
+imports and allows collector workers to run without owning the learner.
 
-## Matrice algoritmi
+## Algorithm matrix
 
-| Algoritmo | Azioni | Off/on-policy | Replay | Demo |
-| --- | --- | --- | --- | --- |
-| DQN | discrete | off-policy | si | prefill |
-| PPO | discrete/hybrid | on-policy | no | no |
-| DDPG | continuous | off-policy | si | prefill |
-| DDPG+BC | continuous | off-policy | si | obbligatorie |
-| DDPGfD | continuous | off-policy | prioritizzato | obbligatorie |
-| TD3 | continuous | off-policy | si | prefill |
-| TD3+BC | continuous | off-policy | si | obbligatorie |
-| SAC | continuous | off-policy | si | prefill |
+| Algorithm | Actions | Policy type | Replay | Demonstrations |
+|---|---|---|---|---|
+| DQN | discrete | off-policy | uniform/prioritized | optional prefill |
+| PPO | discrete/continuous/hybrid | on-policy | no | no |
+| DDPG | continuous | off-policy | yes | optional prefill |
+| DDPG+BC | continuous | off-policy | yes | required |
+| DDPGfD | continuous | off-policy | prioritized | required |
+| TD3 | continuous | off-policy | yes | optional prefill |
+| TD3+BC | continuous | off-policy | yes | required |
+| SAC | continuous | off-policy | yes | optional prefill |
 
-La compatibilita' con async e multi-agent e' una responsabilita' del backend. Non va
-dedotta solo dal fatto che il modello accetti batch.
+Async and multi-agent support are backend responsibilities. They cannot be inferred
+only from a model accepting batched tensors.
 
-## Convenzioni
+## Implementation conventions
 
-- Gli argomenti comuni devono mantenere lo stesso nome tra backend.
-- `0` per `max_steps` significa nessun limite di step, se supportato dallo scenario.
-- Ogni checkpoint deve aggiornare il bundle Keras portabile della policy.
-- Un checkpoint deve poter essere caricato da `run.py` senza dipendere dal replay.
-- Un resume di training off-policy deve poter ripristinare anche il replay.
-- Le metriche multi-agent contano agenti e transizioni, non soltanto step di ambiente.
-- La valutazione automatica del best checkpoint usa per default un solo thread CPU, per
-  non sottrarre risorse ai collector e al learner. Il limite si regola con
-  `--best-evaluation-cpu-threads`; `--no-best-checkpoint` disattiva la valutazione.
-- I moduli interni non sono nuovi entrypoint pubblici: i comandi documentati usano le
-  quattro CLI nella radice di `python/`: `train.py`, `run.py`, `recorder.py` ed
-  `export.py`.
+- Shared arguments keep the same name across backends.
+- Zero `max_steps` means no external step limit where the scene supports it.
+- Every training checkpoint refreshes the portable Keras policy bundle.
+- `run.py` can load a checkpoint without loading replay.
+- A full off-policy resume restores replay when a matching snapshot is available.
+- Multi-agent metrics count agents and transitions, not only environment steps.
+- Best-checkpoint evaluation uses one CPU thread by default to avoid starving the
+  learner and collectors. Configure it with `--best-evaluation-cpu-threads`, or turn
+  it off with `--no-best-checkpoint`.
+- Public commands remain `train.py`, `run.py`, `recorder.py`, and `export.py`. Internal
+  modules are not additional user-facing entry points.

@@ -221,7 +221,7 @@ class GodotProcessManager:
 
             if not self._wait_for_log_ready(log_path, f"[BridgeServer] Listening on port {port}", timeout=20.0):
                 raise RuntimeError(
-                    f"Godot non risulta pronto sulla porta {port}. Log: {log_path}\n"
+                    f"Godot did not become ready on port {port}. Log: {log_path}\n"
                     f"{self._log_tail(log_path)}"
                 )
 

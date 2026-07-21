@@ -2,11 +2,15 @@ extends Node3D
 
 @export var target_spawns: Array[Marker3D] = []
 @export var target_spawns_root: Node3D
+
+@export_category("Curriculum")
 @export var easy_target_count := 4
+@export var easy_stage_end_episode := 3000
+@export var intermediate_stage_end_episode := 6000
+@export var advanced_stage_end_episode := 9000
 
 @onready var controller: ScenarioController = $ScenarioController
-# Entrambi i backend implementano lo stesso contratto, ma non ereditano dalla
-# stessa classe GDScript.
+# Robot body adapters share the same contract without requiring a common GDScript base.
 @onready var arm = $RobotArm
 @onready var target: RigidBody3D = $Target
 @onready var grasp_point: Marker3D = $Target/GraspPoint
@@ -18,6 +22,7 @@ extends Node3D
 
 var _training_episode := 0
 var _goal_terminal_reason := "target_reached"
+var _target_waiting_for_reset_completion := false
 
 
 func _ready() -> void:
@@ -30,6 +35,7 @@ func _ready() -> void:
 	arm.object_dropped.connect(_on_object_dropped)
 	controller.scenario_configured.connect(_on_scenario_configured)
 	controller.episode_reset_started.connect(_on_episode_reset_started)
+	controller.episode_reset_completed.connect(_on_episode_reset_completed)
 
 
 func _on_scenario_configured(config:Dictionary) -> void:
@@ -52,25 +58,49 @@ func _on_episode_reset_started(_seed:int) -> void:
 	var target_pool_size := spawn_pool.size()
 	var joint_jitter_degrees := 0.0
 
-	if _training_episode < 300:
+	if _training_episode < easy_stage_end_episode:
 		target_pool_size = maxi(1, mini(easy_target_count, spawn_pool.size()))
+		arm.grasp_capture_distance = 0.060
+		arm.required_lift_height = 0.020
+		arm.grasp_hold_physics_frames = 10
+		arm.max_grasp_target_speed = 0.25
+		arm.max_pregrasp_planar_displacement = 0.060
+	elif _training_episode < intermediate_stage_end_episode:
+		target_pool_size = maxi(
+			1, mini(easy_target_count * 2, spawn_pool.size()))
 		arm.grasp_capture_distance = 0.050
-		arm.required_lift_height = 0.025
-	elif _training_episode < 800:
-		arm.grasp_capture_distance = 0.042
-		arm.required_lift_height = 0.035
-	elif _training_episode < 1500:
+		arm.required_lift_height = 0.030
+		arm.grasp_hold_physics_frames = 15
+		arm.max_grasp_target_speed = 0.20
+		arm.max_pregrasp_planar_displacement = 0.055
+	elif _training_episode < advanced_stage_end_episode:
 		joint_jitter_degrees = 2.0
-		arm.grasp_capture_distance = 0.036
-		arm.required_lift_height = 0.045
+		arm.grasp_capture_distance = 0.040
+		arm.required_lift_height = 0.040
+		arm.grasp_hold_physics_frames = 20
+		arm.max_grasp_target_speed = 0.18
+		arm.max_pregrasp_planar_displacement = 0.045
 	else:
 		joint_jitter_degrees = 5.0
 		arm.grasp_capture_distance = 0.032
 		arm.required_lift_height = 0.050
+		arm.grasp_hold_physics_frames = 30
+		arm.max_grasp_target_speed = 0.15
+		arm.max_pregrasp_planar_displacement = 0.040
 
 	var target_index := rng.randi_range(0, maxi(target_pool_size - 1, 0))
 	_reset_target_body(spawn_pool[target_index].global_transform)
 	arm.set_reset_joint_offsets(_sample_joint_offsets(rng, joint_jitter_degrees))
+
+
+func _on_episode_reset_completed(_seed:int) -> void:
+	if not _target_waiting_for_reset_completion:
+		return
+	target.linear_velocity = Vector3.ZERO
+	target.angular_velocity = Vector3.ZERO
+	target.freeze = false
+	target.sleeping = false
+	_target_waiting_for_reset_completion = false
 
 
 func _target_spawn_pool() -> Array[Marker3D]:
@@ -88,6 +118,7 @@ func _target_spawn_pool() -> Array[Marker3D]:
 
 func _reset_target_body(spawn_transform: Transform3D) -> void:
 	arm.prepare_grasp_target_reset()
+	target.freeze_mode = RigidBody3D.FREEZE_MODE_STATIC
 	target.freeze = true
 	target.linear_velocity = Vector3.ZERO
 	target.angular_velocity = Vector3.ZERO
@@ -95,8 +126,7 @@ func _reset_target_body(spawn_transform: Transform3D) -> void:
 	if target.has_method("reset_physics_interpolation"):
 		target.reset_physics_interpolation()
 	arm.set_grasp_target_spawn_transform(spawn_transform)
-	target.freeze = false
-	target.sleeping = false
+	_target_waiting_for_reset_completion = true
 
 
 func _sample_joint_offsets(rng:RandomNumberGenerator, max_degrees:float) -> Array[float]:

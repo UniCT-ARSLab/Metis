@@ -86,18 +86,18 @@ event_name = "collision"
 terminal_reason = "collision"
 metadata/_custom_type_script = "uid://botsx3bwjduj2"
 
-[node name="SelfCollision" type="Node" parent="ScenarioController/ScenarioEventSystem"]
+[node name="SelfCollision" type="Node" parent="ScenarioController/ScenarioEventSystem" unique_id=475818468]
 script = ExtResource("6_pdjfy")
 event_name = "self_collision"
 terminal_reason = "self_collision"
 metadata/_custom_type_script = "uid://botsx3bwjduj2"
 
-[node name="ObjectGrasped" type="Node" parent="ScenarioController/ScenarioEventSystem"]
+[node name="ObjectGrasped" type="Node" parent="ScenarioController/ScenarioEventSystem" unique_id=410099803]
 script = ExtResource("6_pdjfy")
 event_name = "object_grasped"
 metadata/_custom_type_script = "uid://botsx3bwjduj2"
 
-[node name="ObjectDropped" type="Node" parent="ScenarioController/ScenarioEventSystem"]
+[node name="ObjectDropped" type="Node" parent="ScenarioController/ScenarioEventSystem" unique_id=1857752161]
 script = ExtResource("6_pdjfy")
 event_name = "object_dropped"
 terminal_reason = "object_dropped"
@@ -126,7 +126,7 @@ event_name = "target_reached"
 reward = 40.0
 metadata/_custom_type_script = "uid://b0mpnu83er6il"
 
-[node name="GraspReward" type="Node" parent="ScenarioController/ScenarioRewardSystem"]
+[node name="GraspReward" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=1872474420]
 script = ExtResource("10_ts88v")
 event_name = "object_grasped"
 reward = 8.0
@@ -138,13 +138,13 @@ event_name = "collision"
 reward = -20.0
 metadata/_custom_type_script = "uid://b0mpnu83er6il"
 
-[node name="SelfCollisionPenalty" type="Node" parent="ScenarioController/ScenarioRewardSystem"]
+[node name="SelfCollisionPenalty" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=1540264143]
 script = ExtResource("10_ts88v")
 event_name = "self_collision"
 reward = -30.0
 metadata/_custom_type_script = "uid://b0mpnu83er6il"
 
-[node name="DropPenalty" type="Node" parent="ScenarioController/ScenarioRewardSystem"]
+[node name="DropPenalty" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=338364182]
 script = ExtResource("10_ts88v")
 event_name = "object_dropped"
 reward = -20.0
@@ -197,7 +197,7 @@ surface_material_override/0 = SubResource("StandardMaterial3D_w0qjo")
 transform = Transform3D(0.5, 0, 0, 0, 0.5, 0, 0, 0, 0.5, 0, 0, 0)
 shape = SubResource("ConvexPolygonShape3D_1cwtp")
 
-[node name="GraspPoint" type="Marker3D" parent="Target"]
+[node name="GraspPoint" type="Marker3D" parent="Target" unique_id=1910045738]
 
 [node name="Workcell" type="Node3D" parent="." unique_id=637885706]
 

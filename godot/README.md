@@ -1,32 +1,49 @@
-# Godot URDF Addon
-URDF parser for Godot 4.6 using the native XML-parser.
+# Godot URDF add-on
 
-## Features / Usage
-Simply Drag-and-Drop URDF-files in your Godot scene, visuals and collisions will be generated automatically. Alternatively you can attach the urdf_loader.gd-script to a Node3D and the robots nodes will be created at its children, so you can easily modify/extend your robot.
+Metis includes a copy of the Godot URDF add-on for Godot 4.6. It parses URDF files with
+Godot's native `XMLParser` and generates visual meshes, collision bodies, joints, and a
+`GodotRobot` runtime controller.
 
-This repository provides a controller for wheeled robots, you only need to configure the movement type (e.g. Differential drive) and the generated 6DOF-Joints of the wheels and can control the robot using the W A S D keys.
+## Importing a robot
 
-## Demo
+Drag a `.urdf` file into the project and let the editor import it, then instantiate the
+generated resource in a scene. For runtime loading, attach `urdf_loader.gd` to a
+`Node3D`; the generated robot nodes become its children and can be extended by your own
+controller or Metis agent adapter.
 
-You can see the addon in action in [this demo repository](https://github.com/brean/godot_urdf_demo) with turtlebot and Boston Dynamics Spot robot.
+The add-on also contains a basic wheeled-robot controller. Configure the drive type and
+wheel joints, then use the corresponding input actions to test the imported model.
 
-The plugin has also been tested with a modified version of the Unitree G1 Humanoid and additional Robots by the [DFKI Robotics Innovation Center](https://dfki.de/robotics). Additional Demos will be provided soon.
+## Metis extensions
 
-## Technical details
-The collisions are represented as CollisionShape3D which are children of generated RigidBody3D, next to Generic6DOFJoint3D. This flattens the XML structure, so we also provide a custom dock that shows the original structure as tree.
+This copy adds URDF `mimic` support. A follower joint reads its source, multiplier, and
+offset from:
 
-## Screenshots / Examples
-### Driving around
-<img alt="Screenshot of Godot with the selected wheeled controller" src="docs/screenshot_turtlebot_control.png" />
-Fig. 1: The main Scene with the controllable turtlebot in the front. Note that the original URDF for the Turtlebot 3 defines the caster wheel in the back as box, a sphere would be more realistic.
+```xml
+<mimic joint="source_joint" multiplier="1.0" offset="0.0"/>
+```
 
-### Importing a quadruped
-<img alt="Screenshot of the Boston Dynamics Spot Robot loaded as urdf-scene in Godot" src="docs/screenshot_spot.png" />
-Fig 2: The imported Spot Robot from Boston Dynamics (with custom configured collision meshes). Note that it is missing a controller so the robot will just collapse in on itself when you put it on any surface.
+Mimic joints are not independent actuators. `GodotRobot` synchronizes their target,
+position, and velocity from the source joint in both kinematic and physics-motor modes.
+The parser also reports missing sources and dependency cycles.
 
-### Importing a humanoid
-<img alt="The imported Unitree G1 Robot." src="docs/screenshot_g1.png" />
-Fig 3: The imported Unitree G1 Robot.
+Run the regression test with:
 
-## Recommendation
-Use this URDF-parser in combination with godot-stl-io by @onze, [MIT license](https://github.com/onze/godot-stl-io/blob/development/addons/stl-io/license.txt): https://github.com/onze/godot-stl-io/ to load URDFs that reference STL-files.
+```bash
+/path/to/Godot --headless --path godot \
+  --script res://tests/test_urdf_mimic.gd
+```
+
+## Implementation notes
+
+Generated collision shapes are children of `RigidBody3D` links connected by
+`Generic6DOFJoint3D` nodes. This representation is flatter than the source XML. The
+custom editor dock presents the original robot hierarchy when you need to inspect it.
+
+URDF files that reference STL meshes can use the bundled `godot-stl-io` add-on.
+
+The original add-on and demo projects are available from:
+
+- [Godot URDF](https://github.com/brean/godot_urdf)
+- [Godot URDF demos](https://github.com/brean/godot_urdf_demo)
+- [godot-stl-io](https://github.com/onze/godot-stl-io)

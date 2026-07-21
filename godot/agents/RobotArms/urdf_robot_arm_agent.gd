@@ -106,7 +106,7 @@ func _ready() -> void:
 		set_physics_process(false)
 		return
 
-	_robot.control_mode = (
+	_robot.set_control_mode(
 		GodotRobot.ControlMode.KINEMATIC
 		if use_kinematic_control
 		else GodotRobot.ControlMode.PHYSICS_MOTORS)

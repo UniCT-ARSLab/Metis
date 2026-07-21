@@ -29,6 +29,11 @@ func _initialize() -> void:
 	passed = passed and body.get_joint_count() == 7
 	passed = passed and robot.get_actuated_joint_names().size() == 7
 	passed = passed and not body.has_collided()
+	for link_node in robot.links.values():
+		if link_node is RigidBody3D:
+			passed = passed and link_node.freeze
+			passed = passed and (
+				link_node.freeze_mode == RigidBody3D.FREEZE_MODE_KINEMATIC)
 
 	body.apply_action([0.0, 1.0, 0.0, 0.0, 0.0, 0.0])
 	for _index in range(4):

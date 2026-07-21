@@ -139,7 +139,7 @@ func decode_continuous_action(action:Variant) -> Array:
 		result.resize(expected_size)
 	return result
 
-# ANGET'S OBSERVABLE_action_space
+# AGENT OBSERVATION SPACE
 func add_observation(observable:String, value:Variant = null) -> int:
 	if observations.has(observable):
 		return ERR_ALREADY_EXISTS

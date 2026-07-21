@@ -95,7 +95,7 @@ func get_brick_progress() -> float:
 	
 func _on_ball_body_entered(body:Node) -> void:
 	if body == paddle:
-		# Il punto di impatto permette all'agente di controllare il rimbalzo.
+		# The contact offset lets the agent influence the outgoing bounce.
 		var horizontal_offset := clampf(
 			(ball.global_position.x - paddle.global_position.x) / maxf(paddle_half_width, 0.001),
 			-1.0,
@@ -104,7 +104,7 @@ func _on_ball_body_entered(body:Node) -> void:
 		call_deferred("_apply_paddle_bounce", horizontal_offset)
 		return
 
-	# Aspetta la risposta fisica di Godot, poi ripristina la velocita' arcade.
+	# Let Godot resolve the contact, then restore the intended arcade speed.
 	call_deferred("_stabilize_ball_velocity")
 	var brick := body as Node2D
 	if brick == null or not brick.is_in_group("brick") or not brick.visible:

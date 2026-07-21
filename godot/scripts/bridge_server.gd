@@ -9,9 +9,9 @@ class_name BridgeServer
 @export var lockstep_enabled := true
 @export_range(0, 10000, 100) var lockstep_idle_sleep_usec := 500
 @export_range(0, 10000, 100) var lockstep_headless_idle_sleep_usec := 2000
-# Poll vuoti tollerati a delay zero prima di ripiegare sull'idle sleep. Copre
-# l'attesa fra la nostra risposta e il comando successivo del client, che di
-# norma e' molto sotto il millisecondo.
+# Empty zero-delay polls allowed before falling back to the idle sleep. This covers the
+# gap between our reply and the client's next command, which is normally well below one
+# millisecond.
 @export_range(0, 1000, 1) var lockstep_spin_polls := 64
 
 var server := TCPServer.new()
@@ -26,11 +26,11 @@ var _realtime_simulation_fps := 60
 var _realtime_next_frame_usec := 0
 var _empty_poll_streak := 0
 
-# Flag per evitare di elaborare nuovi messaggi mentre si è in attesa di un reset o step asincrono
+# Prevent new messages from being processed while an asynchronous reset or step is pending.
 var _is_processing_async_command := false
 
 func _ready() -> void:
-	process_mode = Node.PROCESS_MODE_ALWAYS # Cruciale: il server NON deve subire la pausa
+	process_mode = Node.PROCESS_MODE_ALWAYS # The server must keep running while the tree is paused.
 	controller = get_node(controller_path)
 	if auto_silence_in_headless and _is_headless():
 		verbose = false
@@ -58,8 +58,7 @@ func _is_headless() -> bool:
 	return DisplayServer.get_name().to_lower() == "headless" or OS.has_feature("headless")
 
 func _process(_delta: float) -> void:
-	# Se stiamo già aspettando che un await (es. step o reset) finisca, 
-	# non dobbiamo toccare il buffer TCP o fare polling in questo frame.
+	# Leave the TCP buffer alone while an awaited step or reset is still running.
 	if _is_processing_async_command:
 		return
 
@@ -77,7 +76,7 @@ func _process(_delta: float) -> void:
 			OS.delay_usec(lockstep_idle_sleep_usec)
 		return
 
-	# Poll per primo: un comando già in coda non deve pagare l'idle sleep.
+	# Poll first so an already queued command does not pay the idle-sleep latency.
 	client.poll()
 	var status := client.get_status()
 	if status == StreamPeerTCP.STATUS_NONE or status == StreamPeerTCP.STATUS_ERROR:
@@ -87,8 +86,8 @@ func _process(_delta: float) -> void:
 	var available := client.get_available_bytes()
 	if available <= 0:
 		if _lockstep_active and lockstep_idle_sleep_usec > 0:
-			# Spin breve mentre il client sta rispondendo, poi backoff: un'istanza
-			# davvero ferma non deve bruciare un core mentre il learner addestra.
+			# Spin briefly while the client responds, then back off. An idle instance
+			# should not consume a full CPU core while the learner trains.
 			_empty_poll_streak += 1
 			if _empty_poll_streak > lockstep_spin_polls:
 				OS.delay_usec(lockstep_idle_sleep_usec)
@@ -98,7 +97,7 @@ func _process(_delta: float) -> void:
 	_rx_buffer += client.get_utf8_string(available)
 	_process_buffer()
 
-# Gestione separata del buffer per permettere l'uso di funzioni coroutine (await)
+# Buffer handling is separate so command handlers may await coroutines.
 func _process_buffer() -> void:
 	while _rx_buffer.contains("\n") and not _is_processing_async_command:
 		var line_end := _rx_buffer.find("\n")
@@ -151,7 +150,7 @@ func _handle_line(line: String) -> void:
 			})
 		"reset":
 			_begin_simulation_request()
-			# Aspettiamo in modo sicuro che l'albero si sblocchi e il controller finisca
+			# Wait for the tree to resume and for the controller to finish safely.
 			var reset_reply: Dictionary = await _call_reset(request)
 			_end_simulation_request()
 			var reset_agents: Variant = reset_reply.get("agents", [])
@@ -169,7 +168,7 @@ func _handle_line(line: String) -> void:
 			_send(_call_call_config(config as Dictionary))
 		"step":
 			_begin_simulation_request()
-			# Aspettiamo in modo sicuro la fine della simulazione del frame
+			# Wait safely for the requested simulation frames to complete.
 			var step_reply: Dictionary = await _call_step(request)
 			_end_simulation_request()
 			var info: Dictionary = step_reply.get("info", {})
@@ -192,7 +191,7 @@ func _handle_line(line: String) -> void:
 				"error": "Unknown command: %s" % cmd
 			})
 
-# Nota: per sicurezza, usiamo "await" anche qui se il controller risponde asincronamente
+# Await here as well because a controller may respond asynchronously.
 func _call_reset(request:Dictionary) -> Dictionary:
 	if controller.has_method("reset_episode_with_request"):
 		return await controller.reset_episode_with_request(request)

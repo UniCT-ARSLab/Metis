@@ -1,87 +1,74 @@
-# Documentazione di Metis
+# Metis documentation
 
-Questa documentazione e' pensata per essere letta a pezzi. Non serve conoscere tutto
-il framework prima di creare il primo agente: scegli il percorso piu' vicino a quello
-che vuoi costruire e torna alla reference quando incontri un nodo o un contratto che
-vuoi capire meglio.
+You do not need to learn the whole framework before building a first agent. Pick the
+guide closest to your task, then return to the reference when you need to understand a
+node or runtime contract in more detail.
 
-## Da dove cominciare
+## Start here
 
-Se e' la prima volta che apri il progetto:
+1. Read the [architecture overview](reference/architecture.md) to understand the
+   boundary between Godot, the bridge, and Python.
+2. Follow [Build a new agent and scenario](tutorials/new-agent-and-scenario.md).
+3. Run `python/tools/random_rollout.py` before starting a long training job.
+4. Use [Godot reference](reference/godot.md) and
+   [Python reference](reference/python.md) while debugging.
 
-1. leggi [come sono divise le responsabilita'](reference/architecture.md) tra Godot,
-   bridge e Python;
-2. segui [Nuovo scenario e nuovo agente](tutorials/tutorial_nuovo_scenario_agente_rl.md)
-   per vedere il contratto minimo funzionante;
-3. scegli uno degli esempi completi qui sotto;
-4. valida sempre la scena con `random_rollout.py` prima di avviare un training lungo.
+## Scenario tutorials
 
-## Voglio costruire uno scenario
-
-| Obiettivo | Tutorial consigliato |
+| Goal | Tutorial |
 |---|---|
-| Un primo agente con azioni discrete | [Breakout da zero](tutorials/tutorial_breakout_da_zero.md) |
-| Due agenti identici che competono | [Pong multi-agent](tutorials/tutorial_pong_multi_agent.md) |
-| Movimento continuo e azione discreta insieme | [Tanks 2v2 ibrido](tutorials/tutorial_tanks_hybrid_multi_agent.md) |
-| Un veicolo che segue un percorso noto | [Guida autonoma con Path3D](tutorials/tutorial_guida_autonoma_path_vs_sensori.md) |
-| Un veicolo che conosce soltanto i propri sensori | [Guida autonoma sensor-only](tutorials/tutorial_guida_autonoma_path_vs_sensori.md) |
-| Squadre, palla fisica e controllo arcade 3D | [Soccer 3D](tutorials/tutorial_soccer_continuous_multi_agent.md) |
-| Un braccio robotico che raggiunge target evitando ostacoli | [Reaching robotico e sim-to-real](tutorials/tutorial_braccio_robotico_reaching_sim_to_real.md) |
+| Learn the basic discrete workflow | [Breakout from scratch](tutorials/breakout-from-scratch.md) |
+| Train two identical competitors | [Pong multi-agent](tutorials/pong-multi-agent.md) |
+| Combine continuous motion and a discrete command | [Tanks 2v2](tutorials/tanks-hybrid-multi-agent.md) |
+| Compare path-aware and sensor-only driving | [Autonomous driving](tutorials/autonomous-driving-path-vs-sensors.md) |
+| Build a continuous 3D team task | [3D soccer](tutorials/soccer-continuous-multi-agent.md) |
+| Train a URDF robot arm around obstacles | [Robot-arm reaching and grasping](tutorials/robot-arm-reaching-sim-to-real.md) |
 
-I tutorial non sono soltanto esempi di training. Mostrano come organizzare scene,
-reset, sensori, reward, eventi, curriculum, multi-agent e comandi di esecuzione del
-modello finale.
+Each tutorial includes the Godot scene contract, observations, actions, rewards,
+terminal conditions, validation steps, training commands, and an inference command.
 
-## Voglio usare una funzione del framework
+## Practical guides
 
-- [Dimostrazioni manuali](guides/manual_demonstrations.md) spiega recorder, dataset,
-  replay prefill, behavior cloning, DDPGfD e TD3+BC.
-- [Esportare una policy](guides/esportare_policy.md) copre bundle Keras, vecchi file
-  `.h5`, TFLite, ONNX e contratto di inferenza.
-- [Aggiungere un algoritmo RL](guides/aggiungere_algoritmo_rl.md) segue il percorso da
-  parser e modello fino a collector, checkpoint, runner e test.
-- [Estendere Metis in Godot](guides/estendere_framework_godot.md) mostra come creare
-  nuove action, observation source, reward, eventi e progress provider.
+- [Manual demonstrations](guides/manual-demonstrations.md) covers recording, appending,
+  replay prefill, and behavior cloning.
+- [Exporting policies](guides/exporting-policies.md) covers Keras bundles, legacy H5
+  files, TensorFlow Lite, ONNX, and deployment metadata.
+- [Adding an RL algorithm](guides/adding-an-rl-algorithm.md) explains backend
+  registration, collectors, checkpoints, and required tests.
+- [Extending the Godot side](guides/extending-godot.md) shows how to add observation,
+  reward, event, progress, and action components.
 
-## Voglio capire come funziona
+## Reference
 
-- [Architettura](reference/architecture.md): flusso di un episodio, contratto TCP,
-  single/multi-agent, async, checkpoint e replay.
-- [Lato Godot](reference/godot.md): `Agent`, `ActionSpace`, `ObservationSystem`, reward,
-  eventi, progress, reset e `ScenarioController`.
-- [Lato Python](reference/python.md): entrypoint pubblici, algoritmi, core, environment,
-  strumenti e dipendenze interne.
+- [Architecture](reference/architecture.md): ownership, protocol, transitions,
+  multi-agent semantics, and async collection.
+- [Godot](reference/godot.md): scene tree, component contracts, and physical reset.
+- [Python](reference/python.md): public commands, internal packages, and algorithm
+  support.
 
-## Cosa supporta Metis
+## Supported workflows
 
-In sintesi, il framework gestisce:
+Metis currently supports:
 
-- action space discreti, continui e ibridi;
-- DQN, PPO, DDPG, SAC, TD3 e varianti basate su dimostrazioni;
-- uno o piu' environment, in raccolta sincrona o asincrona;
-- single-agent, multi-agent con policy condivisa e self-play a squadre;
-- observation e reward componibili dall'Inspector;
-- eventi, progress provider, curriculum e reset randomizzati;
-- registrazione manuale, checkpoint completi e valutazione della best policy;
-- esecuzione realtime o lockstep ed export Keras, TFLite e ONNX;
-- Linux con CPU/CUDA e macOS Apple Silicon con Metal.
+- discrete, continuous, multi-discrete, and hybrid action spaces;
+- DQN, PPO, DDPG, DDPG+BC, DDPGfD, TD3, TD3+BC, and SAC;
+- one or more environments with synchronous or asynchronous collection;
+- single-agent tasks and multi-agent parameter sharing;
+- simultaneous self-play and historical opponent pools;
+- Inspector-configured observations and rewards;
+- scenario events, progress providers, curriculum, and seeded resets;
+- manual demonstrations, full checkpoints, replay snapshots, and best-policy tracking;
+- real-time or lockstep inference;
+- Keras, TensorFlow Lite, and optional ONNX policy artifacts;
+- Linux CPU/CUDA and Apple Silicon with TensorFlow Metal.
 
-Durante il training le finestre Godot possono usare il renderer del progetto, OpenGL
-leggero, rendering software su CPU oppure Vulkan Forward+. La scelta avviene con
-`--render-mode`; il default `light-gpu` lascia piu' risorse al learner. L'opzione conta
-solo per le istanze visibili e puo' essere combinata con `--render-env-count` per
-mostrare una sola preview anche quando gli environment sono molti. Su Linux, se
-OpenGL ricade su `llvmpipe`, questa modalita' prova automaticamente la GPU discreta
-indicata da `switcherooctl`. La sezione
-[Uno o molti environment](../README.md#uno-o-molti-environment) contiene la tabella
-completa e un esempio.
+Visible training environments can use `project`, `light-gpu`, `cpu`, or `gpu` render
+modes. `--render-env-count 1` is useful when several environments are collecting data
+but only one preview is needed. See [Collection and rendering](../README.md#collection-and-rendering).
 
-Per la matrice completa, gli esempi di comando e i limiti attuali consulta il
-[README principale](../README.md).
+## Documentation conventions
 
-## Convenzioni della documentazione
-
-I comandi rivolti a chi usa Metis passano da quattro file:
+User-facing commands go through four files:
 
 ```text
 python/train.py
@@ -90,11 +77,10 @@ python/recorder.py
 python/export.py
 ```
 
-I moduli in `python/algorithms`, `python/core` e `python/envs` sono dettagli interni o
-punti di estensione. Nei tutorial si configurano prima i nodi disponibili; si aggiunge
-codice personalizzato soltanto quando la regola appartiene davvero allo scenario.
+Modules under `python/algorithms`, `python/core`, and `python/envs` are implementation
+details or extension points. Tutorials configure existing Godot components first and
+add task-specific code only where the scene genuinely owns the behavior.
 
-Quando comportamento e documentazione non coincidono, la scena e i test sono la fonte
-da verificare per prima. Una modifica a observation, action space, reward o fisica deve
-essere riportata anche nel tutorial interessato: sono parti dello stesso contratto di
-training, non dettagli cosmetici.
+When documentation and runtime behavior disagree, inspect the scene and its tests.
+Observation order, action components, rewards, terminal rules, and physics settings
+are one training contract; update the relevant guide whenever that contract changes.

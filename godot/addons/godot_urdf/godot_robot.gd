@@ -28,8 +28,7 @@ func _ready() -> void:
 	_rebuild_runtime_link_index()
 	_initialize_joint_state()
 	_validate_mimic_joints()
-	if control_mode == ControlMode.KINEMATIC:
-		_apply_kinematic_pose()
+	set_control_mode(control_mode)
 
 
 func _physics_process(delta: float) -> void:
@@ -79,6 +78,22 @@ func get_link_node(link_name: String) -> Node3D:
 	if not links.has(link_name):
 		_rebuild_runtime_link_index()
 	return links.get(link_name)
+
+
+func set_control_mode(mode: ControlMode) -> void:
+	control_mode = mode
+	for link_node in links.values():
+		if not link_node is RigidBody3D:
+			continue
+		if control_mode == ControlMode.KINEMATIC:
+			link_node.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
+			link_node.freeze = true
+			link_node.linear_velocity = Vector3.ZERO
+			link_node.angular_velocity = Vector3.ZERO
+		else:
+			link_node.freeze = false
+	if control_mode == ControlMode.KINEMATIC:
+		_apply_kinematic_pose()
 
 
 func set_joint_target_velocity(joint_name: String, target_velocity: float) -> bool:
@@ -280,6 +295,7 @@ func _apply_kinematic_pose() -> void:
 		if not link_node:
 			continue
 		if link_node is RigidBody3D:
+			link_node.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
 			link_node.freeze = true
 			link_node.linear_velocity = Vector3.ZERO
 			link_node.angular_velocity = Vector3.ZERO

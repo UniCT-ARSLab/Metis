@@ -1,26 +1,25 @@
-# Architettura di Metis
+# Metis architecture
 
-Metis, **Modular Environment for Training Intelligent Systems**, separa la simulazione
-dal processo di apprendimento mantenendo un contratto comune tra Godot e Python.
+Metis separates simulation from learning through a small, explicit contract between
+Godot and Python.
 
-Il progetto e' diviso in tre responsabilita':
+- Godot owns the world, physics, agents, observations, rewards, and terminal events.
+- Python owns the Gymnasium interface, data collection, replay or rollout storage,
+  TensorFlow/Keras learners, checkpoints, and evaluation.
+- A TCP bridge exchanges newline-delimited JSON messages and controls when the
+  simulation advances.
 
-- Godot possiede mondo, fisica, agenti, observation, reward ed eventi terminali;
-- Python possiede ambiente Gymnasium, raccolta delle transizioni, replay o rollout,
-  learner TensorFlow/Keras, checkpoint e valutazione;
-- il bridge TCP scambia messaggi JSON e mantiene il passo della simulazione esplicito.
+This boundary lets a scene change without creating a new trainer and lets an
+algorithm change without embedding TensorFlow in a Godot project.
 
-Questa separazione permette di cambiare scenario senza scrivere un nuovo trainer e di
-aggiungere algoritmi senza incorporare TensorFlow nel progetto Godot.
-
-## Flusso runtime
+## Runtime flow
 
 ```text
 python/train.py
     |
-    +-- selezione algoritmo
-    +-- GodotProcessManager avvia N processi
-    +-- ScenarioGymEnv apre una connessione per processo
+    +-- selects an algorithm
+    +-- GodotProcessManager starts N processes
+    +-- ScenarioGymEnv connects to each process
             |
             +-- BridgeServer
                     |
@@ -31,115 +30,124 @@ python/train.py
                             +-- ProgressProvider
 ```
 
-Per ogni episodio Python invia `reset`. Godot randomizza lo scenario, azzera componenti
-e restituisce le observation iniziali. A ogni `step`, Python invia una o piu' azioni,
-Godot le applica, avanza `physics_frames_per_step` frame fisici e restituisce:
+Python sends `reset` at the start of an episode. Godot resets and randomizes the
+scene, then returns the first observation. On every `step`, Python sends one action per
+active agent. Godot applies those actions, advances `physics_frames_per_step` physics
+ticks, and returns:
 
-- observation successiva;
-- reward totale e termini diagnostici;
-- `terminated`, quando il compito termina realmente;
-- `truncated`, quando termina soltanto per un limite esterno;
-- informazioni per agente, eventi, progress e causa terminale.
+- the next observation;
+- total reward and named reward terms;
+- `terminated` for a natural task ending;
+- `truncated` for an external limit;
+- per-agent progress, events, and terminal reasons.
 
-Il learner deve usare `terminated` per interrompere il bootstrap. Una truncation non
-equivale alla fine naturale del mondo e conserva il valore dello stato successivo.
+Learners must stop bootstrapping on `terminated`. A truncation is not a natural
+terminal state and still has a meaningful next-state value.
 
-## Contratto dello scenario
+## Scene contract
 
-Il `BridgeServer` deve avere `controller_path` impostato sullo `ScenarioController`.
-Il controller espone al bridge almeno:
+`BridgeServer.controller_path` must point to a `ScenarioController`. The controller
+implements the bridge-facing operations:
 
-- `get_spec()` o le informazioni equivalenti sugli agenti;
+- `get_spec()` or equivalent agent metadata;
 - `configure(config)`;
 - `reset_episode_with_request(request)`;
 - `step(actions)`.
 
-Il controller generico implementa gia' questo contratto. Lo scenario dovrebbe
-specializzare composizione, reset ed eventi, non duplicare il protocollo TCP.
+The supplied controller already implements this protocol. A scene should customize
+composition, reset hooks, progress, and events instead of duplicating socket handling.
 
-Ogni corpo controllato deve essere registrato in `controlled_agents` e contenere
-normalmente un figlio `Agent`. Il figlio espone observation, action space e reward;
-il corpo conserva soltanto il comportamento concreto richiesto dal controller:
+Every controlled body is registered in `controlled_agents` and normally owns an
+`Agent` child. The body implements concrete behavior:
 
 - `apply_action(action)`;
 - `reset_all(original_transform, reset_rewards)`;
-- facoltativamente `is_terminal()`, `set_training_active()` e `get_team_id()`.
+- optionally `is_terminal()`, `set_training_active()`, and `get_team_id()`.
 
-Le API imperative sul corpo restano possibili per compatibilita', ma una nuova scena
-non deve duplicare `get_observations()` o `get_action_space()` quando usa i componenti
-del nodo `Agent`.
+The imperative `add_action()` and `add_observation()` APIs remain available for older
+scenes. New scenes should prefer components under the `Agent` node so the contract is
+visible in the Inspector.
 
-## Spazi di azione
+## Action spaces
 
-`ActionSpace` aggrega i figli e classifica automaticamente lo spazio:
+`ActionSpace` inspects its children and classifies the result:
 
-- un solo `DiscreteActionSet`: `discrete`;
-- uno o piu' `ContinuousAction`: `continuous`;
-- componenti discrete e continue, oppure piu' componenti discrete: `hybrid`.
+- one `DiscreteActionSet`: `discrete`;
+- one or more `ContinuousAction` nodes: `continuous`;
+- mixed discrete and continuous components, or several discrete components: `hybrid`.
 
-Lo spazio dichiarato da Godot e' la fonte di verita'. Python non deve contenere nomi
-come `accelerate`, `steer` o `shoot`: legge dimensioni, limiti e componenti dalla spec.
+The Godot declaration is authoritative. Python reads component names, dimensions,
+bounds, and ordering from the scenario specification.
 
-## Observation
+## Observations
 
-`ObservationSystem` chiede a ogni `ObservationSource` di registrare valori nel nodo
-`Agent`. Una observation puo' essere scalare, booleana, `Vector2`, `Vector3` o array;
-`Agent.get_observation_vector()` la appiattisce mantenendo l'ordine di registrazione.
+Each `ObservationSource` registers one or more values with `ObservationSystem`.
+Scalars, booleans, `Vector2`, `Vector3`, and arrays are flattened by
+`Agent.get_observation_vector()` in registration order.
 
-La dimensione e l'ordine devono rimanere stabili per tutta la vita del modello. Cambiare
-una observation, il suo ordine o il suo significato rende normalmente incompatibili i
-checkpoint precedenti.
+That order and size must remain stable for the lifetime of a policy. Changing a
+source, normalization, ordering, or semantic meaning creates a new model contract.
 
-## Reward ed eventi
+## Rewards, events, and progress
 
-Le reward sono divise in due livelli:
+Rewards have two scopes:
 
-- `RewardSystem`, figlio del singolo `Agent`, valuta movimento, input, sensori e stato
-  locale del corpo;
-- `ScenarioRewardSystem`, figlio dello scenario, valuta progress, goal, vittoria,
-  collisioni globali e condizioni che coinvolgono piu' oggetti.
+- `RewardSystem` belongs to one agent and evaluates body-local state such as motion,
+  controls, sensors, and effort;
+- `ScenarioRewardSystem` evaluates task state such as goals, score, shared-world
+  collisions, and progress.
 
-Il totale di un agente e' personale: una scena multi-agent non somma automaticamente le
-reward di tutti. Il parameter sharing condivide i pesi, non il ritorno dell'episodio.
+Rewards remain per agent. Parameter sharing means shared network weights, not shared
+episode returns.
 
-`ScenarioEventSystem` converte collisioni, aree o condizioni osservabili in eventi con
-nomi stabili. Reward e terminalita' possono quindi dipendere dagli eventi senza legarsi
-direttamente alla scena concreta.
+`ScenarioEventSystem` gives scene events stable names. Reward and terminal components
+can depend on those names without knowing which collision callback or area generated
+them.
 
-## Single-agent e multi-agent
+`ProgressProvider` supplies an ordered scalar used for shaping, diagnostics, and
+curriculum. It is intentionally broader than path completion.
 
-In single-agent `step` accetta una sola azione e restituisce il primo canale. In
-multi-agent usa una mappa di azioni e restituisce un canale per agente. Gli agenti con
-observation/action space compatibili possono usare la stessa policy; ogni loro
-transizione entra comunque separatamente nel replay o nel rollout.
+## Single-agent and multi-agent data
 
-Piu' agenti non significano piu' modelli. Il comportamento predefinito e' parameter
-sharing. Policy separate richiedono un'estensione esplicita del trainer e una chiara
-assegnazione `agent_id -> policy_id`.
+In single-agent mode, `step` accepts one action and exposes the first result channel.
+In multi-agent mode, it accepts an action mapping and returns one channel per agent.
 
-## Collector sync e async
+Agents with the same observation and action contract may use one shared policy. Their
+transitions remain independent records in replay or rollout storage. Independent
+policies require an explicit `agent_id -> policy_id` assignment and separate model
+state; that general workflow is not implemented yet.
 
-Il collector sincrono aspetta insieme gli environment e rende il flusso piu' semplice da
-riprodurre. Il collector asincrono lascia avanzare ogni environment indipendentemente e
-pubblica periodicamente snapshot della policy ai worker.
+## Synchronous and asynchronous collection
 
-L'async non mescola le transizioni: ogni evento conserva worker, episodio e policy
-version. Puo' pero' introdurre policy lag, perche' un collector termina un episodio con
-una snapshot leggermente meno recente del learner. I parametri di sincronizzazione e la
-coda controllano questo compromesso.
+The synchronous collector waits for a coordinated set of environment steps. It is
+easier to reproduce and required by some self-play configurations.
 
-## Checkpoint, best policy e replay
+The asynchronous collector lets each environment run independently. Workers publish
+transitions to a bounded queue and periodically receive a new policy snapshot. Each
+transition retains its worker, episode, and policy-version metadata, so data from
+different workers is not confused. The trade-off is policy lag: a worker may finish
+an episode using a slightly older policy.
 
-I checkpoint TensorFlow conservano modello, target network, optimizer e contatori che
-l'algoritmo registra. Per algoritmi off-policy il replay viene salvato separatamente in
-`replay-<episodio>.npz`. Un resume completo dovrebbe ripristinare entrambi.
+PPO collects complete rollout generations and only trains on data produced by the
+same frozen policy version. Off-policy algorithms can mix older data through replay by
+design.
 
-La best policy viene valutata in un processo separato usando `python/run.py`. La
-directory `best/` contiene checkpoint promossi soltanto dopo una valutazione congelata,
-quindi non va confusa con l'ultimo checkpoint cronologico.
+## Checkpoints, replay, and policy bundles
 
-## File runtime
+TensorFlow checkpoints store the model variables, target networks, optimizers, and
+counters registered by an algorithm. Off-policy replay is stored separately as
+`replay-<episode>.npz`. A full resume restores both.
 
-I processi Godot scrivono i log in `.runtime/godot_logs/`. La directory e' ignorata da
-Git e puo' essere cancellata a processi fermi. Modelli, checkpoint e dataset demo hanno
-invece valore persistente e vanno conservati nelle directory configurate dall'utente.
+`policy.keras` and `policy.json` are deployment artifacts. They are sufficient for
+`run.py` and export, but do not contain optimizer or replay state.
+
+Best-checkpoint evaluation runs from a frozen checkpoint in a separate process. The
+`best/` directory therefore contains evaluated candidates rather than the latest
+chronological state.
+
+## Runtime files
+
+Godot process logs are written under `.runtime/godot_logs/`. This directory is ignored
+by Git and can be removed when no Metis process is running. Checkpoints, exported
+policies, and demonstration datasets are persistent user artifacts and should live in
+their configured output directories.
