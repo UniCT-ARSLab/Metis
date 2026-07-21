@@ -81,21 +81,21 @@ metadata/_custom_type_script = "uid://d1xuba84xevcv"
 [node name="JointMotion" type="Node" parent="Agent/RewardSystem" unique_id=1662626791 node_paths=PackedStringArray("node_caller")]
 script = ExtResource("8_function_reward")
 term_name = "joint_motion"
-weight = 0.003
+weight = 0.0005
 method_name = &"get_joint_motion_penalty"
 node_caller = NodePath("../../..")
 
 [node name="JointLimit" type="Node" parent="Agent/RewardSystem" unique_id=218170609 node_paths=PackedStringArray("node_caller")]
 script = ExtResource("8_function_reward")
 term_name = "joint_limit"
-weight = 0.02
+weight = 0.005
 method_name = &"get_joint_limit_penalty"
 node_caller = NodePath("../../..")
 
 [node name="Smoothness" type="Node" parent="Agent/RewardSystem" unique_id=1438737164]
 script = ExtResource("9_smoothness")
 input_names = PackedStringArray("joint_velocity_0", "joint_velocity_1", "joint_velocity_2", "joint_velocity_3", "joint_velocity_4", "joint_velocity_5", "joint_velocity_6")
-penalty_scale = -0.005
+penalty_scale = -0.001
 normalize_by_input_count = true
 term_name = "action_smoothness"
 
@@ -116,8 +116,15 @@ node_caller = NodePath("../../..")
 [node name="EmptyGrasp" type="Node" parent="Agent/RewardSystem" node_paths=PackedStringArray("node_caller")]
 script = ExtResource("8_function_reward")
 term_name = "empty_grasp"
-weight = 0.05
+weight = 0.02
 method_name = &"get_empty_grasp_penalty"
+node_caller = NodePath("../../..")
+
+[node name="GraspClosing" type="Node" parent="Agent/RewardSystem" node_paths=PackedStringArray("node_caller")]
+script = ExtResource("8_function_reward")
+term_name = "grasp_closing"
+weight = 0.06
+method_name = &"get_grasp_closing_reward"
 node_caller = NodePath("../../..")
 
 [node name="Time" type="Node" parent="Agent/RewardSystem" unique_id=1426812260]

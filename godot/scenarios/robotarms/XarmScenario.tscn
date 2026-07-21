@@ -109,7 +109,8 @@ metadata/_custom_type_script = "uid://tn1jug3aq4ll"
 
 [node name="Progress" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=1358041893]
 script = ExtResource("8_ywys0")
-backward_penalty_scale = 12.0
+progress_reward_scale = 15.0
+backward_penalty_scale = 15.0
 term_name = "target_progress"
 metadata/_custom_type_script = "uid://bmmjchpjospjo"
 

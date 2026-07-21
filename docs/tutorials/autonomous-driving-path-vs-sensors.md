@@ -215,6 +215,12 @@ does not jump between distant track sections.
 `EndRace` emits `finish_reached`, which terminates the agent and awards the finish
 reward. Keep its collision mask separate from wall collision masks.
 
+For a one-lap task, make the final point of the progress path coincide with the center
+of `EndRace`. A road mesh may close its geometry independently, but the progress
+provider only measures the points contained in its `Curve3D`. If the finish remains on
+an omitted closing segment, progress reaches `1.0` before the car reaches the finish
+area and stall detection can terminate an otherwise valid run.
+
 ## 9. Use reset curriculum without leaking the route
 
 `Path3DProgressProvider.build_reset_transform()` can place a car anywhere in a progress

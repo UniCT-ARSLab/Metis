@@ -56,11 +56,7 @@ enum TaskMode {
 @export var grasp_finger_link_names := PackedStringArray(["finger_left_link", "finger_right_link"])
 # Max perpendicular distance from the glass to the line between the two fingers (the gripper
 # "mouth" centerline) for the glass to count as enclosed. Slack added to the finger span.
-@export var grasp_enclosure_tolerance := 0.02
-@export var grasp_enclosure_span_margin := 0.01
-# Finger-tip separation below which the two fingers have closed onto each other with nothing
-# between them (empty close / missed target). Set below the glass diameter.
-@export var grasp_empty_close_distance := 0.02
+@export var grasp_enclosure_tolerance := 0.03
 
 @export_category("Safety")
 @export var safety_volumes: Array[Area3D] = []
@@ -437,11 +433,26 @@ func get_premature_gripper_penalty() -> float:
 func get_empty_grasp_penalty() -> float:
 	# Fingers closed onto each other with no glass between them = grasp attempted, target
 	# missed. Kinematic fingers do not stop on contact, so this is detected geometrically.
+	# Only penalise a genuine miss: overlapping AND not near the glass. Closing near the glass
+	# is a legitimate attempt, rewarded by get_grasp_closing_reward instead of punished here.
 	if task_mode != TaskMode.GRASPING or _grasped:
 		return 0.0
-	if _fingers_closed_on_nothing():
+	if _fingers_closed_on_nothing() and _target_distance() > grasp_capture_distance * 1.5:
 		return -1.0
 	return 0.0
+
+
+func get_grasp_closing_reward() -> float:
+	# Positive bootstrap: reward closing the gripper WHEN the glass is in the mouth (near and
+	# between the fingers). Counters the pure-penalty trap where the policy learns never to
+	# close. Capture triggers once conditions hold, so it cannot be farmed for long.
+	if task_mode != TaskMode.GRASPING or _grasped:
+		return 0.0
+	if _target_distance() > grasp_capture_distance * 1.5:
+		return 0.0
+	if not _glass_between_fingers():
+		return 0.0
+	return _gripper_closed_fraction()
 
 
 func _ensure_grasp_finger_bodies() -> void:
@@ -486,8 +497,12 @@ func _glass_between_fingers() -> bool:
 	var offset := grasp_target_body.global_position - center
 	var lateral := offset.dot(axis)
 	var perpendicular := (offset - axis * lateral).length()
+	# The glass must be roughly CENTERED between the fingers, not merely somewhere on the line
+	# joining them. At one finger perpendicular is ~0 and |lateral| ~= half the span; the old
+	# span check accepted that, so a one-sided touch could capture. Require |lateral| small
+	# (central portion of the gripper mouth), auto-scaled to the current opening.
 	return (
-		absf(lateral) <= separation_length * 0.5 + grasp_enclosure_span_margin
+		absf(lateral) <= separation_length * 0.30
 		and perpendicular <= grasp_enclosure_tolerance)
 
 
@@ -504,12 +519,14 @@ func _both_fingers_contact_glass() -> bool:
 
 
 func _fingers_closed_on_nothing() -> bool:
-	_ensure_grasp_finger_bodies()
-	if _grasp_finger_bodies.size() < 2:
+	# The finger collision hulls never touch each other (they stay ~4.8 cm apart even fully
+	# closed), so finger-finger collision is undetectable -- the visible overlap is only the
+	# meshes. The functional failure is the gripper closed while NEITHER finger is on the
+	# glass. Finger-glass contact IS detectable: the glass is dynamic, so kinematic-vs-dynamic
+	# generates a reported contact (unlike kinematic-vs-kinematic).
+	if _gripper_closed_fraction() < grasp_close_threshold:
 		return false
-	var separation := _grasp_finger_bodies[0].global_position.distance_to(
-		_grasp_finger_bodies[1].global_position)
-	return separation <= grasp_empty_close_distance
+	return not _both_fingers_contact_glass()
 
 
 func get_control_input(input_name: String) -> float:
