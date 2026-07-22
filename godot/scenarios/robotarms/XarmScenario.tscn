@@ -109,8 +109,8 @@ metadata/_custom_type_script = "uid://tn1jug3aq4ll"
 
 [node name="Progress" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=1358041893]
 script = ExtResource("8_ywys0")
-progress_reward_scale = 15.0
-backward_penalty_scale = 15.0
+progress_reward_scale = 3.0
+backward_penalty_scale = 3.0
 term_name = "target_progress"
 metadata/_custom_type_script = "uid://bmmjchpjospjo"
 
@@ -174,7 +174,7 @@ transform = Transform3D(0.8937797, -0.21330594, 0.3945358, 0, 0.8796661, 0.47559
 
 [node name="RobotArm" parent="." unique_id=118315022 node_paths=PackedStringArray("target", "grasp_target_body") instance=ExtResource("3_nsb5c")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.0006389916, 0)
-task_mode = 1
+task_mode = 0
 target = NodePath("../Target/GraspPoint")
 grasp_target_body = NodePath("../Target")
 support_contact_link_names = PackedStringArray("xarm_6_link")

@@ -43,6 +43,8 @@ from core.training import (
     add_lockstep_tuning_arguments,
     add_parallel_env_arguments,
     add_log_format_argument,
+    add_dashboard_arguments,
+    maybe_start_dashboard,
     add_godot_render_argument,
     add_tensorflow_runtime_arguments,
     build_lockstep_user_args,
@@ -79,6 +81,27 @@ def parse_args():
     parser.add_argument("--tau", type=float, default=0.005)
     parser.add_argument("--actor-learning-rate", type=float, default=3e-4)
     parser.add_argument("--critic-learning-rate", type=float, default=3e-4)
+    parser.add_argument(
+        "--grad-clip-norm",
+        type=float,
+        default=10.0,
+        help="Hard global gradient-norm cap for critic/actor updates (0 disables). Safety net "
+        "against the deadly-triad Q-value divergence that otherwise blows critics up to NaN.",
+    )
+    parser.add_argument(
+        "--grad-clip-adaptive",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Clip each network at --grad-clip-k * EMA(gradient-norm), bounded by "
+        "--grad-clip-norm. Tracks each network's gradient scale to reduce manual tuning; "
+        "the hard cap remains the final safety bound.",
+    )
+    parser.add_argument(
+        "--grad-clip-k",
+        type=float,
+        default=3.0,
+        help="Multiplier on the running-mean gradient norm when --grad-clip-adaptive is set.",
+    )
     parser.add_argument("--alpha-learning-rate", type=float, default=3e-4)
     parser.add_argument(
         "--resume-actor-learning-rate",
@@ -200,6 +223,7 @@ def parse_args():
     add_parallel_env_arguments(parser)
     add_lockstep_tuning_arguments(parser)
     add_log_format_argument(parser)
+    add_dashboard_arguments(parser)
     add_tensorflow_runtime_arguments(parser, include_compile_learner=True)
     add_godot_render_argument(parser)
 
@@ -344,6 +368,10 @@ def build_sac_learner_step(
     compiled=True,
     xla=False,
     tune_alpha=True,
+    grad_clip_norm=0.0,
+    grad_clip_adaptive=False,
+    grad_clip_k=3.0,
+    grad_clip_decay=0.99,
 ):
     """Build the SAC gradient step, optionally compiled into a tf.function.
 
@@ -367,6 +395,52 @@ def build_sac_learner_step(
     actor_optimizer.build(actor.trainable_variables)
     alpha_optimizer.build([log_alpha])
 
+    # -- gradient clipping: safety net against deadly-triad Q-divergence to NaN ------------
+    # The fixed cap (grad_clip_norm) is a hard backstop. Adaptive mode instead clips at
+    # grad_clip_k * EMA(grad_norm), bounded by that hard cap -- so the framework needs no
+    # per-scenario tuning of the norm: each network's own gradient scale is tracked, while the
+    # hard cap still bounds every finite update. The EMA ignores non-finite norms so NaN/Inf
+    # cannot poison its state; finite spikes can affect the EMA but still cannot loosen the
+    # threshold past the hard value.
+    has_hard = bool(grad_clip_norm and grad_clip_norm > 0.0)
+    clip_enabled = has_hard or bool(grad_clip_adaptive)
+    hard_clip_c = tf.constant(float(grad_clip_norm) if has_hard else 0.0, dtype=tf.float32)
+    clip_k_c = tf.constant(float(grad_clip_k), dtype=tf.float32)
+    clip_decay_c = tf.constant(float(grad_clip_decay), dtype=tf.float32)
+    clip_warmup_c = tf.constant(25.0, dtype=tf.float32)
+
+    def _make_clipper(name):
+        # EMA state persists across calls (created eagerly, captured by the traced graph).
+        ema = tf.Variable(0.0, dtype=tf.float32, trainable=False, name=f"clip_ema_{name}")
+        seen = tf.Variable(0.0, dtype=tf.float32, trainable=False, name=f"clip_seen_{name}")
+
+        def clip(grads):
+            if not clip_enabled:
+                return grads
+            gnorm = tf.linalg.global_norm(grads)
+            if grad_clip_adaptive:
+                finite = tf.math.is_finite(gnorm)
+                g_for_ema = tf.where(finite, gnorm, ema)
+                new_ema = tf.where(
+                    seen > 0.0, clip_decay_c * ema + (1.0 - clip_decay_c) * g_for_ema, g_for_ema)
+                ema.assign(new_ema)
+                seen.assign_add(1.0)
+                adaptive_cap = clip_k_c * ema
+                cap = tf.minimum(hard_clip_c, adaptive_cap) if has_hard else adaptive_cap
+                warmup_cap = hard_clip_c if has_hard else adaptive_cap
+                cap = tf.where(seen < clip_warmup_c, warmup_cap, cap)  # cold EMA -> don't over-clip
+                cap = tf.maximum(cap, 1e-3)
+            else:
+                cap = hard_clip_c
+            clipped, _ = tf.clip_by_global_norm(grads, cap)
+            return clipped
+
+        return clip
+
+    clip_critic1 = _make_clipper("critic1")
+    clip_critic2 = _make_clipper("critic2")
+    clip_actor = _make_clipper("actor")
+
     def _update_critics_impl(obs, actions, rewards, next_obs, dones):
         alpha = tf.exp(log_alpha)
         next_actions, next_log_prob, _ = sample_actor(
@@ -381,12 +455,14 @@ def build_sac_learner_step(
             q1 = critic1([obs, actions], training=True)
             critic1_loss = tf.reduce_mean(tf.square(y - q1))
         critic1_grads = tape.gradient(critic1_loss, critic1.trainable_variables)
+        critic1_grads = clip_critic1(critic1_grads)
         critic1_optimizer.apply_gradients(zip(critic1_grads, critic1.trainable_variables))
 
         with tf.GradientTape() as tape:
             q2 = critic2([obs, actions], training=True)
             critic2_loss = tf.reduce_mean(tf.square(y - q2))
         critic2_grads = tape.gradient(critic2_loss, critic2.trainable_variables)
+        critic2_grads = clip_critic2(critic2_grads)
         critic2_optimizer.apply_gradients(zip(critic2_grads, critic2.trainable_variables))
         return critic1_loss, critic2_loss
 
@@ -403,6 +479,7 @@ def build_sac_learner_step(
             q_pi = tf.minimum(q1_pi, q2_pi)
             actor_loss = tf.reduce_mean(alpha * log_prob - q_pi)
         actor_grads = tape.gradient(actor_loss, actor.trainable_variables)
+        actor_grads = clip_actor(actor_grads)
         actor_optimizer.apply_gradients(zip(actor_grads, actor.trainable_variables))
 
         if tune_alpha:
@@ -552,6 +629,14 @@ def apply_optimizer_learning_rates(
     )
 
 
+def describe_grad_clip(args):
+    if getattr(args, "grad_clip_adaptive", False):
+        return f"adaptive k={args.grad_clip_k:g} cap={args.grad_clip_norm:g}"
+    if args.grad_clip_norm and args.grad_clip_norm > 0:
+        return f"fixed norm={args.grad_clip_norm:g}"
+    return "off"
+
+
 def run_async_sac(
     args,
     envs,
@@ -600,10 +685,14 @@ def run_async_sac(
         compiled=args.tf_compile_learner,
         xla=args.tf_xla,
         tune_alpha=args.tune_alpha,
+        grad_clip_norm=args.grad_clip_norm,
+        grad_clip_adaptive=args.grad_clip_adaptive,
+        grad_clip_k=args.grad_clip_k,
     )
     print(
         f"SAC learner: {'compiled graph' if args.tf_compile_learner else 'eager'}"
-        f"{' + XLA' if args.tf_compile_learner and args.tf_xla else ''}",
+        f"{' + XLA' if args.tf_compile_learner and args.tf_xla else ''}"
+        f" | grad-clip: {describe_grad_clip(args)}",
         flush=True,
     )
     with tf.device("/CPU:0"):
@@ -847,6 +936,7 @@ def main():
         raise ValueError("--policy-update-every must be at least 1")
     best_tracker = BestCheckpointTracker(args, "sac")
     describe_tensorflow_backend(args)
+    dashboard = maybe_start_dashboard(args, algorithm="sac")
     random.seed(args.env_seed_base)
     np.random.seed(args.env_seed_base)
     tf.random.set_seed(args.env_seed_base)
@@ -897,6 +987,12 @@ def main():
 
         obs_dim = env0.obs_dim
         action_size = env0.action_size
+        if dashboard is not None:
+            dashboard.set_meta(
+                agents=len(getattr(env0, "agent_ids", []) or [env0.agent_id]),
+                obs_dim=obs_dim,
+                action_size=action_size,
+            )
         action_low = np.asarray(env0.action_low, dtype=np.float32)
         action_high = np.asarray(env0.action_high, dtype=np.float32)
         random_action_low, random_action_high = continuous_exploration_bounds(
@@ -1114,10 +1210,14 @@ def main():
             compiled=args.tf_compile_learner,
             xla=args.tf_xla,
             tune_alpha=args.tune_alpha,
+            grad_clip_norm=args.grad_clip_norm,
+            grad_clip_adaptive=args.grad_clip_adaptive,
+            grad_clip_k=args.grad_clip_k,
         )
         print(
             f"SAC learner: {'compiled graph' if args.tf_compile_learner else 'eager'}"
-            f"{' + XLA' if args.tf_compile_learner and args.tf_xla else ''}",
+            f"{' + XLA' if args.tf_compile_learner and args.tf_xla else ''}"
+            f" | grad-clip: {describe_grad_clip(args)}",
             flush=True,
         )
 

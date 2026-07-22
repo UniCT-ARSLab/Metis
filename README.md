@@ -43,6 +43,7 @@ the first time, read [Build a new agent and scenario](docs/tutorials/new-agent-a
 | Competition | Simultaneous self-play and historical opponent pools |
 | Demonstrations | Manual recording, replay prefill, and behavior cloning |
 | Persistence | Full checkpoints, replay snapshots, best-policy tracking, Keras bundles |
+| Monitoring | Optional local dashboard with live metrics and WebSocket updates |
 | Inference | Reproducible lockstep or real-time execution |
 | Export | Keras, TensorFlow Lite, and optional ONNX |
 | Platforms | Linux CPU/CUDA and Apple Silicon with TensorFlow Metal |
@@ -122,6 +123,13 @@ The macOS requirements intentionally pin `tensorflow==2.18.1` and
 `tensorflow-metal==1.2.0`. That Metal plugin does not match the ABI of newer
 TensorFlow releases.
 
+The live dashboard is optional. Install its small web stack only on machines where it
+will be used:
+
+```bash
+python/.venv/bin/python -m pip install -r python/requirements-dashboard.txt
+```
+
 Set `GODOT_BIN` if Godot is not on `PATH`:
 
 ```bash
@@ -155,6 +163,9 @@ python/.venv/bin/python python/train.py \
   --checkpoint-dir checkpoints/breakout_dqn_v1 \
   --headless
 ```
+
+Add `--dashboard` to the same command to open live metrics at
+`http://127.0.0.1:8770`. The dashboard is not started unless the flag is present.
 
 Checkpoints also contain a portable `policy.keras` and a `policy.json` manifest. Run
 the resulting policy with:
@@ -248,6 +259,11 @@ With `--algorithm auto`, Metis selects DQN for discrete spaces, DDPG for continu
 spaces, and PPO for hybrid spaces. Select other algorithms explicitly; action shape
 alone is not enough to choose the best learner for a task.
 
+SAC clips the global gradient norm of each critic and the actor to `10.0` by default.
+Use `--grad-clip-norm 0` to disable this guard, or add `--grad-clip-adaptive` to derive
+each network's threshold from its running gradient scale while retaining the hard cap.
+The entropy-temperature update is not clipped.
+
 ## Episodes and decision frequency
 
 `--max-steps-per-episode` is sent to Godot as well as enforced by Python. Set it to
@@ -315,6 +331,24 @@ For example:
 `--render-mode` only affects visible processes. If OpenGL falls back to `llvmpipe` on
 Linux, `light-gpu` tries the discrete GPU reported by `switcherooctl`, unless PRIME or
 DRI variables were already set explicitly.
+
+## Live training dashboard
+
+Every trainer can publish its per-episode log metrics to a local dashboard:
+
+```text
+--dashboard --dashboard-port 8770
+```
+
+The page follows rewards, progress, losses, throughput, SAC entropy temperature, and
+success, collision, or stall rates when the selected backend reports those fields.
+Changing **update every** batches browser refreshes; it does not change collection or
+learning. The server listens on `127.0.0.1`, keeps its recent history in memory, and
+stops with the trainer. It does not replace checkpoints or persistent experiment
+logging.
+
+See [Monitoring training](docs/guides/monitoring-training.md) for installation,
+metric names, and troubleshooting.
 
 ## Multi-agent and self-play
 
@@ -459,6 +493,7 @@ python/
   export.py     TFLite and ONNX export
   algorithms/   RL backends
   core/         models, replay, checkpoints, async collection, opponent pool
+  dashboard/    optional local training monitor
   envs/         Gymnasium wrapper and Godot process manager
   tools/        diagnostics and benchmarks
   tests/        Python test suite

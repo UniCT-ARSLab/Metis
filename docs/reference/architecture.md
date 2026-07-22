@@ -132,6 +132,22 @@ PPO collects complete rollout generations and only trains on data produced by th
 same frozen policy version. Off-policy algorithms can mix older data through replay by
 design.
 
+## Metrics and live monitoring
+
+Algorithm backends build named metric sections once an episode completes.
+`print_episode_metrics()` owns both terminal formatting and delivery to optional
+metric sinks, which keeps monitoring independent of collection mode and algorithm
+control flow.
+
+With `--dashboard`, a sink stores recent rows in memory and publishes them through a
+local HTTP API and WebSocket. Browser batching changes only refresh frequency. It does
+not change update scheduling or synchronize collectors. Metric recording is kept
+small, WebSocket sends happen outside the shared history lock, sink exceptions are
+isolated from training, and the dashboard thread exits with the Python process.
+
+The dashboard is an observer, not part of the checkpoint contract. Its history is not
+restored on resume and should not be used as the only experiment record.
+
 ## Checkpoints, replay, and policy bundles
 
 TensorFlow checkpoints store the model variables, target networks, optimizers, and

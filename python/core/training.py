@@ -1151,12 +1151,79 @@ def add_log_format_argument(parser):
     )
 
 
+_METRICS_SINKS = []
+
+
+def register_metrics_sink(sink):
+    """Register a callable(dict) invoked once per episode with a flat {key: value} metrics
+    dict (e.g. the live dashboard). Sinks must be fast and non-blocking; exceptions are
+    swallowed so a sink can never break training."""
+    _METRICS_SINKS.append(sink)
+
+
+def _coerce_metric_value(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return value
+    return int(number) if number.is_integer() else number
+
+
+def add_dashboard_arguments(parser):
+    parser.add_argument(
+        "--dashboard",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Serve a live training dashboard (HTTP page + API + WebSocket) on --dashboard-port.",
+    )
+    parser.add_argument("--dashboard-port", type=int, default=8770)
+
+
+def maybe_start_dashboard(args, algorithm=None):
+    """Start the live dashboard server and wire it as a metrics sink, if --dashboard is set.
+
+    Returns the server (or None) so the caller can server.set_meta(...) once the scenario is
+    probed (e.g. the real agent count for multi-agent runs)."""
+    if not getattr(args, "dashboard", False):
+        return None
+    from dashboard.server import DashboardServer
+
+    scene = getattr(args, "godot_scene", "") or ""
+    scenario = scene.rsplit("/", 1)[-1].removesuffix(".tscn") if scene else "?"
+    multi_agent = bool(getattr(args, "multi_agent", False))
+    meta = {
+        "algorithm": algorithm or getattr(args, "trainer_variant", None) or "?",
+        "scenario": scenario,
+        "num_envs": int(getattr(args, "num_envs", 0) or 0),
+        "multi_agent": multi_agent,
+        "agents": None if multi_agent else 1,
+        "collector_mode": getattr(args, "collector_mode", None),
+        "batch_size": int(getattr(args, "batch_size", 0) or 0),
+        "max_steps": int(getattr(args, "max_steps_per_episode", 0) or 0),
+    }
+    server = DashboardServer(port=int(getattr(args, "dashboard_port", 8770)), meta=meta)
+    server.start()
+    register_metrics_sink(server.record)
+    print(f"Dashboard live: http://127.0.0.1:{server.port}", flush=True)
+    return server
+
+
 def print_episode_metrics(episode, sections, log_format="pretty"):
     normalized = [
         (name, [(str(key), str(value)) for key, value in metrics])
         for name, metrics in sections
         if metrics
     ]
+    if _METRICS_SINKS:
+        flat = {"episode": int(episode)}
+        for _name, metrics in normalized:
+            for key, value in metrics:
+                flat[key] = _coerce_metric_value(value)
+        for sink in _METRICS_SINKS:
+            try:
+                sink(flat)
+            except Exception:
+                pass
     if log_format == "compact":
         fields = [f"episode={episode:04d}"]
         for _name, metrics in normalized:

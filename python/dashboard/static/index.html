@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en" class="light">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Metis · Training Dashboard</title>
+<script src="vendor/tailwind.js"></script>
+<script>
+  tailwind.config = { darkMode: 'class' };
+</script>
+<script src="vendor/chart.umd.min.js"></script>
+<style>
+  html { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .card { border-radius: 0.75rem; }
+  canvas { max-height: 260px; }
+  .brand-logo { height: 26px; width: auto; display: block; }
+  /* Logo artwork is white; invert it so it stays legible on the light-theme header. */
+  html:not(.dark) .brand-logo { filter: invert(1) brightness(0.9); }
+</style>
+</head>
+<body class="bg-gray-50 text-gray-800 dark:bg-[#0b1220] dark:text-gray-100 min-h-screen">
+
+<header class="sticky top-0 z-10 backdrop-blur bg-white/80 dark:bg-[#0b1220]/80 border-b border-gray-200 dark:border-white/10">
+  <div class="max-w-7xl mx-auto px-5 h-16 flex items-center gap-4">
+    <div class="flex items-center gap-3">
+      <img src="logo.svg" alt="Metis" class="brand-logo" />
+      <div class="hidden md:flex items-center gap-1.5 text-xs" id="meta-chips"></div>
+    </div>
+    <div class="ml-auto flex items-center gap-3 text-sm">
+      <div class="flex items-center gap-2">
+        <span id="status-dot" class="w-2.5 h-2.5 rounded-full bg-gray-400"></span>
+        <span id="status-text" class="text-gray-500 dark:text-gray-400">connecting…</span>
+      </div>
+      <label class="flex items-center gap-1.5 text-gray-500 dark:text-gray-400">
+        <span class="hidden sm:inline">update every</span>
+        <select id="batch" class="bg-gray-100 dark:bg-white/10 rounded-lg px-2 py-1 outline-none">
+          <option value="1">1 ep</option>
+          <option value="5">5 ep</option>
+          <option value="10">10 ep</option>
+          <option value="25">25 ep</option>
+          <option value="50">50 ep</option>
+        </select>
+      </label>
+      <button id="theme" class="w-9 h-9 rounded-lg bg-gray-100 dark:bg-white/10 flex items-center justify-center" title="Toggle theme">
+        <span id="theme-icon">🌙</span>
+      </button>
+    </div>
+  </div>
+</header>
+
+<main class="max-w-7xl mx-auto px-5 py-6 space-y-6">
+  <section id="kpis" class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4"></section>
+
+  <section class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+    <div class="card bg-white dark:bg-white/5 border border-gray-200 dark:border-white/10 p-5">
+      <h3 class="text-sm font-semibold mb-3">Reward</h3><canvas id="c-reward"></canvas>
+    </div>
+    <div class="card bg-white dark:bg-white/5 border border-gray-200 dark:border-white/10 p-5">
+      <h3 class="text-sm font-semibold mb-3">Progress (mean / max)</h3><canvas id="c-progress"></canvas>
+    </div>
+    <div class="card bg-white dark:bg-white/5 border border-gray-200 dark:border-white/10 p-5">
+      <h3 class="text-sm font-semibold mb-3">Losses (critic / actor)</h3><canvas id="c-loss"></canvas>
+    </div>
+    <div class="card bg-white dark:bg-white/5 border border-gray-200 dark:border-white/10 p-5">
+      <h3 class="text-sm font-semibold mb-3">Throughput (env steps/s · updates/s)</h3><canvas id="c-tput"></canvas>
+    </div>
+    <div class="card bg-white dark:bg-white/5 border border-gray-200 dark:border-white/10 p-5">
+      <h3 class="text-sm font-semibold mb-3">Alpha (entropy coeff)</h3><canvas id="c-alpha"></canvas>
+    </div>
+    <div class="card bg-white dark:bg-white/5 border border-gray-200 dark:border-white/10 p-5">
+      <h3 class="text-sm font-semibold mb-3">Outcomes (success · collision · stall)</h3><canvas id="c-outcome"></canvas>
+    </div>
+  </section>
+  <p class="text-xs text-gray-400 text-center" id="footer">no data yet</p>
+</main>
+
+<script>
+const MAX_POINTS = 500;
+let episodes = [];
+let charts = {};
+
+// ---- metric parsing (values arrive as human strings or numbers) --------------------------
+function num(v) { const n = parseFloat(v); return Number.isFinite(n) ? n : null; }
+function field(row, key) { return row[key] !== undefined ? num(row[key]) : null; }
+function progressPair(row) {
+  const s = String(row.progress ?? "");
+  const m = s.match(/mean:([-0-9.]+)/), x = s.match(/max:([-0-9.]+)/);
+  return { mean: m ? parseFloat(m[1]) : null, max: x ? parseFloat(x[1]) : null };
+}
+function ratePair(row, key) { // "5/10 (50%)" or "0/1 (0.00%)" -> fraction
+  const s = String(row[key] ?? "");
+  const m = s.match(/([0-9.]+)\s*\/\s*([0-9.]+)/);
+  if (m && parseFloat(m[2]) > 0) return parseFloat(m[1]) / parseFloat(m[2]);
+  return num(row[key]);
+}
+function epNum(row) { const c = String(row.completed ?? ""); const m = c.match(/([0-9]+)/); return m ? parseInt(m[1]) : (row.episode ?? 0); }
+
+// ---- downsample for chart perf ----------------------------------------------------------
+function sample(arr) {
+  if (arr.length <= MAX_POINTS) return arr;
+  const step = arr.length / MAX_POINTS, out = [];
+  for (let i = 0; i < MAX_POINTS; i++) out.push(arr[Math.floor(i * step)]);
+  out.push(arr[arr.length - 1]);
+  return out;
+}
+
+// ---- KPI cards --------------------------------------------------------------------------
+function kpi(label, value, sub) {
+  return `<div class="card bg-white dark:bg-white/5 border border-gray-200 dark:border-white/10 p-4">
+    <div class="text-xs uppercase tracking-wide text-gray-400">${label}</div>
+    <div class="text-2xl font-semibold mt-1">${value}</div>
+    <div class="text-xs text-gray-400 mt-0.5">${sub || ""}</div></div>`;
+}
+function fmt(v, d = 2) { return v === null || v === undefined ? "—" : (typeof v === "number" ? v.toFixed(d) : v); }
+function renderKpis() {
+  const last = episodes[episodes.length - 1] || {};
+  const p = progressPair(last);
+  document.getElementById("kpis").innerHTML =
+    kpi("Episode", epNum(last), (last.policy_version !== undefined ? "policy v" + last.policy_version : "")) +
+    kpi("Reward", fmt(field(last, "reward")), "last") +
+    kpi("Progress max", fmt(p.max), "of 1.0") +
+    kpi("Alpha", fmt(field(last, "alpha"), 4), "entropy coeff") +
+    kpi("Env steps/s", fmt(field(last, "env_steps_s"), 0), "updates/s " + fmt(field(last, "updates_s"), 0)) +
+    kpi("Replay", fmt(field(last, "replay"), 0), "buffer");
+}
+
+// ---- run metadata (algorithm / scenario / agents / envs) --------------------------------
+function renderMeta(m) {
+  if (!m) return;
+  const chip = (t, cls = "bg-gray-100 dark:bg-white/10") => `<span class="px-2 py-0.5 rounded-md ${cls}">${t}</span>`;
+  const parts = [];
+  if (m.algorithm && m.algorithm !== "?") parts.push(chip(String(m.algorithm).toUpperCase(), "bg-indigo-100 text-indigo-700 dark:bg-indigo-500/20 dark:text-indigo-300 font-semibold"));
+  if (m.scenario && m.scenario !== "?") parts.push(chip(m.scenario));
+  if (m.num_envs) parts.push(chip(m.num_envs + " env" + (m.num_envs > 1 ? "s" : "")));
+  if (m.agents != null) parts.push(chip(m.agents + " agent" + (m.agents > 1 ? "s" : "")));
+  if (m.multi_agent) parts.push(chip("multi-agent", "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300"));
+  if (m.collector_mode) parts.push(chip(m.collector_mode));
+  document.getElementById("meta-chips").innerHTML = parts.join("");
+  if (m.scenario && m.scenario !== "?") document.title = `Metis · ${m.scenario}`;
+}
+async function loadMeta() {
+  try { renderMeta(await (await fetch("/api/meta")).json()); } catch (e) { /* ws meta will fill in */ }
+}
+
+// ---- charts -----------------------------------------------------------------------------
+function themeColors() {
+  const dark = document.documentElement.classList.contains("dark");
+  return { grid: dark ? "rgba(255,255,255,0.07)" : "rgba(0,0,0,0.06)", tick: dark ? "#9ca3af" : "#6b7280" };
+}
+function baseOpts() {
+  const t = themeColors();
+  return {
+    responsive: true, animation: false, interaction: { mode: "index", intersect: false },
+    plugins: { legend: { labels: { color: t.tick, boxWidth: 12, font: { size: 11 } } } },
+    scales: {
+      x: { grid: { color: t.grid }, ticks: { color: t.tick, maxTicksLimit: 8, font: { size: 10 } } },
+      y: { grid: { color: t.grid }, ticks: { color: t.tick, font: { size: 10 } } },
+    },
+  };
+}
+function line(label, color) { return { label, data: [], borderColor: color, backgroundColor: color + "22", borderWidth: 2, pointRadius: 0, tension: 0.25, fill: false }; }
+function mkChart(id, datasets) {
+  return new Chart(document.getElementById(id), { type: "line", data: { labels: [], datasets }, options: baseOpts() });
+}
+function initCharts() {
+  charts.reward = mkChart("c-reward", [line("reward", "#6366f1")]);
+  charts.progress = mkChart("c-progress", [line("mean", "#10b981"), line("max", "#f59e0b")]);
+  charts.loss = mkChart("c-loss", [line("critic", "#ef4444"), line("actor", "#3b82f6")]);
+  charts.tput = mkChart("c-tput", [line("env steps/s", "#8b5cf6"), line("updates/s", "#14b8a6")]);
+  charts.alpha = mkChart("c-alpha", [line("alpha", "#ec4899")]);
+  charts.outcome = mkChart("c-outcome", [line("success", "#22c55e"), line("collision", "#ef4444"), line("stall", "#eab308")]);
+}
+function updateCharts() {
+  const rows = sample(episodes);
+  const labels = rows.map(epNum);
+  const set = (chart, series) => {
+    chart.data.labels = labels;
+    series.forEach((fn, i) => { chart.data.datasets[i].data = rows.map(fn); });
+    chart.update("none");
+  };
+  set(charts.reward, [r => field(r, "reward")]);
+  set(charts.progress, [r => progressPair(r).mean, r => progressPair(r).max]);
+  set(charts.loss, [r => num((String(r.critic_loss ?? "").split("/")[0])), r => field(r, "actor_loss")]);
+  set(charts.tput, [r => field(r, "env_steps_s"), r => field(r, "updates_s")]);
+  set(charts.alpha, [r => field(r, "alpha")]);
+  set(charts.outcome, [r => ratePair(r, "finish"), r => ratePair(r, "collision"), r => ratePair(r, "stall")]);
+}
+function refreshChartTheme() {
+  Object.values(charts).forEach(c => { c.options = baseOpts(); c.update("none"); });
+}
+
+// ---- data flow --------------------------------------------------------------------------
+function ingest(rows) {
+  for (const r of rows) episodes.push(r);
+  if (episodes.length > 60000) episodes = episodes.slice(-40000);
+  renderKpis(); updateCharts();
+  document.getElementById("footer").textContent = episodes.length + " episodes";
+}
+async function loadHistory() {
+  try {
+    const res = await fetch("/api/metrics");
+    const j = await res.json();
+    episodes = j.metrics || [];
+    renderKpis(); updateCharts();
+    document.getElementById("footer").textContent = episodes.length + " episodes (history)";
+  } catch (e) { /* ws snapshot will fill in */ }
+}
+function connect() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const ws = new WebSocket(`${proto}://${location.host}/ws`);
+  const dot = document.getElementById("status-dot"), txt = document.getElementById("status-text");
+  ws.onopen = () => { dot.className = "w-2.5 h-2.5 rounded-full bg-green-500"; txt.textContent = "live"; ws.send(JSON.stringify({ batch: parseInt(document.getElementById("batch").value) })); };
+  ws.onclose = () => { dot.className = "w-2.5 h-2.5 rounded-full bg-red-500"; txt.textContent = "disconnected"; setTimeout(connect, 2000); };
+  ws.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === "meta") { renderMeta(msg.data); }
+    else if (msg.type === "snapshot") { if (episodes.length === 0) { episodes = msg.data; renderKpis(); updateCharts(); } }
+    else if (msg.type === "episodes") { ingest(msg.data); }
+  };
+  window._ws = ws;
+}
+
+// ---- controls ---------------------------------------------------------------------------
+document.getElementById("batch").addEventListener("change", (e) => {
+  if (window._ws && window._ws.readyState === 1) window._ws.send(JSON.stringify({ batch: parseInt(e.target.value) }));
+});
+function applyTheme(dark) {
+  document.documentElement.classList.toggle("dark", dark);
+  document.documentElement.classList.toggle("light", !dark);
+  document.getElementById("theme-icon").textContent = dark ? "☀️" : "🌙";
+  localStorage.setItem("metis-theme", dark ? "dark" : "light");
+  refreshChartTheme();
+}
+document.getElementById("theme").addEventListener("click", () => applyTheme(!document.documentElement.classList.contains("dark")));
+
+// ---- boot -------------------------------------------------------------------------------
+applyTheme(localStorage.getItem("metis-theme") === "dark");
+initCharts();
+loadMeta();
+loadHistory().then(connect);
+</script>
+</body>
+</html>

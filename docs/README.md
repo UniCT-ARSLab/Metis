@@ -33,6 +33,8 @@ terminal conditions, validation steps, training commands, and an inference comma
   replay prefill, and behavior cloning.
 - [Exporting policies](guides/exporting-policies.md) covers Keras bundles, legacy H5
   files, TensorFlow Lite, ONNX, and deployment metadata.
+- [Monitoring training](guides/monitoring-training.md) covers the optional live
+  dashboard, metric fields, and SAC gradient clipping.
 - [Adding an RL algorithm](guides/adding-an-rl-algorithm.md) explains backend
   registration, collectors, checkpoints, and required tests.
 - [Extending the Godot side](guides/extending-godot.md) shows how to add observation,
@@ -58,6 +60,7 @@ Metis currently supports:
 - Inspector-configured observations and rewards;
 - scenario events, progress providers, curriculum, and seeded resets;
 - manual demonstrations, full checkpoints, replay snapshots, and best-policy tracking;
+- an optional local dashboard for live episode metrics;
 - real-time or lockstep inference;
 - Keras, TensorFlow Lite, and optional ONNX policy artifacts;
 - Linux CPU/CUDA and Apple Silicon with TensorFlow Metal.

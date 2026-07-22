@@ -61,6 +61,8 @@ from core.training import (
     apply_ready_best_checkpoint,
     add_collector_arguments,
     add_log_format_argument,
+    add_dashboard_arguments,
+    maybe_start_dashboard,
     add_lockstep_tuning_arguments,
     add_parallel_env_arguments,
     add_godot_render_argument,
@@ -139,6 +141,7 @@ def parse_args():
     add_parallel_env_arguments(parser)
     add_lockstep_tuning_arguments(parser)
     add_log_format_argument(parser)
+    add_dashboard_arguments(parser)
     add_tensorflow_runtime_arguments(parser, include_compile_learner=True)
     add_godot_render_argument(parser)
     return parser.parse_args()
@@ -864,6 +867,7 @@ def main():
     validate_async_arguments(args)
     best_tracker = BestCheckpointTracker(args, "ppo")
     describe_tensorflow_backend(args)
+    maybe_start_dashboard(args, algorithm="ppo")
     random.seed(args.env_seed_base)
     np.random.seed(args.env_seed_base)
     tf.random.set_seed(args.env_seed_base)

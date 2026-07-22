@@ -98,7 +98,10 @@ func _on_episode_reset_completed(_seed:int) -> void:
 		return
 	target.linear_velocity = Vector3.ZERO
 	target.angular_velocity = Vector3.ZERO
-	target.freeze = false
+	# Keep the target immovable while only REACHING: a solid kinematic arm would otherwise shove
+	# the dynamic glass (and its GraspPoint) out of reach, so the reach target could never be hit.
+	# Grasping needs it dynamic (to lift), so only freeze it for reaching.
+	target.freeze = arm.task_mode == URDFRobotArmAgentBody.TaskMode.REACHING
 	target.sleeping = false
 	_target_waiting_for_reset_completion = false
 

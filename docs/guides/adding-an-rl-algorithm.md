@@ -187,6 +187,16 @@ environment steps, transition count, replay or rollout size, actual update count
 primary losses, action statistics, and async throughput. A zero loss must be
 distinguishable from an episode in which no update ran.
 
+Send episode output through `core.training.print_episode_metrics()` and register
+`add_dashboard_arguments()` plus `maybe_start_dashboard()` in the backend entry point.
+This keeps the optional dashboard out of the learning loop while giving terminal logs
+and monitoring the same source values.
+
+Reuse shared metric keys when their meaning matches: `reward`, `progress`,
+`critic_loss`, `actor_loss`, `env_steps_s`, `updates_s`, `alpha`, `finish`,
+`collision`, and `stall`. New fields are preserved by the metrics API even when the
+bundled page does not chart them yet.
+
 ## 12. Tests before documentation
 
 Cover at least:
@@ -200,6 +210,7 @@ Cover at least:
 - async policy versions and worker shutdown;
 - dispatch through `train.py`;
 - loading through `run.py`.
+- episode metrics reaching a registered sink without changing terminal formatting.
 
 Run:
 

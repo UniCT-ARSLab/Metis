@@ -64,6 +64,8 @@ from core.training import (
     add_lockstep_tuning_arguments,
     add_parallel_env_arguments,
     add_log_format_argument,
+    add_dashboard_arguments,
+    maybe_start_dashboard,
     add_godot_render_argument,
     add_tensorflow_runtime_arguments,
     build_async_worker,
@@ -209,6 +211,7 @@ def parse_args(trainer_variant):
     add_opponent_pool_arguments(parser)
     add_best_checkpoint_arguments(parser)
     add_log_format_argument(parser)
+    add_dashboard_arguments(parser)
     add_tensorflow_runtime_arguments(parser, include_compile_learner=True)
     add_godot_render_argument(parser)
     args = parser.parse_args()
@@ -1558,6 +1561,7 @@ def main(trainer_variant):
     validate_async_arguments(args)
     best_tracker = BestCheckpointTracker(args, args.trainer_variant)
     describe_tensorflow_backend(args)
+    maybe_start_dashboard(args)
     print(f"Deterministic trainer variant: {args.trainer_variant}", flush=True)
     random.seed(args.env_seed_base)
     np.random.seed(args.env_seed_base)

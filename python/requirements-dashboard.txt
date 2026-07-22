@@ -1,0 +1,3 @@
+-r requirements.txt
+flask==3.0.3
+flask-sock==0.7.0
