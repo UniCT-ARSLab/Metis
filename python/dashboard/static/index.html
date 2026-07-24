@@ -42,6 +42,7 @@
         <span id="status-dot" class="w-2.5 h-2.5 rounded-full bg-gray-400"></span>
         <span id="status-text" class="text-gray-500 dark:text-gray-400">connecting…</span>
       </div>
+      <span id="elapsed" class="text-gray-500 dark:text-gray-400 tabular-nums hidden sm:inline" title="Tempo trascorso dall'avvio dell'allenamento"></span>
       <label class="flex items-center gap-1.5 text-gray-500 dark:text-gray-400">
         <span class="hidden sm:inline">update every</span>
         <select id="batch" class="bg-gray-100 dark:bg-white/10 rounded-lg px-2 py-1 outline-none">
@@ -101,6 +102,7 @@
 const MAX_POINTS = 500;
 let episodes = [];
 let charts = {};
+let runStartedAt = null, runStatus = "running", runFinalElapsed = null;
 
 // ---- metric parsing (values arrive as human strings or numbers) --------------------------
 function num(v) { const n = parseFloat(v); return Number.isFinite(n) ? n : null; }
@@ -161,7 +163,26 @@ function renderMeta(m) {
   if (m.collector_mode) parts.push(chip(m.collector_mode));
   document.getElementById("meta-chips").innerHTML = parts.join("");
   if (m.scenario && m.scenario !== "?") document.title = `Metis · ${m.scenario}`;
+  if (m.started_at) runStartedAt = m.started_at;
+  if (m.status) runStatus = m.status;
+  if (m.elapsed_seconds != null) runFinalElapsed = m.elapsed_seconds;
+  tickElapsed();
 }
+function fmtDuration(s) {
+  s = Math.max(0, Math.floor(s));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+}
+function tickElapsed() {
+  const el = document.getElementById("elapsed");
+  if (!el) return;
+  let secs = null;
+  if (runStatus === "finished" && runFinalElapsed != null) secs = runFinalElapsed;
+  else if (runStartedAt) secs = Date.now() / 1000 - runStartedAt;
+  if (secs == null) { el.textContent = ""; return; }
+  el.textContent = "⏱ " + fmtDuration(secs) + (runStatus === "finished" ? " · done" : "");
+}
+setInterval(tickElapsed, 1000);
 async function loadMeta() {
   try { renderMeta(await (await fetch("/api/meta")).json()); } catch (e) { /* ws meta will fill in */ }
 }

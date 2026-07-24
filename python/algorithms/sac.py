@@ -1,6 +1,7 @@
 import argparse
 import os
 import random
+import time
 from queue import Empty
 
 import numpy as np
@@ -45,6 +46,7 @@ from core.training import (
     add_log_format_argument,
     add_dashboard_arguments,
     maybe_start_dashboard,
+    report_training_time,
     add_godot_render_argument,
     add_tensorflow_runtime_arguments,
     build_lockstep_user_args,
@@ -127,6 +129,13 @@ def parse_args():
         ),
     )
     parser.add_argument("--target-entropy", type=float, default=None)
+    parser.add_argument(
+        "--min-alpha",
+        type=float,
+        default=0.0,
+        help="Floor for the auto-tuned entropy coefficient alpha (0 = no floor). Prevents the "
+        "late-training entropy collapse where alpha decays too low and the critic drifts up.",
+    )
     parser.add_argument("--log-std-min", type=float, default=-20.0)
     parser.add_argument("--log-std-max", type=float, default=2.0)
     parser.add_argument("--action-smoothing", type=float, default=0.0)
@@ -368,6 +377,7 @@ def build_sac_learner_step(
     compiled=True,
     xla=False,
     tune_alpha=True,
+    min_alpha=0.0,
     grad_clip_norm=0.0,
     grad_clip_adaptive=False,
     grad_clip_k=3.0,
@@ -387,6 +397,11 @@ def build_sac_learner_step(
     action_low_tensor = tf.constant(np.asarray(action_low, dtype=np.float32).reshape(1, -1))
     action_high_tensor = tf.constant(np.asarray(action_high, dtype=np.float32).reshape(1, -1))
     target_entropy_c = tf.constant(float(target_entropy), dtype=tf.float32)
+    # Alpha floor: auto-tuned alpha can decay too low late in training, collapsing entropy and
+    # letting Q drift upward. Clamp log_alpha so alpha never falls below min_alpha.
+    alpha_floor_active = bool(min_alpha and min_alpha > 0.0)
+    log_min_alpha_c = tf.constant(
+        float(np.log(min_alpha)) if alpha_floor_active else 0.0, dtype=tf.float32)
 
     # Build slots eagerly (outside any graph) so a deferred checkpoint restore populates them
     # deterministically and no variable is created inside the traced function after resume.
@@ -490,6 +505,8 @@ def build_sac_learner_step(
                 alpha_loss = -tf.reduce_mean(log_alpha * tf.stop_gradient(log_prob + target_entropy_c))
             alpha_grads = tape.gradient(alpha_loss, [log_alpha])
             alpha_optimizer.apply_gradients(zip(alpha_grads, [log_alpha]))
+            if alpha_floor_active:
+                log_alpha.assign(tf.maximum(log_alpha, log_min_alpha_c))
         else:
             # Fixed alpha: skip the entropy-coefficient update entirely. The auto-tuner is
             # unstable on this task (alpha runs away up or collapses), so hold it constant.
@@ -685,6 +702,7 @@ def run_async_sac(
         compiled=args.tf_compile_learner,
         xla=args.tf_xla,
         tune_alpha=args.tune_alpha,
+        min_alpha=args.min_alpha,
         grad_clip_norm=args.grad_clip_norm,
         grad_clip_adaptive=args.grad_clip_adaptive,
         grad_clip_k=args.grad_clip_k,
@@ -937,6 +955,7 @@ def main():
     best_tracker = BestCheckpointTracker(args, "sac")
     describe_tensorflow_backend(args)
     dashboard = maybe_start_dashboard(args, algorithm="sac")
+    training_start_time = time.monotonic()
     random.seed(args.env_seed_base)
     np.random.seed(args.env_seed_base)
     tf.random.set_seed(args.env_seed_base)
@@ -1210,6 +1229,7 @@ def main():
             compiled=args.tf_compile_learner,
             xla=args.tf_xla,
             tune_alpha=args.tune_alpha,
+            min_alpha=args.min_alpha,
             grad_clip_norm=args.grad_clip_norm,
             grad_clip_adaptive=args.grad_clip_adaptive,
             grad_clip_k=args.grad_clip_k,
@@ -1584,6 +1604,7 @@ def main():
         else:
             print("Training state was not initialized; no checkpoint was written.", flush=True)
     finally:
+        report_training_time(dashboard, training_start_time)
         best_tracker.close()
         if stepper is not None:
             stepper.close()

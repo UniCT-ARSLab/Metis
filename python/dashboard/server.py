@@ -13,6 +13,7 @@ WebSocket protocol (JSON text frames):
 """
 import json
 import threading
+import time
 from collections import deque
 from pathlib import Path
 
@@ -24,6 +25,8 @@ class DashboardServer:
         self._history = deque(maxlen=int(history))
         self._clients = {}  # ws -> {"batch": int, "buf": list}
         self._meta = dict(meta or {})  # run info: algorithm, scenario, agents, envs, ...
+        self._meta.setdefault("started_at", time.time())  # epoch; client ticks a live timer off it
+        self._meta.setdefault("status", "running")
         self._lock = threading.Lock()
         self._thread = None
 

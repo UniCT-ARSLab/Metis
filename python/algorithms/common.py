@@ -4,6 +4,7 @@ import platform
 import random
 import sys
 import sysconfig
+import time
 from pathlib import Path
 from queue import Empty
 
@@ -66,6 +67,7 @@ from core.training import (
     add_log_format_argument,
     add_dashboard_arguments,
     maybe_start_dashboard,
+    report_training_time,
     add_godot_render_argument,
     add_tensorflow_runtime_arguments,
     build_async_worker,
@@ -1561,7 +1563,8 @@ def main(trainer_variant):
     validate_async_arguments(args)
     best_tracker = BestCheckpointTracker(args, args.trainer_variant)
     describe_tensorflow_backend(args)
-    maybe_start_dashboard(args)
+    dashboard = maybe_start_dashboard(args)
+    training_start_time = time.monotonic()
     print(f"Deterministic trainer variant: {args.trainer_variant}", flush=True)
     random.seed(args.env_seed_base)
     np.random.seed(args.env_seed_base)
@@ -2307,6 +2310,7 @@ def main(trainer_variant):
         else:
             print("Training state was not initialized; no checkpoint was written.", flush=True)
     finally:
+        report_training_time(dashboard, training_start_time)
         best_tracker.close()
         if stepper is not None:
             stepper.close()

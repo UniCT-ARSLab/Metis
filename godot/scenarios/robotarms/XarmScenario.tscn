@@ -46,9 +46,10 @@ size = Vector3(0.13, 0.12, 0.24)
 [sub_resource type="BoxShape3D" id="BoxShape3D_dw0os"]
 size = Vector3(0.13, 0.12, 0.24)
 
-[node name="XarmScenario" type="Node3D" unique_id=575438428 node_paths=PackedStringArray("target_spawns")]
+[node name="XarmScenario" type="Node3D" unique_id=575438428 node_paths=PackedStringArray("target_spawns", "target_spawns_root")]
 script = ExtResource("1_m16lm")
 target_spawns = [NodePath("Spawns/Marker3D"), NodePath("Spawns/Marker3D2"), NodePath("Spawns/Marker3D3"), NodePath("Spawns/Marker3D4"), NodePath("Spawns/Marker3D5"), NodePath("Spawns/Marker3D6"), NodePath("Spawns/Marker3D7"), NodePath("Spawns/Marker3D8")]
+target_spawns_root = NodePath("Spawns")
 
 [node name="BridgeServer" type="Node" parent="." unique_id=831052347]
 script = ExtResource("1_jfawp")
@@ -170,6 +171,21 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.20857948, 0.12542307, -0.02
 [node name="Marker3D5" type="Marker3D" parent="Spawns" unique_id=720042448]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.20857948, 0.12542307, -0.07385257)
 
+[node name="Marker3D21" type="Marker3D" parent="Spawns" unique_id=1672307945]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.26018572, 0.12542307, 0.07814151)
+
+[node name="Marker3D22" type="Marker3D" parent="Spawns" unique_id=528787388]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.26018572, 0.12542307, 0.03946642)
+
+[node name="Marker3D23" type="Marker3D" parent="Spawns" unique_id=384057309]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.26018572, 0.12542307, 0.014478788)
+
+[node name="Marker3D24" type="Marker3D" parent="Spawns" unique_id=1453713590]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.26018572, 0.12542307, -0.029518962)
+
+[node name="Marker3D25" type="Marker3D" parent="Spawns" unique_id=1901765550]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.26018572, 0.12542307, -0.07385257)
+
 [node name="Marker3D6" type="Marker3D" parent="Spawns" unique_id=1049433676]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.18545917, 0.12542307, -0.07385257)
 
@@ -178,3 +194,39 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.18545917, 0.12542307, 0.090
 
 [node name="Marker3D8" type="Marker3D" parent="Spawns" unique_id=2008720210]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.18545917, 0.12542307, 0.021793649)
+
+[node name="Marker3D9" type="Marker3D" parent="Spawns" unique_id=2008720211]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.225, 0.12542307, 0.02)
+
+[node name="Marker3D10" type="Marker3D" parent="Spawns" unique_id=2008720212]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.225, 0.12542307, 0.07)
+
+[node name="Marker3D11" type="Marker3D" parent="Spawns" unique_id=2008720213]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.225, 0.12542307, -0.05)
+
+[node name="Marker3D12" type="Marker3D" parent="Spawns" unique_id=2008720214]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.17, 0.12542307, 0.02)
+
+[node name="Marker3D13" type="Marker3D" parent="Spawns" unique_id=2008720215]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.17, 0.12542307, 0.07)
+
+[node name="Marker3D14" type="Marker3D" parent="Spawns" unique_id=2008720216]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.17, 0.12542307, -0.05)
+
+[node name="Marker3D15" type="Marker3D" parent="Spawns" unique_id=2008720217]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.2, 0.18, 0.02)
+
+[node name="Marker3D16" type="Marker3D" parent="Spawns" unique_id=2008720218]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.2, 0.18, 0.07)
+
+[node name="Marker3D17" type="Marker3D" parent="Spawns" unique_id=2008720219]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.2, 0.18, -0.05)
+
+[node name="Marker3D18" type="Marker3D" parent="Spawns" unique_id=2008720220]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.2, 0.15, 0.02)
+
+[node name="Marker3D19" type="Marker3D" parent="Spawns" unique_id=2008720221]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.2, 0.15, 0.07)
+
+[node name="Marker3D20" type="Marker3D" parent="Spawns" unique_id=2008720222]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.2, 0.15, -0.05)

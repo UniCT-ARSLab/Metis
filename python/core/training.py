@@ -1208,6 +1208,24 @@ def maybe_start_dashboard(args, algorithm=None):
     return server
 
 
+def report_training_time(dashboard, start_monotonic):
+    """Print the total wall-clock training time and freeze the dashboard timer. Call once from
+    the trainer's finally block so it runs on both normal completion and error/interrupt.
+    Generic across algorithms -- every backend should call this."""
+    elapsed = time.monotonic() - start_monotonic
+    hours, remainder = divmod(int(elapsed), 3600)
+    minutes, seconds = divmod(remainder, 60)
+    print(
+        f"Training wall-clock time: {hours:02d}:{minutes:02d}:{seconds:02d} ({elapsed:.1f}s)",
+        flush=True,
+    )
+    if dashboard is not None:
+        try:
+            dashboard.set_meta(status="finished", elapsed_seconds=round(elapsed, 1))
+        except Exception:
+            pass
+
+
 def print_episode_metrics(episode, sections, log_format="pretty"):
     normalized = [
         (name, [(str(key), str(value)) for key, value in metrics])
