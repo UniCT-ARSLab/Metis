@@ -16,6 +16,17 @@
   .brand-logo { height: 26px; width: auto; display: block; }
   /* Logo artwork is white; invert it so it stays legible on the light-theme header. */
   html:not(.dark) .brand-logo { filter: invert(1) brightness(0.9); }
+  .info { position: relative; display: inline-flex; align-items: center; justify-content: center;
+    width: 15px; height: 15px; border-radius: 50%; font-size: 10px; font-style: italic; font-weight: 700;
+    cursor: help; background: rgba(0,0,0,0.08); color: #6b7280; user-select: none; flex: none; }
+  .dark .info { background: rgba(255,255,255,0.12); color: #9ca3af; }
+  .info .tip { position: absolute; z-index: 30; top: 150%; left: 0; width: 250px; padding: 9px 11px;
+    border-radius: 8px; background: #111827; color: #e5e7eb; font-size: 11px; font-weight: 400;
+    font-style: normal; line-height: 1.4; opacity: 0; visibility: hidden; transition: opacity .12s;
+    box-shadow: 0 8px 24px rgba(0,0,0,.28); pointer-events: none; text-align: left; }
+  .dark .info .tip { background: #0b1220; border: 1px solid rgba(255,255,255,0.12); }
+  .info:hover .tip, .info:focus .tip { opacity: 1; visibility: visible; }
+  .info .tip b { color: #a5b4fc; font-weight: 600; }
 </style>
 </head>
 <body class="bg-gray-50 text-gray-800 dark:bg-[#0b1220] dark:text-gray-100 min-h-screen">
@@ -53,22 +64,34 @@
 
   <section class="grid grid-cols-1 lg:grid-cols-2 gap-5">
     <div class="card bg-white dark:bg-white/5 border border-gray-200 dark:border-white/10 p-5">
-      <h3 class="text-sm font-semibold mb-3">Reward</h3><canvas id="c-reward"></canvas>
+      <h3 class="text-sm font-semibold mb-3 flex items-center gap-1.5">Reward
+        <span class="info" tabindex="0">i<span class="tip">The episode return reported by the trainer. Follow its trend across many episodes rather than judging one sample: exploration, random resets, and multiple agents can make individual values noisy. <b>The absolute scale and sign are task-specific</b>, so a negative return does not automatically mean that learning has failed.</span></span>
+      </h3><canvas id="c-reward"></canvas>
     </div>
     <div class="card bg-white dark:bg-white/5 border border-gray-200 dark:border-white/10 p-5">
-      <h3 class="text-sm font-semibold mb-3">Progress (mean / max)</h3><canvas id="c-progress"></canvas>
+      <h3 class="text-sm font-semibold mb-3 flex items-center gap-1.5">Progress (mean / max)
+        <span class="info" tabindex="0">i<span class="tip">Progress is defined by the Godot scenario and usually normalized from 0 to 1. <b>Mean</b> summarizes the controlled agents, while <b>max</b> shows the best result in that episode. A rising mean indicates broader improvement; a high max with a low mean means success is still occasional. Confirm the exact meaning with the scene's ProgressProvider.</span></span>
+      </h3><canvas id="c-progress"></canvas>
     </div>
     <div class="card bg-white dark:bg-white/5 border border-gray-200 dark:border-white/10 p-5">
-      <h3 class="text-sm font-semibold mb-3">Losses (critic / actor)</h3><canvas id="c-loss"></canvas>
+      <h3 class="text-sm font-semibold mb-3 flex items-center gap-1.5">Losses (critic / actor)
+        <span class="info" tabindex="0">i<span class="tip"><b>Critic loss</b> measures value-target fitting; <b>actor loss</b> is the policy objective optimized by actor-critic methods. Their scale and even the actor loss sign depend on the algorithm and reward scale. Look for sustained instability, rapid growth, or non-finite values rather than a universal target number. Short spikes can be normal after new experience enters training.</span></span>
+      </h3><canvas id="c-loss"></canvas>
     </div>
     <div class="card bg-white dark:bg-white/5 border border-gray-200 dark:border-white/10 p-5">
-      <h3 class="text-sm font-semibold mb-3">Throughput (env steps/s · updates/s)</h3><canvas id="c-tput"></canvas>
+      <h3 class="text-sm font-semibold mb-3 flex items-center gap-1.5">Throughput (env steps/s · updates/s)
+        <span class="info" tabindex="0">i<span class="tip"><b>Environment steps/s</b> measures simulation decisions collected each second; <b>updates/s</b> measures learner optimization steps. These values describe speed, not policy quality. Compare them after warmup under the same configuration. A persistent drop can point to slower Godot instances, rendering overhead, queue pressure, checkpoint work, or a learner bottleneck.</span></span>
+      </h3><canvas id="c-tput"></canvas>
     </div>
     <div class="card bg-white dark:bg-white/5 border border-gray-200 dark:border-white/10 p-5">
-      <h3 class="text-sm font-semibold mb-3">Alpha (entropy coeff)</h3><canvas id="c-alpha"></canvas>
+      <h3 class="text-sm font-semibold mb-3 flex items-center gap-1.5">Alpha (entropy coeff)
+        <span class="info" tabindex="0">i<span class="tip">SAC's learned entropy temperature. A higher alpha gives more weight to stochastic exploration; a lower alpha favors the reward objective and a more concentrated policy. <b>There is no universal ideal value</b>: interpret it together with entropy, rewards, and action behavior. Abrupt runaway growth or an early collapse toward zero may indicate unstable temperature tuning.</span></span>
+      </h3><canvas id="c-alpha"></canvas>
     </div>
     <div class="card bg-white dark:bg-white/5 border border-gray-200 dark:border-white/10 p-5">
-      <h3 class="text-sm font-semibold mb-3">Outcomes (success · collision · stall)</h3><canvas id="c-outcome"></canvas>
+      <h3 class="text-sm font-semibold mb-3 flex items-center gap-1.5">Outcomes (success · collision · stall)
+        <span class="info" tabindex="0">i<span class="tip">Rates reported for the controlled agents in each completed episode. <b>Success</b> means the scene emitted its finish condition; <b>collision</b> and <b>stall</b> reflect scene-defined terminal diagnostics. Healthy training usually raises success while reducing avoidable failures, but the categories are not guaranteed to be mutually exclusive. Check the scenario event rules for their exact meaning.</span></span>
+      </h3><canvas id="c-outcome"></canvas>
     </div>
   </section>
   <p class="text-xs text-gray-400 text-center" id="footer">no data yet</p>
@@ -105,9 +128,10 @@ function sample(arr) {
 }
 
 // ---- KPI cards --------------------------------------------------------------------------
-function kpi(label, value, sub) {
+function kpi(label, value, sub, tip) {
+  const info = tip ? `<span class="info" tabindex="0">i<span class="tip">${tip}</span></span>` : "";
   return `<div class="card bg-white dark:bg-white/5 border border-gray-200 dark:border-white/10 p-4">
-    <div class="text-xs uppercase tracking-wide text-gray-400">${label}</div>
+    <div class="text-xs uppercase tracking-wide text-gray-400 flex items-center gap-1.5">${label}${info}</div>
     <div class="text-2xl font-semibold mt-1">${value}</div>
     <div class="text-xs text-gray-400 mt-0.5">${sub || ""}</div></div>`;
 }
@@ -116,12 +140,12 @@ function renderKpis() {
   const last = episodes[episodes.length - 1] || {};
   const p = progressPair(last);
   document.getElementById("kpis").innerHTML =
-    kpi("Episode", epNum(last), (last.policy_version !== undefined ? "policy v" + last.policy_version : "")) +
-    kpi("Reward", fmt(field(last, "reward")), "last") +
-    kpi("Progress max", fmt(p.max), "of 1.0") +
-    kpi("Alpha", fmt(field(last, "alpha"), 4), "entropy coeff") +
-    kpi("Env steps/s", fmt(field(last, "env_steps_s"), 0), "updates/s " + fmt(field(last, "updates_s"), 0)) +
-    kpi("Replay", fmt(field(last, "replay"), 0), "buffer");
+    kpi("Episode", epNum(last), (last.policy_version !== undefined ? "policy v" + last.policy_version : ""), "The latest completed episode reported by the trainer. In asynchronous collection, workers may finish at different times. Policy version identifies the collector policy when that backend reports it.") +
+    kpi("Reward", fmt(field(last, "reward")), "last", "The return reported for the latest episode. Compare its moving trend and evaluation results; one value may be noisy, and its scale is defined entirely by the scenario.") +
+    kpi("Progress max", fmt(p.max), "of 1.0", "The highest scene-defined progress reported in the latest episode. A value of 1 means completion only when the scenario uses a normalized ProgressProvider with that convention.") +
+    kpi("Alpha", fmt(field(last, "alpha"), 4), "entropy coeff", "SAC's current entropy temperature. Higher values encourage more stochastic actions; lower values put more emphasis on reward. Other algorithms may leave this field empty.") +
+    kpi("Env steps/s", fmt(field(last, "env_steps_s"), 0), "updates/s " + fmt(field(last, "updates_s"), 0), "Recent simulation decisions collected per second. The subtitle shows learner updates per second. Both are throughput measurements, not a score of policy quality.") +
+    kpi("Replay", fmt(field(last, "replay"), 0), "buffer", "Transitions currently stored in an off-policy replay buffer. Learning begins after the configured warmup, and old transitions are replaced once capacity is reached. On-policy algorithms may leave this field empty.");
 }
 
 // ---- run metadata (algorithm / scenario / agents / envs) --------------------------------
