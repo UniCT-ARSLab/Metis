@@ -57,7 +57,9 @@ from core.training import (
     AsyncWorkerErrorEvent,
     ParallelEnvStepper,
     PolicySnapshot,
+    TrainingBudget,
     BestCheckpointTracker,
+    add_training_budget_argument,
     add_best_checkpoint_arguments,
     apply_ready_best_checkpoint,
     add_collector_arguments,
@@ -92,6 +94,7 @@ def parse_args():
     parser.add_argument("--num-envs", type=int, default=1)
     parser.add_argument("--base-port", type=int, default=6200)
     parser.add_argument("--num-episodes", type=int, default=500)
+    add_training_budget_argument(parser)
     parser.add_argument(
         "--max-steps-per-episode",
         type=int,
@@ -608,8 +611,10 @@ def run_async_ppo(
     checkpoint_manager,
     best_tracker,
     start_episode,
+    budget=None,
 ):
     validate_async_arguments(args)
+    budget = budget or TrainingBudget(getattr(args, "total_timesteps", 0))
     with tf.device("/CPU:0"):
         local_models = [
             build_hybrid_actor_critic(
@@ -811,12 +816,14 @@ def run_async_ppo(
             if update_batch is None:
                 metrics = None
             else:
+                budget.consume(len(update_batch["obs"]))
                 metrics = ppo_update(model, log_std, optimizer, update_batch, action_meta, args)
 
             completed += 1
             policy_version = snapshot.publish(model.get_weights(), state=log_std.numpy())
             training_metrics = [
                 ("completed", f"{completed}/{args.num_episodes}"),
+                ("total_timesteps", budget.collected),
                 ("queue", pool.events.qsize()),
                 ("policy_version", policy_version),
             ]
@@ -847,6 +854,12 @@ def run_async_ppo(
                     saved_path = save_training_checkpoint(checkpoint, checkpoint_manager, completed, args)
                     last_saved_episode = completed
                 request_best_checkpoint_evaluation(best_tracker, saved_path, completed)
+            if budget.exhausted:
+                print(
+                    f"Transition budget reached: {budget.collected}/{budget.limit}",
+                    flush=True,
+                )
+                break
     except KeyboardInterrupt:
         interrupted = True
         print("\nInterrupt received: stopping async PPO collectors...", flush=True)
@@ -866,6 +879,7 @@ def run_async_ppo(
 
 def main():
     args = parse_args()
+    budget = TrainingBudget(args.total_timesteps)
     validate_async_arguments(args)
     best_tracker = BestCheckpointTracker(args, "ppo")
     describe_tensorflow_backend(args)
@@ -1022,6 +1036,7 @@ def main():
                 checkpoint_manager,
                 best_tracker,
                 start_episode,
+                budget,
             )
             model.save_weights(args.weights_path)
             print(f"Saved weights: {args.weights_path}", flush=True)
@@ -1200,11 +1215,13 @@ def main():
 
             metrics = ppo_update(model, log_std, optimizer, update_batch, action_meta, args)
             sample_count = len(update_batch["rewards"]) if "rewards" in update_batch else len(update_batch["obs"])
+            budget.consume(sample_count)
             print_episode_metrics(episode, [
                 ("mode", [("opponent", opponent_match.label)]),
                 ("outcome", [("rewards", rewards_summary)]),
                 ("training", [
                     ("samples", sample_count),
+                    ("total_timesteps", budget.collected),
                     ("loss", f"{metrics['loss']:.5f}"),
                     ("policy_loss", f"{metrics['policy_loss']:.5f}"),
                     ("value_loss", f"{metrics['value_loss']:.5f}"),
@@ -1227,9 +1244,22 @@ def main():
                     saved_path = save_training_checkpoint(checkpoint, checkpoint_manager, episode + 1, args)
                     last_saved_episode = episode + 1
                 request_best_checkpoint_evaluation(best_tracker, saved_path, episode + 1)
+            if budget.exhausted:
+                print(
+                    f"Transition budget reached: {budget.collected}/{budget.limit}",
+                    flush=True,
+                )
+                break
 
-        if last_saved_episode != args.num_episodes:
-            save_training_checkpoint(checkpoint, checkpoint_manager, args.num_episodes, args, final=True)
+        completed_episode = last_completed_episode if last_completed_episode is not None else start_episode
+        if last_saved_episode != completed_episode:
+            save_training_checkpoint(
+                checkpoint,
+                checkpoint_manager,
+                completed_episode,
+                args,
+                final=True,
+            )
         # The evaluation requested on the last episode is still running; without this the
         # finally-block's close() cancels it and a final best can never be promoted.
         apply_ready_best_checkpoint(best_tracker, wait_timeout=args.best_final_drain_timeout)

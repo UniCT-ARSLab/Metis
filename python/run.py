@@ -47,6 +47,14 @@ import numpy as np
 import tensorflow as tf
 
 from algorithms.ppo import build_action_metadata, pack_action, split_model_outputs
+from core.evaluation import (
+    agent_succeeded,
+    build_evaluation_summary,
+    episode_agent_infos,
+    print_evaluation_summary,
+    summarize_episode_outcome,
+    write_evaluation_summary,
+)
 from core.models import build_continuous_actor, build_hybrid_actor_critic, build_sac_actor, build_shared_q_network
 from core.policy_artifact import (
     POLICY_MODEL_FILENAME,
@@ -63,10 +71,6 @@ from core.training import (
 )
 from envs.process_manager import GodotProcessManager
 from envs.scenario import ScenarioGymEnv
-
-
-SUCCESS_EVENTS = {"level_cleared", "target_reached", "finish_reached", "goal_scored", "success"}
-SUCCESS_TERMINAL_REASONS = SUCCESS_EVENTS
 
 
 def parse_args(argv=None):
@@ -442,76 +446,12 @@ def load_policy(model, args, algorithm):
     )
 
 
-def episode_agent_infos(info, multi_agent):
-    if multi_agent:
-        return [item for item in info.get("per_agent_infos", []) if isinstance(item, dict)]
-    agent_info = info.get("agent_info", {})
-    return [agent_info] if isinstance(agent_info, dict) else []
-
-
-def agent_succeeded(agent_info):
-    events = agent_info.get("events", {})
-    successful_event = isinstance(events, dict) and any(
-        isinstance(events.get(name, 0.0), (bool, int, float, np.number))
-        and float(events.get(name, 0.0)) > 0.0
-        for name in SUCCESS_EVENTS
-    )
-    return (
-        bool(agent_info.get("target_reached", False))
-        or bool(agent_info.get("finish_reached", False))
-        or str(agent_info.get("terminal_reason", "")) in SUCCESS_TERMINAL_REASONS
-        or successful_event
-    )
-
-
-def summarize_episode_outcome(info, multi_agent):
-    agent_infos = episode_agent_infos(info, multi_agent)
-    successes = sum(int(agent_succeeded(agent_info)) for agent_info in agent_infos)
-    reasons = [
-        str(agent_info.get("terminal_reason"))
-        for agent_info in agent_infos
-        if agent_info.get("terminal_reason")
-    ]
-    return successes, len(agent_infos), reasons
-
-
-def build_evaluation_summary(rewards, steps, successes, trials):
-    if not rewards:
-        return None
-    reward_values = np.asarray(rewards, dtype=np.float32)
-    step_values = np.asarray(steps, dtype=np.float32)
-    return {
-        "episodes": len(rewards),
-        "successes": int(successes),
-        "trials": int(trials),
-        "success_rate": float(successes / max(trials, 1)),
-        "reward_mean": float(np.mean(reward_values)),
-        "reward_min": float(np.min(reward_values)),
-        "reward_max": float(np.max(reward_values)),
-        "steps_mean": float(np.mean(step_values)),
-        "steps_min": int(np.min(step_values)),
-        "steps_max": int(np.max(step_values)),
-    }
-
-
 def emit_evaluation_summary(args, rewards, steps, successes, trials):
     summary = build_evaluation_summary(rewards, steps, successes, trials)
     if summary is None:
         return None
-    print(
-        "Evaluation summary\n"
-        f"  episodes  {summary['episodes']}\n"
-        f"  success   {summary['successes']}/{summary['trials']} ({summary['success_rate']:.2%})\n"
-        f"  reward    mean:{summary['reward_mean']:.4f} "
-        f"range:[{summary['reward_min']:.4f},{summary['reward_max']:.4f}]\n"
-        f"  steps     mean:{summary['steps_mean']:.1f} "
-        f"range:[{summary['steps_min']},{summary['steps_max']}]",
-        flush=True,
-    )
-    if args.summary_json:
-        summary_path = Path(args.summary_json)
-        summary_path.parent.mkdir(parents=True, exist_ok=True)
-        summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print_evaluation_summary(summary)
+    write_evaluation_summary(args.summary_json, summary)
     return summary
 
 

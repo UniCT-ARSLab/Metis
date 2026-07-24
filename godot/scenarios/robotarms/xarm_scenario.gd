@@ -62,21 +62,28 @@ func _on_episode_reset_started(_seed:int) -> void:
 	var target_pool_size := spawn_pool.size()
 	var joint_jitter_degrees := 0.0
 
-	# Curriculum on the success radius. workspace_scale=0.5, so the progress reward saturates
-	# ~7cm from target; making the final radius 3cm meant the +30 goal almost never fired and
-	# the arm never learned to close the last stretch (~4% success). End at 5cm so the goal is
-	# reachable and teaches closing in; tighten later once success is high.
+	# Curriculum on the success radius. Coarse first (easy to hit + earn the +30 goal), then
+	# progressively tighter so the arm learns to stop ON the target, not just within 5cm. With
+	# terminate_on_success the radius is where the arm stops, so tightening it moves the stop point
+	# onto the target; the dense ProximityScenarioReward pulls it through the final approach.
+	# workspace_scale=0.5.
 	if _training_episode < 300:
 		target_pool_size = maxi(1, mini(easy_target_count, spawn_pool.size()))
 		arm.success_distance = 0.08
 	elif _training_episode < 800:
-		arm.success_distance = 0.065
+		arm.success_distance = 0.06
 	elif _training_episode < 1500:
 		joint_jitter_degrees = 2.0
-		arm.success_distance = 0.055
+		arm.success_distance = 0.05
+	elif _training_episode < 2500:
+		joint_jitter_degrees = 3.0
+		arm.success_distance = 0.04
+	elif _training_episode < 3500:
+		joint_jitter_degrees = 4.0
+		arm.success_distance = 0.03
 	else:
 		joint_jitter_degrees = 5.0
-		arm.success_distance = 0.05
+		arm.success_distance = 0.025
 
 	var target_index := rng.randi_range(0, maxi(target_pool_size - 1, 0))
 	target.global_transform = spawn_pool[target_index].global_transform

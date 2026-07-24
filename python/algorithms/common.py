@@ -58,7 +58,9 @@ from core.training import (
     AsyncWorkerErrorEvent,
     ParallelEnvStepper,
     PolicySnapshot,
+    TrainingBudget,
     BestCheckpointTracker,
+    add_training_budget_argument,
     add_best_checkpoint_arguments,
     apply_ready_best_checkpoint,
     add_collector_arguments,
@@ -100,6 +102,7 @@ def parse_args(trainer_variant):
     parser.add_argument("--num-envs", type=int, default=1)
     parser.add_argument("--base-port", type=int, default=6200)
     parser.add_argument("--num-episodes", type=int, default=500)
+    add_training_budget_argument(parser)
     parser.add_argument(
         "--max-steps-per-episode",
         type=int,
@@ -1183,12 +1186,14 @@ def run_async_ddpg(
     random_action_high,
     actor_drive_indices,
     critic_warmup_target,
+    budget=None,
     critic2=None,
     target_critic2=None,
     critic2_optimizer=None,
     demo_data=None,
 ):
     validate_async_arguments(args)
+    budget = budget or TrainingBudget(getattr(args, "total_timesteps", 0))
     obs_dim = envs[0].obs_dim
     action_size = envs[0].action_size
     with tf.device("/CPU:0"):
@@ -1337,9 +1342,12 @@ def run_async_ddpg(
                 continue
             if isinstance(event, AsyncStepEvent):
                 step_events = scheduler.drain_step_events(pool, event)
+                collected_transitions = 0
                 for step_event in step_events:
                     for transition in step_event.transitions:
                         buffer.add(*transition)
+                        collected_transitions += 1
+                budget.consume(collected_transitions)
                 updates_due = scheduler.ingest(step_events)
                 updates_performed = 0
                 if len(buffer) >= max(args.replay_warmup, args.batch_size):
@@ -1381,6 +1389,12 @@ def run_async_ddpg(
                         if learner_updates % args.async_policy_publish_updates == 0:
                             snapshot.publish(actor.get_weights())
                 scheduler.record_updates(updates_performed)
+                if budget.exhausted:
+                    print(
+                        f"Transition budget reached: {budget.collected}/{budget.limit}",
+                        flush=True,
+                    )
+                    break
                 continue
 
             if not isinstance(event, AsyncEpisodeEvent):
@@ -1420,6 +1434,7 @@ def run_async_ddpg(
                 ("actions", [("mean", format_float_list(mean_action)), ("delta", format_float_list(mean_delta))]),
                 ("training", [
                     ("completed", f"{completed}/{args.num_episodes}"),
+                    ("total_timesteps", budget.collected),
                     ("queue", f"{throughput['queue_size']}/{throughput['queue_capacity']} ({throughput['queue_saturation']:.0%})"),
                     ("replay", f"{len(buffer)}/{args.replay_capacity}"),
                     *(([("protected_demos", buffer.protected_demo_count)]) if args.trainer_variant == "ddpgfd" else []),
@@ -1558,6 +1573,7 @@ def validate_variant_arguments(args):
 
 def main(trainer_variant):
     args = parse_args(trainer_variant)
+    budget = TrainingBudget(args.total_timesteps)
     apply_variant_defaults(args)
     validate_variant_arguments(args)
     validate_async_arguments(args)
@@ -1891,6 +1907,7 @@ def main(trainer_variant):
                 random_action_high,
                 actor_drive_indices,
                 critic_warmup_target,
+                budget,
                 critic2=critic2,
                 target_critic2=target_critic2,
                 critic2_optimizer=critic2_optimizer,
@@ -2131,6 +2148,7 @@ def main(trainer_variant):
                                     next_obs[agent_idx],
                                     bool(per_agent_terminated[agent_idx] or terminated),
                                 )
+                                budget.consume(1)
                             state["ep_reward"][agent_idx] += per_agent_rewards[agent_idx]
                             state["action_sum"][agent_idx] += action[agent_idx]
                             state["action_count"][agent_idx, 0] += 1.0
@@ -2143,6 +2161,7 @@ def main(trainer_variant):
                     else:
                         update_episode_diagnostics(state, info.get("agent_info", {}))
                         buffer.add(state["obs"], action, float(reward), next_obs, bool(terminated))
+                        budget.consume(1)
                         state["ep_reward"] += float(reward)
                         state["action_sum"] += action
                         state["action_count"] += 1.0
@@ -2194,6 +2213,8 @@ def main(trainer_variant):
                             soft_update(target_critic, critic, args.tau)
                             if critic2 is not None:
                                 soft_update(target_critic2, critic2, args.tau)
+                if budget.exhausted:
+                    break
 
             noise_std = max(args.exploration_noise_min, noise_std * args.exploration_noise_decay)
             rewards_summary = [
@@ -2241,6 +2262,7 @@ def main(trainer_variant):
                     ("delta", format_float_list(mean_action_delta_summary)),
                 ]),
                 ("training", [
+                    ("total_timesteps", budget.collected),
                     ("replay", f"{len(buffer)}/{args.replay_capacity}"),
                     *(([("protected_demos", buffer.protected_demo_count)]) if args.trainer_variant == "ddpgfd" else []),
                     ("critic_updates", len(critic_losses)),
@@ -2278,9 +2300,24 @@ def main(trainer_variant):
                     )
                     last_saved_episode = episode + 1
                 request_best_checkpoint_evaluation(best_tracker, saved_path, episode + 1)
+            if budget.exhausted:
+                print(
+                    f"Transition budget reached: {budget.collected}/{budget.limit}",
+                    flush=True,
+                )
+                break
 
-        if last_saved_episode != args.num_episodes:
-            save_training_checkpoint(checkpoint, checkpoint_manager, buffer, args.num_episodes, noise_std, args, final=True)
+        completed_episode = last_completed_episode if last_completed_episode is not None else start_episode
+        if last_saved_episode != completed_episode:
+            save_training_checkpoint(
+                checkpoint,
+                checkpoint_manager,
+                buffer,
+                completed_episode,
+                noise_std,
+                args,
+                final=True,
+            )
         # The evaluation requested on the last episode is still running; without this the
         # finally-block's close() cancels it and a final best can never be promoted.
         apply_ready_best_checkpoint(best_tracker, wait_timeout=args.best_final_drain_timeout)

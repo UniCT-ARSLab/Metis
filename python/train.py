@@ -22,6 +22,9 @@ BACKENDS = {
     "ppo": "algorithms.ppo",
 }
 
+SB3_BACKEND = "backends.sb3"
+SB3_ALGORITHMS = {"dqn", "ddpg", "td3", "sac", "ppo"}
+
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(
@@ -35,6 +38,12 @@ def parse_args(argv):
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
+        "--backend",
+        choices=["metis", "sb3"],
+        default="metis",
+        help="Training implementation. Metis remains the default; SB3 is an optional PyTorch backend.",
+    )
+    parser.add_argument(
         "--algorithm",
         choices=["auto", "dqn", "ddpg", "ddpg_bc", "ddpgfd", "td3", "td3_bc", "sac", "ppo"],
         default="auto",
@@ -43,7 +52,10 @@ def parse_args(argv):
     parser.add_argument(
         "--policy-path",
         default=None,
-        help="Warm-start from a Metis .keras/.h5 policy or a legacy .weights.h5 file.",
+        help=(
+            "Warm-start policy. Metis accepts Keras/H5 artifacts; the SB3 backend "
+            "accepts its native .zip model."
+        ),
     )
     parser.add_argument("--num-envs", type=int, default=1)
     parser.add_argument("--base-port", type=int, default=6200)
@@ -97,7 +109,7 @@ def parse_args(argv):
 def strip_frontend_args(argv):
     stripped = []
     skip_next = False
-    value_options = {"--algorithm", "--probe-port"}
+    value_options = {"--algorithm", "--backend", "--probe-port"}
 
     for arg in argv:
         if skip_next:
@@ -193,7 +205,7 @@ def policy_manifest_algorithm(policy_path):
 def main():
     args = parse_args(sys.argv[1:])
     try:
-        backend = select_backend(args)
+        algorithm = select_backend(args)
     except KeyboardInterrupt:
         print("\nInterrupted while probing the Godot scenario; processes were closed.", flush=True)
         return
@@ -203,8 +215,22 @@ def main():
     if not has_bool_option(backend_args, "--godot-debug") and args.godot_debug:
         backend_args.append("--godot-debug")
 
-    backend_module_name = BACKENDS[backend]
-    print(f"Using training backend: {backend} ({backend_module_name})", flush=True)
+    if args.backend == "metis":
+        backend_module_name = BACKENDS[algorithm]
+    else:
+        if algorithm not in SB3_ALGORITHMS:
+            supported = ", ".join(sorted(SB3_ALGORITHMS))
+            raise RuntimeError(
+                f"backend='sb3' does not support algorithm={algorithm!r}; "
+                f"choose one of: {supported}"
+            )
+        backend_module_name = SB3_BACKEND
+        backend_args.extend(["--algorithm", algorithm])
+
+    print(
+        f"Using training backend: {args.backend} algorithm={algorithm} ({backend_module_name})",
+        flush=True,
+    )
 
     # Keep orig_argv untouched: CUDA relaunches must return through this public CLI.
     sys.argv = [sys.argv[0], *backend_args]

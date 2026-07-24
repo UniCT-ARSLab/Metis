@@ -37,7 +37,9 @@ from core.training import (
     AsyncWorkerErrorEvent,
     ParallelEnvStepper,
     PolicySnapshot,
+    TrainingBudget,
     BestCheckpointTracker,
+    add_training_budget_argument,
     add_best_checkpoint_arguments,
     apply_ready_best_checkpoint,
     add_collector_arguments,
@@ -72,6 +74,7 @@ def parse_args():
     parser.add_argument("--num-envs", type=int, default=1)
     parser.add_argument("--base-port", type=int, default=6200)
     parser.add_argument("--num-episodes", type=int, default=500)
+    add_training_budget_argument(parser)
     parser.add_argument(
         "--max-steps-per-episode",
         type=int,
@@ -678,8 +681,10 @@ def run_async_sac(
     random_action_low,
     random_action_high,
     critic_warmup_target,
+    budget=None,
 ):
     validate_async_arguments(args)
+    budget = budget or TrainingBudget(getattr(args, "total_timesteps", 0))
     obs_dim = envs[0].obs_dim
     action_size = envs[0].action_size
     sac_learner = build_sac_learner_step(
@@ -816,9 +821,12 @@ def run_async_sac(
                 continue
             if isinstance(event, AsyncStepEvent):
                 step_events = scheduler.drain_step_events(pool, event)
+                collected_transitions = 0
                 for step_event in step_events:
                     for transition in step_event.transitions:
                         buffer.add(*transition)
+                        collected_transitions += 1
+                budget.consume(collected_transitions)
                 updates_due = scheduler.ingest(step_events)
                 updates_performed = 0
                 if len(buffer) >= max(args.replay_warmup, args.batch_size):
@@ -847,6 +855,12 @@ def run_async_sac(
                         ):
                             snapshot.publish(actor.get_weights())
                 scheduler.record_updates(updates_performed)
+                if budget.exhausted:
+                    print(
+                        f"Transition budget reached: {budget.collected}/{budget.limit}",
+                        flush=True,
+                    )
+                    break
                 continue
 
             if not isinstance(event, AsyncEpisodeEvent):
@@ -888,6 +902,7 @@ def run_async_sac(
                 ("actions", [("mean", format_float_list(mean_action)), ("delta", format_float_list(mean_delta))]),
                 ("training", [
                     ("completed", f"{completed}/{args.num_episodes}"),
+                    ("total_timesteps", budget.collected),
                     ("queue", f"{throughput['queue_size']}/{throughput['queue_capacity']} ({throughput['queue_saturation']:.0%})"),
                     ("replay", f"{len(buffer)}/{args.replay_capacity}"),
                     ("critic_updates", len(critic1_losses)),
@@ -949,6 +964,7 @@ def run_async_sac(
 
 def main():
     args = parse_args()
+    budget = TrainingBudget(args.total_timesteps)
     validate_async_arguments(args)
     if args.policy_update_every < 1:
         raise ValueError("--policy-update-every must be at least 1")
@@ -1203,6 +1219,7 @@ def main():
                 random_action_low,
                 random_action_high,
                 critic_warmup_target,
+                budget,
             )
             actor.save_weights(args.actor_weights_path)
             save_critic_weights(critic1, critic2, args)
@@ -1437,6 +1454,7 @@ def main():
                                     next_obs[agent_idx],
                                     bool(per_agent_terminated[agent_idx] or terminated),
                                 )
+                                budget.consume(1)
                             state["ep_reward"][agent_idx] += per_agent_rewards[agent_idx]
                             state["action_sum"][agent_idx] += action[agent_idx]
                             state["action_count"][agent_idx, 0] += 1.0
@@ -1449,6 +1467,7 @@ def main():
                     else:
                         update_episode_diagnostics(state, info.get("agent_info", {}))
                         buffer.add(state["obs"], action, float(reward), next_obs, bool(terminated))
+                        budget.consume(1)
                         state["ep_reward"] += float(reward)
                         state["action_sum"] += action
                         state["action_count"] += 1.0
@@ -1487,6 +1506,8 @@ def main():
                 if len(buffer) >= max(args.replay_warmup, args.batch_size) and (step_idx + 1) % args.target_update_every == 0:
                     soft_update(target_critic1, critic1, args.tau)
                     soft_update(target_critic2, critic2, args.tau)
+                if budget.exhausted:
+                    break
 
             rewards_summary = [
                 state["ep_reward"].tolist() if hasattr(state["ep_reward"], "tolist") else state["ep_reward"]
@@ -1532,6 +1553,7 @@ def main():
                     ("delta", format_float_list(mean_action_delta_summary)),
                 ]),
                 ("training", [
+                    ("total_timesteps", budget.collected),
                     ("replay", f"{len(buffer)}/{args.replay_capacity}"),
                     ("critic_updates", len(critic1_losses)),
                     ("policy_updates", len(actor_losses)),
@@ -1570,13 +1592,20 @@ def main():
                     )
                     last_saved_episode = episode + 1
                 request_best_checkpoint_evaluation(best_tracker, saved_path, episode + 1)
+            if budget.exhausted:
+                print(
+                    f"Transition budget reached: {budget.collected}/{budget.limit}",
+                    flush=True,
+                )
+                break
 
-        if last_saved_episode != args.num_episodes:
+        completed_episode = last_completed_episode if last_completed_episode is not None else start_episode
+        if last_saved_episode != completed_episode:
             save_training_checkpoint(
                 checkpoint,
                 checkpoint_manager,
                 buffer,
-                args.num_episodes,
+                completed_episode,
                 args,
                 final=True,
             )

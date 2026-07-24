@@ -10,7 +10,7 @@
   Made by  ARSLab of University of Catania 
 </p>
 <p align="center">
-  Powered by Godot Engine, Gymnasium, Keras/Tensorflow
+  Powered by Godot Engine, Gymnasium, Keras/TensorFlow, and optional Stable-Baselines3
 </p>
 
 Metis connects Godot simulations to reinforcement-learning code written with
@@ -37,6 +37,7 @@ the first time, read [Build a new agent and scenario](docs/tutorials/new-agent-a
 | Action spaces | Discrete, continuous, multi-discrete, and hybrid |
 | Observations | Methods, properties, body state, ray casts, targets, teams, and paths |
 | Rewards | Per-agent components and scenario-level components |
+| Training backends | Native Metis trainers by default; limited SB3 comparison adapter |
 | Algorithms | DQN, PPO, DDPG, DDPG+BC, DDPGfD, TD3, TD3+BC, and SAC |
 | Collection | One or more Godot processes, synchronous or asynchronous |
 | Multi-agent | Separate transitions with parameter sharing |
@@ -48,8 +49,11 @@ the first time, read [Build a new agent and scenario](docs/tutorials/new-agent-a
 | Export | Keras, TensorFlow Lite, and optional ONNX |
 | Platforms | Linux CPU/CUDA and Apple Silicon with TensorFlow Metal |
 
-Metis ships its own TensorFlow/Keras trainers. Gymnasium defines the environment
-interface; Stable-Baselines3 is not a runtime dependency.
+Metis ships its own TensorFlow/Keras trainers and uses them by default.
+Stable-Baselines3 compatibility is optional and deliberately limited: the adapter
+exists primarily to compare Metis algorithms with established PyTorch
+implementations while keeping the same Godot scene contract. It is not intended to
+replace the native backend or imply feature parity.
 
 ## How the pieces fit
 
@@ -66,7 +70,7 @@ Python owns learning and orchestration:
 - starting and stopping Godot processes;
 - exposing each process as a Gymnasium environment;
 - collecting replay or rollout data;
-- updating Keras models;
+- updating Keras models, or an optional Stable-Baselines3 model;
 - saving, evaluating, and running policies.
 
 `BridgeServer` sits between them. Godot acts as the server because it owns the
@@ -78,7 +82,8 @@ python/train.py
     |
     +-- GodotProcessManager -> one or more Godot processes
     +-- ScenarioGymEnv      -> Gymnasium interface
-    +-- algorithms/*        -> Keras learner
+    +-- algorithms/*        -> native Keras learner
+    +-- backends/sb3.py     -> optional SB3/PyTorch learner
                                 |
 Godot                           |
     BridgeServer <--------------+
@@ -130,6 +135,15 @@ will be used:
 python/.venv/bin/python -m pip install -r python/requirements-dashboard.txt
 ```
 
+Stable-Baselines3 is optional. A separate environment keeps its PyTorch dependencies
+away from the TensorFlow installation:
+
+```bash
+python3 -m venv python/.venv-sb3
+python/.venv-sb3/bin/python -m pip install --upgrade pip
+python/.venv-sb3/bin/python -m pip install -r python/requirements-sb3.txt
+```
+
 Set `GODOT_BIN` if Godot is not on `PATH`:
 
 ```bash
@@ -161,6 +175,21 @@ python/.venv/bin/python python/train.py \
   --num-episodes 2000 \
   --max-steps-per-episode 0 \
   --checkpoint-dir checkpoints/breakout_dqn_v1 \
+  --headless
+```
+
+`--backend metis` is implicit. A compatible scene can be trained with SB3:
+
+```bash
+python/.venv-sb3/bin/python python/train.py \
+  --backend sb3 \
+  --algorithm dqn \
+  --godot-project godot \
+  --godot-scene res://scenarios/breakout/breakout_scenario.tscn \
+  --num-envs 4 \
+  --total-timesteps 250000 \
+  --checkpoint-dir checkpoints/breakout_sb3_dqn \
+  --evaluation-episodes 20 \
   --headless
 ```
 
@@ -259,10 +288,60 @@ With `--algorithm auto`, Metis selects DQN for discrete spaces, DDPG for continu
 spaces, and PPO for hybrid spaces. Select other algorithms explicitly; action shape
 alone is not enough to choose the best learner for a task.
 
+The SB3 adapter supports DQN for discrete actions, PPO for discrete, continuous, or
+hybrid actions, and DDPG, TD3, or SAC for continuous actions. Hybrid PPO uses an
+explicit latent `Box`: continuous components retain their bounds and discrete
+components are decoded from logits with `argmax`. This is useful for comparison, but
+it is not the same distribution as Metis PPO's native categorical plus Gaussian
+heads.
+
+Multi-agent parameter sharing is also available when all agents have the same
+contract and end together. Each agent becomes one SB3 vector lane while actions are
+still sent to its shared Godot world in one step. Partial per-agent termination fails
+by default; `--sb3-multi-agent-partial-done reset-all` instead truncates the remaining
+agents and resets the whole world.
+
+| Capability | Native Metis | SB3 adapter |
+|---|---|---|
+| Single-agent discrete/continuous | yes | yes |
+| Hybrid actions | native PPO heads | PPO latent-Box encoding |
+| Multi-agent parameter sharing | yes | coordinated synchronous groups |
+| Simultaneous current-policy self-play | yes | yes, with coordinated termination |
+| Asynchronous collection | yes | no |
+| Historical opponent pool | yes | no |
+| Demonstrations and BC variants | yes | no |
+| Independent multi-policy learning | not yet | no |
+| Deployment artifact | Keras/TFLite/ONNX | SB3/PyTorch `.zip` |
+
 SAC clips the global gradient norm of each critic and the actor to `10.0` by default.
 Use `--grad-clip-norm 0` to disable this guard, or add `--grad-clip-adaptive` to derive
 each network's threshold from its running gradient scale while retaining the hard cap.
 The entropy-temperature update is not clipped.
+
+### Comparing Metis and SB3
+
+`python/tools/benchmark_backends.py` runs both implementations with the same Godot
+scene, seeds, transition budget, and deterministic evaluation protocol. It writes raw
+logs and metrics for every run plus aggregate JSON and CSV reports.
+
+```bash
+python/.venv/bin/python python/tools/benchmark_backends.py \
+  --name breakout_dqn \
+  --algorithm dqn \
+  --godot-project godot \
+  --godot-scene res://scenarios/breakout/breakout_scenario.tscn \
+  --godot-bin "$GODOT_BIN" \
+  --total-timesteps 250000 \
+  --seeds 100 101 102 \
+  --num-envs 4 \
+  --metis-python python/.venv/bin/python \
+  --sb3-python python/.venv-sb3/bin/python \
+  -- \
+  --batch-size 128
+```
+
+See [Benchmarking training backends](docs/guides/benchmarking-backends.md) before
+interpreting timing or reward differences.
 
 ## Episodes and decision frequency
 
@@ -292,6 +371,10 @@ a queue:
 DQN and the continuous off-policy algorithms use replay buffers and lightweight CPU
 policy copies in collector workers. PPO collects asynchronously but only updates from
 a rollout produced by one frozen policy generation.
+
+This paragraph describes the native Metis backend. The SB3 adapter always uses
+synchronized vector rollouts. Passing `--backend sb3 --collector-mode async` is
+rejected rather than silently ignored.
 
 There is one learner. On a single GPU, multiple simulators feeding one model are
 usually more useful than several learners competing for the same device. Small neural
@@ -356,6 +439,12 @@ With `--multi-agent`, each active agent contributes its own transition. Compatib
 agents share model parameters while retaining separate observations, rewards,
 terminal states, and diagnostics. Adding agents increases experience collection; it
 does not create one model per agent or select a winner among them.
+
+On the SB3 adapter, shared agents are vector lanes grouped by Godot process. The
+default `--sb3-multi-agent-partial-done error` is the safe setting for Pong, Tanks, or
+other scenarios where all competitors finish together. `reset-all` is an explicit
+change to episode semantics and should not be used in a Metis/SB3 benchmark unless the
+native scenario follows the same rule.
 
 Team scenarios can use a historical opponent pool:
 
@@ -422,6 +511,12 @@ a tie-breaker or as the primary metric when a scene exposes no success signal.
 On `Ctrl+C`, the trainer saves the latest consistent state and closes its Godot
 processes and sockets. Wait for the confirmation message before closing the terminal.
 
+The optional SB3 backend stores `ckpt-*.zip`, a small matching JSON state file, and a
+`.pkl` replay snapshot for off-policy algorithms. These are PyTorch/SB3 artifacts,
+not Keras models. Its deterministic post-training evaluation is enabled with
+`--evaluation-episodes`; the current `run.py` and export pipeline remain focused on
+Metis Keras policies.
+
 Run a policy file directly with:
 
 ```bash
@@ -467,11 +562,15 @@ Godot.
 - Agents sharing one policy must expose the same observation and action contract.
 - General independent multi-policy training is not implemented yet.
 - Asynchronous historical opponent sampling is currently limited to DQN.
+- The optional SB3 adapter is a comparison tool, not a second full Metis runtime. It
+  has synchronized collection only, no historical opponent pool, no demonstration/BC
+  pipeline, and no independent multi-policy trainer.
+- SB3 hybrid PPO uses a latent continuous encoding, and SB3 parameter sharing requires
+  coordinated group resets unless `reset-all` is requested explicitly.
 - A Keras model stores the mapping from numeric observations to actions. It does not
   contain the Godot scene, sensors, or scene-side preprocessing.
-- The trainers are Metis implementations built with TensorFlow/Keras. They are not
-  wrappers around Stable-Baselines3, and SB3 PyTorch checkpoints cannot be loaded
-  directly.
+- Native trainers and SB3 use different model and checkpoint formats. A PyTorch SB3
+  checkpoint cannot be loaded as a Keras policy.
 
 These are extension points rather than hidden assumptions. See
 [Adding an RL algorithm](docs/guides/adding-an-rl-algorithm.md) and
@@ -491,7 +590,8 @@ python/
   run.py        inference and evaluation
   recorder.py   manual demonstrations
   export.py     TFLite and ONNX export
-  algorithms/   RL backends
+  algorithms/   native TensorFlow/Keras learners
+  backends/     optional third-party learner adapters
   core/         models, replay, checkpoints, async collection, opponent pool
   dashboard/    optional local training monitor
   envs/         Gymnasium wrapper and Godot process manager
@@ -517,3 +617,71 @@ not require another training stack.
 
 
 ## References
+
+Metis is built with the following projects. These links point to their upstream
+documentation or source repositories; each project remains subject to its own license.
+
+### Runtime and simulation
+
+- [Godot Engine](https://godotengine.org/) and the
+  [Godot 4.6 documentation](https://docs.godotengine.org/en/4.6/) provide the scene,
+  physics, rendering, editor, and GDScript runtime. The included project currently uses
+  Godot's [Jolt Physics backend](https://docs.godotengine.org/en/4.6/tutorials/physics/using_jolt_physics.html).
+- [Python](https://www.python.org/) runs the training, inference, recording, export,
+  and orchestration tools.
+- [Gymnasium](https://gymnasium.farama.org/) defines the environment interface and
+  action/observation spaces. See also Towers et al.,
+  [*Gymnasium: A Standard Interface for Reinforcement Learning Environments*](https://arxiv.org/abs/2407.17032).
+- [TensorFlow](https://www.tensorflow.org/) and [Keras](https://keras.io/) implement
+  models, optimization, checkpoints, and portable policy artifacts.
+- [Stable-Baselines3](https://stable-baselines3.readthedocs.io/) provides the optional
+  reference training backend, built on [PyTorch](https://pytorch.org/).
+- [NumPy](https://numpy.org/doc/stable/) provides numerical arrays, replay storage,
+  action packing, and dataset serialization.
+
+### Optional tooling
+
+- [Flask](https://flask.palletsprojects.com/) and
+  [Flask-Sock](https://flask-sock.readthedocs.io/) serve the optional live dashboard.
+- [Chart.js](https://www.chartjs.org/docs/latest/) 4.4.3 and
+  [Tailwind CSS](https://tailwindcss.com/docs) 3.4.16 are bundled with the dashboard so
+  its browser interface works without a network connection.
+- [TensorFlow Lite](https://www.tensorflow.org/lite) is the compact TensorFlow export
+  target. [ONNX](https://onnx.ai/) export is produced through
+  [tf2onnx](https://github.com/onnx/tensorflow-onnx).
+- Linux GPU installations follow TensorFlow's
+  [CUDA pip guide](https://www.tensorflow.org/install/pip). Apple Silicon acceleration
+  uses Apple's [tensorflow-metal plugin](https://developer.apple.com/metal/tensorflow-plugin/).
+
+### Bundled Godot add-ons
+
+- [Godot URDF](https://godotengine.org/asset-library/asset/5127), originally by Askar
+  Sulaimanov and Andreas Bresser, imports robot descriptions and meshes. Metis carries
+  a modified copy with additional mimic-joint handling. Upstream development is hosted
+  on [Codeberg](https://codeberg.org/brean/godot_urdf); its BSD 3-Clause license is
+  preserved in [godot/LICENSE](godot/LICENSE).
+- [STL-IO](https://github.com/onze/godot-stl-io), by Valentin Bisson, supplies STL mesh
+  import and export for URDF assets. Its MIT license is preserved in
+  [godot/addons/stl-io/license.txt](godot/addons/stl-io/license.txt).
+- `metis_inspector` is part of Metis rather than a third-party dependency. It provides
+  the editor pickers used by observation and reward components.
+
+### Algorithm foundations
+
+The trainers are native TensorFlow/Keras implementations, not copied reference
+implementations. The main algorithmic foundations are:
+
+- Mnih et al., [*Human-level control through deep reinforcement learning*](https://doi.org/10.1038/nature14236) (DQN).
+- Lillicrap et al., [*Continuous control with deep reinforcement learning*](https://arxiv.org/abs/1509.02971) (DDPG).
+- Schulman et al., [*Proximal Policy Optimization Algorithms*](https://arxiv.org/abs/1707.06347) (PPO).
+- Fujimoto, van Hoof, and Meger,
+  [*Addressing Function Approximation Error in Actor-Critic Methods*](https://arxiv.org/abs/1802.09477) (TD3).
+- Haarnoja et al.,
+  [*Soft Actor-Critic: Off-Policy Maximum Entropy Deep Reinforcement Learning with a Stochastic Actor*](https://arxiv.org/abs/1801.01290) (SAC).
+- Vecerik et al.,
+  [*Leveraging Demonstrations for Deep Reinforcement Learning on Robotics Problems with Sparse Rewards*](https://arxiv.org/abs/1707.08817) (DDPG from demonstrations).
+- Fujimoto and Gu,
+  [*A Minimalist Approach to Offline Reinforcement Learning*](https://arxiv.org/abs/2106.06860) (TD3+BC).
+
+Metis itself is distributed under the [Apache License 2.0](LICENSE). Attribution and
+the suggested project citation are recorded in [NOTICE](NOTICE).

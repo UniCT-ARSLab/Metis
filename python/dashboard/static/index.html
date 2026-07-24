@@ -53,6 +53,16 @@
           <option value="50">50 ep</option>
         </select>
       </label>
+      <label class="flex items-center gap-1.5 text-gray-500 dark:text-gray-400" title="Smoothing: media mobile (EMA) per vedere il trend sotto il rumore per-episodio">
+        <span class="hidden sm:inline">smoothing</span>
+        <select id="smoothing" class="bg-gray-100 dark:bg-white/10 rounded-lg px-2 py-1 outline-none">
+          <option value="0">none</option>
+          <option value="0.6">low</option>
+          <option value="0.85">medium</option>
+          <option value="0.95">high</option>
+          <option value="0.98">max</option>
+        </select>
+      </label>
       <button id="theme" class="w-9 h-9 rounded-lg bg-gray-100 dark:bg-white/10 flex items-center justify-center" title="Toggle theme">
         <span id="theme-icon">🌙</span>
       </button>
@@ -103,6 +113,7 @@ const MAX_POINTS = 500;
 let episodes = [];
 let charts = {};
 let runStartedAt = null, runStatus = "running", runFinalElapsed = null;
+let smoothing = parseFloat(localStorage.getItem("metis-smoothing") ?? "0.85");
 
 // ---- metric parsing (values arrive as human strings or numbers) --------------------------
 function num(v) { const n = parseFloat(v); return Number.isFinite(n) ? n : null; }
@@ -210,22 +221,42 @@ function mkChart(id, datasets) {
 function initCharts() {
   charts.reward = mkChart("c-reward", [line("reward", "#6366f1")]);
   charts.progress = mkChart("c-progress", [line("mean", "#10b981"), line("max", "#f59e0b")]);
-  charts.loss = mkChart("c-loss", [line("critic", "#ef4444"), line("actor", "#3b82f6")]);
+  charts.loss = mkChart("c-loss", [line("critic1", "#ef4444"), line("critic2", "#f97316"), line("actor", "#3b82f6")]);
   charts.tput = mkChart("c-tput", [line("env steps/s", "#8b5cf6"), line("updates/s", "#14b8a6")]);
   charts.alpha = mkChart("c-alpha", [line("alpha", "#ec4899")]);
   charts.outcome = mkChart("c-outcome", [line("success", "#22c55e"), line("collision", "#ef4444"), line("stall", "#eab308")]);
+}
+// EMA smoothing so the per-episode noise (async multi-env + varied targets) doesn't hide the
+// trend. weight in [0,1): 0 = raw, higher = smoother. Nulls pass through (gaps stay gaps).
+function emaSmooth(arr, weight) {
+  if (!weight || weight <= 0) return arr;
+  const out = new Array(arr.length);
+  let ema = null;
+  for (let i = 0; i < arr.length; i++) {
+    const v = arr[i];
+    if (v == null || !Number.isFinite(v)) { out[i] = null; continue; }
+    ema = (ema == null) ? v : weight * ema + (1 - weight) * v;
+    out[i] = ema;
+  }
+  return out;
 }
 function updateCharts() {
   const rows = sample(episodes);
   const labels = rows.map(epNum);
   const set = (chart, series) => {
     chart.data.labels = labels;
-    series.forEach((fn, i) => { chart.data.datasets[i].data = rows.map(fn); });
+    series.forEach((fn, i) => {
+      chart.data.datasets[i].data = emaSmooth(rows.map(fn), smoothing);
+    });
     chart.update("none");
   };
   set(charts.reward, [r => field(r, "reward")]);
   set(charts.progress, [r => progressPair(r).mean, r => progressPair(r).max]);
-  set(charts.loss, [r => num((String(r.critic_loss ?? "").split("/")[0])), r => field(r, "actor_loss")]);
+  set(charts.loss, [
+    r => num((String(r.critic_loss ?? "").split("/")[0])),
+    r => num((String(r.critic_loss ?? "").split("/")[1])),
+    r => field(r, "actor_loss"),
+  ]);
   set(charts.tput, [r => field(r, "env_steps_s"), r => field(r, "updates_s")]);
   set(charts.alpha, [r => field(r, "alpha")]);
   set(charts.outcome, [r => ratePair(r, "finish"), r => ratePair(r, "collision"), r => ratePair(r, "stall")]);
@@ -268,6 +299,12 @@ function connect() {
 // ---- controls ---------------------------------------------------------------------------
 document.getElementById("batch").addEventListener("change", (e) => {
   if (window._ws && window._ws.readyState === 1) window._ws.send(JSON.stringify({ batch: parseInt(e.target.value) }));
+});
+document.getElementById("smoothing").value = String(smoothing);
+document.getElementById("smoothing").addEventListener("change", (e) => {
+  smoothing = parseFloat(e.target.value) || 0;
+  localStorage.setItem("metis-smoothing", e.target.value);
+  updateCharts();
 });
 function applyTheme(dark) {
   document.documentElement.classList.toggle("dark", dark);

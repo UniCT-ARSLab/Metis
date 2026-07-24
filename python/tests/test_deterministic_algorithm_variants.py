@@ -84,6 +84,39 @@ class UnifiedEntrypointTests(unittest.TestCase):
             ["python/train.py", "--num-episodes", "10", "--no-headless"],
         )
 
+    def test_sb3_backend_is_explicit_and_receives_the_selected_algorithm(self):
+        backend = SimpleNamespace(main=Mock())
+        original_argv = list(sys.argv)
+        try:
+            sys.argv = [
+                "python/train.py",
+                "--backend",
+                "sb3",
+                "--algorithm",
+                "sac",
+                "--total-timesteps",
+                "1000",
+            ]
+            with patch.object(train.importlib, "import_module", return_value=backend) as importer:
+                train.main()
+        finally:
+            forwarded_argv = list(sys.argv)
+            sys.argv = original_argv
+
+        importer.assert_called_once_with("backends.sb3")
+        backend.main.assert_called_once_with()
+        self.assertEqual(
+            forwarded_argv,
+            [
+                "python/train.py",
+                "--total-timesteps",
+                "1000",
+                "--headless",
+                "--algorithm",
+                "sac",
+            ],
+        )
+
     def test_bc_schedule_interpolates_and_clamps(self):
         self.assertEqual(scheduled_bc_weight(0, 1.0, 0.1, 100), 1.0)
         self.assertAlmostEqual(scheduled_bc_weight(50, 1.0, 0.1, 100), 0.55)

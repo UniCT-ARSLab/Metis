@@ -5,6 +5,11 @@ class_name ProgressStallScenarioReward
 @export var stalled_progress_window_steps := 90
 @export var stalled_progress_min_delta := 0.01
 @export var stalled_progress_penalty := -10.0
+## When the agent is at/near the target (progress at or above this), holding position is the goal
+## -- not a stall -- so the stall timer keeps resetting and never fires. Default 1.0 keeps the old
+## behavior (only a perfectly-maxed progress is exempt). Lower it (e.g. 0.85) for reach+hold tasks
+## where the arm should stay on target without being penalized for "no progress".
+@export_range(0.0, 1.0, 0.01) var ignore_stall_above_progress := 1.0
 
 var _best_progress := {}
 var _last_progress_step := {}
@@ -67,6 +72,14 @@ func _update_progress_stall(agent_id:String, progress:float, step:int) -> void:
 	if not _best_progress.has(agent_id):
 		_best_progress[agent_id] = progress
 		_last_progress_step[agent_id] = step
+		return
+
+	# At/near the target, holding is the objective: keep the stall timer alive so staying put is
+	# never flagged as a stall (the far-from-target stall guard below still applies otherwise).
+	if progress >= ignore_stall_above_progress:
+		_last_progress_step[agent_id] = step
+		if progress > float(_best_progress.get(agent_id, progress)):
+			_best_progress[agent_id] = progress
 		return
 
 	var best := float(_best_progress.get(agent_id, progress))

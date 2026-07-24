@@ -8,10 +8,18 @@ to the selected RL backend. Scenario-specific trainers are deliberately avoided.
 ### `python/train.py`
 
 Parses shared arguments, probes the action space when necessary, and lazily loads a
-module from `python/algorithms`.
+learner. `--backend metis` is the default and dispatches to `python/algorithms`.
+`--backend sb3` dispatches to the optional Stable-Baselines3 adapter in
+`python/backends`. Metis remains the production/default backend. SB3 compatibility is
+provided primarily for repeatable comparisons against its PyTorch implementations,
+not as a claim that both backends expose every Metis feature.
 
 `--algorithm auto` selects DQN for discrete actions, DDPG for continuous actions, and
-PPO for hybrid actions. Other algorithms are selected by name.
+PPO for hybrid actions. The selected backend then validates that contract.
+
+`--total-timesteps N` adds a transition budget to the native trainers as well as the
+SB3 adapter. With several agents, every agent transition counts. A collector may
+finish its current synchronized batch after crossing the exact number.
 
 `--policy-path` warm-starts only the policy from a Metis bundle, `.keras` model, full
 `.h5` model, or `.weights.h5` file. It does not restore optimizer, critic, replay, or
@@ -20,6 +28,10 @@ episode state.
 `--dashboard` starts the optional local metrics server on port `8770`. Change the port
 with `--dashboard-port`. The Flask dependencies are deliberately kept out of the base
 runtime and can be installed from `requirements-dashboard.txt`.
+
+`--metrics-jsonl PATH` records the same flattened episode rows without starting the
+dashboard. The backend benchmark uses this persistent stream to compare learning
+curves on a transition axis.
 
 ### `python/run.py`
 
@@ -66,6 +78,38 @@ agent IDs, episodes, and steps.
 Each backend owns its parser additions, sync and async loop, checkpoint state, and
 logs, and exposes `main()` to the dispatcher.
 
+### `python/backends/`
+
+`sb3.py` adapts the Metis scene contract to Stable-Baselines3:
+
+- `sb3_actions.py` maps one agent action to SB3's supported spaces;
+- `sb3_vec_env.py` handles independent single-agent Godot processes;
+- `sb3_multi_vec_env.py` groups shared-policy agents from the same Godot world;
+- `sb3_state.py` handles checkpoint discovery and companion state.
+
+The adapter supports DQN on discrete spaces; PPO on discrete or continuous spaces;
+and DDPG, TD3, or SAC on continuous spaces. PPO also accepts a hybrid Metis contract
+through a latent `Box` encoding. Every continuous component keeps its declared values;
+each discrete component contributes one bounded latent logit per choice and is decoded
+with `argmax`. Consequently, SB3 optimizes a Gaussian latent policy rather than Metis
+PPO's exact mixed categorical/Gaussian distribution.
+
+Multi-agent mode uses parameter sharing: each compatible agent is an SB3 vector lane,
+while all actions belonging to one Godot process are grouped into one bridge step.
+Godot worlds cannot reset one vector lane independently. The default behavior
+therefore raises if only some agents terminate. With
+`--sb3-multi-agent-partial-done reset-all`, still-active agents are marked truncated
+and the complete world resets.
+
+Collection is always synchronized from the learner's perspective, while socket waits
+for separate Godot processes may overlap in worker threads. `async` is rejected. That
+restriction is intentional: moving collection outside SB3's `learn()` loop would be a
+new trainer rather than a comparison against SB3's normal implementation.
+
+Install this optional backend from `requirements-sb3.txt`. It stores SB3/PyTorch
+models as `.zip` files and off-policy replay as `.pkl`; those files are independent
+of Metis Keras policy bundles.
+
 ### `python/core/`
 
 - `models.py`: Keras model factories and compiled inference functions;
@@ -73,7 +117,9 @@ logs, and exposes `main()` to the dispatcher.
 - `replay_buffer.py`: uniform/prioritized replay, protected demonstrations, snapshots;
 - `opponent_pool.py`: historical policy snapshots and opponent sampling;
 - `training.py`: async collection, parallel stepping, TensorFlow setup, best-policy
-  evaluation, metrics, and shared utilities.
+  evaluation, transition budgets, JSONL metrics, and shared utilities;
+- `evaluation.py`: TensorFlow-free episode and evaluation summaries shared by native
+  inference and the SB3 adapter.
 
 Core modules must not know about concrete scenes such as Cars, Tanks, or Breakout.
 
@@ -87,8 +133,9 @@ commands directly.
 
 ### `python/tools/`
 
-Contains random rollout and bridge benchmarks. These are diagnostic utilities, not
-training backends.
+Contains random rollout and bridge diagnostics plus
+`benchmark_backends.py`, which runs Metis and SB3 sequentially with common seeds,
+transition budgets, and deterministic evaluation.
 
 ### `python/dashboard/`
 
@@ -106,30 +153,46 @@ tests for its learning and transition semantics, not only an import test.
 ## Dependency direction
 
 ```text
-CLI -> algorithms -> core
- |         |          |
- +---------+--------> envs
+CLI -> algorithms (Metis) -> core
+ |          |
+ |          +---------------> envs
+ |
+ +--> backends/sb3 ----------> envs
 ```
 
-`core` does not import concrete algorithms. `envs` does not import TensorFlow. Godot
-does not depend on a Python learner class. Keeping this direction prevents circular
-imports and allows collector workers to run without owning the learner.
+`core` does not import concrete algorithms. `envs` imports neither TensorFlow nor
+PyTorch. Godot does not depend on a Python learner class. Keeping this direction
+prevents circular imports and allows collector workers to run without owning the
+learner.
 
 ## Algorithm matrix
 
-| Algorithm | Actions | Policy type | Replay | Demonstrations |
+| Algorithm | Actions | Metis | SB3 | Demonstrations in Metis |
 |---|---|---|---|---|
-| DQN | discrete | off-policy | uniform/prioritized | optional prefill |
-| PPO | discrete/continuous/hybrid | on-policy | no | no |
-| DDPG | continuous | off-policy | yes | optional prefill |
-| DDPG+BC | continuous | off-policy | yes | required |
-| DDPGfD | continuous | off-policy | prioritized | required |
-| TD3 | continuous | off-policy | yes | optional prefill |
-| TD3+BC | continuous | off-policy | yes | required |
-| SAC | continuous | off-policy | yes | optional prefill |
+| DQN | discrete | yes | yes | optional prefill |
+| PPO | discrete/continuous/hybrid | yes | discrete/continuous/hybrid encoding | no |
+| DDPG | continuous | yes | yes | optional prefill |
+| DDPG+BC | continuous | yes | no | required |
+| DDPGfD | continuous | yes | no | required |
+| TD3 | continuous | yes | yes | optional prefill |
+| TD3+BC | continuous | yes | no | required |
+| SAC | continuous | yes | yes | optional prefill |
 
 Async and multi-agent support are backend responsibilities. They cannot be inferred
 only from a model accepting batched tensors.
+
+## SB3 compatibility matrix
+
+| Capability | Metis backend | SB3 adapter |
+|---|---|---|
+| Synchronous single-agent | yes | yes |
+| Asynchronous collectors | yes | no |
+| Hybrid PPO | native mixed heads | latent Box adapter |
+| Multi-agent parameter sharing | general shared contract | coordinated group reset |
+| Simultaneous self-play | yes | shared current policy only |
+| Historical opponent sampling | yes | no |
+| Demonstration prefill and BC variants | yes | no |
+| Keras policy/export pipeline | yes | no; SB3 `.zip` |
 
 ## SAC gradient clipping
 
@@ -168,8 +231,10 @@ retention behavior, and dashboard limitations.
 ## Implementation conventions
 
 - Shared arguments keep the same name across backends.
+- `--backend metis` remains the default; optional adapters must fail clearly on
+  unsupported scene contracts.
 - Zero `max_steps` means no external step limit where the scene supports it.
-- Every training checkpoint refreshes the portable Keras policy bundle.
+- Every native training checkpoint refreshes the portable Keras policy bundle.
 - `run.py` can load a checkpoint without loading replay.
 - A full off-policy resume restores replay when a matching snapshot is available.
 - Multi-agent metrics count agents and transitions, not only environment steps.

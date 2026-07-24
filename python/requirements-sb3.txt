@@ -1,0 +1,7 @@
+# Optional, limited Stable-Baselines3 comparison backend.
+# This intentionally does not include TensorFlow: use a separate virtual environment
+# when comparing the PyTorch/SB3 and native Metis installations.
+gymnasium
+numpy
+stable-baselines3==2.8.0
+tensorboard

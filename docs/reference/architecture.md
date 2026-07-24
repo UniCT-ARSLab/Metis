@@ -5,7 +5,8 @@ Godot and Python.
 
 - Godot owns the world, physics, agents, observations, rewards, and terminal events.
 - Python owns the Gymnasium interface, data collection, replay or rollout storage,
-  TensorFlow/Keras learners, checkpoints, and evaluation.
+  native TensorFlow/Keras learners, optional learner adapters, checkpoints, and
+  evaluation.
 - A TCP bridge exchanges newline-delimited JSON messages and controls when the
   simulation advances.
 
@@ -17,7 +18,7 @@ algorithm change without embedding TensorFlow in a Godot project.
 ```text
 python/train.py
     |
-    +-- selects an algorithm
+    +-- selects a backend and algorithm
     +-- GodotProcessManager starts N processes
     +-- ScenarioGymEnv connects to each process
             |
@@ -132,6 +133,23 @@ PPO collects complete rollout generations and only trains on data produced by th
 same frozen policy version. Off-policy algorithms can mix older data through replay by
 design.
 
+The optional Stable-Baselines3 adapter uses a synchronized `VecEnv`: each Godot
+process still owns an independent scene and its socket wait can run concurrently, but
+the learner receives a vector step only after every active lane has replied. Terminal
+observations are preserved before the completed lane is reset. The adapter currently
+exists for backend comparisons and does not implement asynchronous collection.
+
+For hybrid PPO, a policy lane exposes a latent continuous `Box`. Continuous action
+components retain their bounds, while discrete components are represented by logits
+and decoded with `argmax`. This differs from the native PPO distribution and must be
+reported as part of a comparison.
+
+For multi-agent parameter sharing, one lane represents one compatible agent. Lanes
+belonging to the same Godot process are stepped and reset as a group. Coordinated
+terminal events work directly. Partial termination is rejected by default because an
+individual lane cannot reset its shared physical world; the optional `reset-all` mode
+truncates the other lanes before resetting that world.
+
 ## Metrics and live monitoring
 
 Algorithm backends build named metric sections once an episode completes.
@@ -150,7 +168,7 @@ restored on resume and should not be used as the only experiment record.
 
 ## Checkpoints, replay, and policy bundles
 
-TensorFlow checkpoints store the model variables, target networks, optimizers, and
+Native TensorFlow checkpoints store the model variables, target networks, optimizers, and
 counters registered by an algorithm. Off-policy replay is stored separately as
 `replay-<episode>.npz`. A full resume restores both.
 
@@ -160,6 +178,9 @@ counters registered by an algorithm. Off-policy replay is stored separately as
 Best-checkpoint evaluation runs from a frozen checkpoint in a separate process. The
 `best/` directory therefore contains evaluated candidates rather than the latest
 chronological state.
+
+Stable-Baselines3 uses its own PyTorch `.zip` model format and `.pkl` replay
+snapshots. It cannot be resumed or exported as if it were a native Keras bundle.
 
 ## Runtime files
 

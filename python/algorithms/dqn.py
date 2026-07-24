@@ -64,7 +64,9 @@ from core.training import (
     AsyncWorkerErrorEvent,
     ParallelEnvStepper,
     PolicySnapshot,
+    TrainingBudget,
     BestCheckpointTracker,
+    add_training_budget_argument,
     add_best_checkpoint_arguments,
     apply_ready_best_checkpoint,
     add_collector_arguments,
@@ -148,6 +150,7 @@ def parse_args():
     parser.add_argument("--num-envs", type=int, default=1)
     parser.add_argument("--base-port", type=int, default=6200)
     parser.add_argument("--num-episodes", type=int, default=500)
+    add_training_budget_argument(parser)
     parser.add_argument(
         "--max-steps-per-episode",
         type=int,
@@ -386,10 +389,12 @@ def run_async_dqn(
     start_episode,
     start_epsilon,
     learner_step,
+    budget=None,
     opponent_pool=None,
     opponent_teams=None,
 ):
     validate_async_arguments(args, supports_opponent_pool=True)
+    budget = budget or TrainingBudget(getattr(args, "total_timesteps", 0))
     obs_dim = envs[0].obs_dim
     num_actions = envs[0].num_actions
     with tf.device("/CPU:0"):
@@ -630,9 +635,12 @@ def run_async_dqn(
                 continue
             if isinstance(event, AsyncStepEvent):
                 step_events = scheduler.drain_step_events(pool, event)
+                collected_transitions = 0
                 for step_event in step_events:
                     for transition in step_event.transitions:
                         buffer.add(*transition)
+                        collected_transitions += 1
+                budget.consume(collected_transitions)
                 updates_due = scheduler.ingest(step_events)
                 updates_performed = 0
                 if len(buffer) >= max(args.replay_warmup, args.batch_size):
@@ -651,6 +659,12 @@ def run_async_dqn(
                         if update_count % args.async_policy_publish_updates == 0:
                             snapshot.publish(model.get_weights())
                 scheduler.record_updates(updates_performed)
+                if budget.exhausted:
+                    print(
+                        f"Transition budget reached: {budget.collected}/{budget.limit}",
+                        flush=True,
+                    )
+                    break
                 continue
 
             if not isinstance(event, AsyncEpisodeEvent):
@@ -686,6 +700,7 @@ def run_async_dqn(
                 ]),
                 ("training", [
                     ("completed", f"{completed}/{args.num_episodes}"),
+                    ("total_timesteps", budget.collected),
                     ("queue", f"{throughput['queue_size']}/{throughput['queue_capacity']} ({throughput['queue_saturation']:.0%})"),
                     ("replay", f"{len(buffer)}/{args.replay_capacity}"),
                     ("updates", len(losses_since_log)),
@@ -866,6 +881,7 @@ def pretrain_behavior_cloning(model, demo_data, epochs, batch_size, learning_rat
 
 def main():
     args = parse_args()
+    budget = TrainingBudget(args.total_timesteps)
     validate_async_arguments(args, supports_opponent_pool=True)
     best_tracker = BestCheckpointTracker(args, "dqn")
     describe_tensorflow_backend(args)
@@ -1081,6 +1097,7 @@ def main():
                 start_episode,
                 epsilon,
                 learner_step,
+                budget,
                 opponent_pool=opponent_pool,
                 opponent_teams=opponent_teams,
             )
@@ -1214,6 +1231,7 @@ def main():
                                     next_obs[agent_idx],
                                     bool(per_agent_terminated[agent_idx] or terminated),
                                 )
+                                budget.consume(1)
                             state["ep_reward"][agent_idx] += per_agent_rewards[agent_idx]
 
                         state["done_mask"] = per_agent_done
@@ -1233,6 +1251,7 @@ def main():
                             next_obs,
                             bool(terminated),
                         )
+                        budget.consume(1)
                         state["ep_reward"] += float(reward)
 
                     state["obs"] = next_obs
@@ -1241,6 +1260,8 @@ def main():
                     if len(buffer) >= max(args.replay_warmup, args.batch_size):
                         loss = float(learner_step(buffer, args.batch_size, 1)[0])
                         losses.append(loss)
+                if budget.exhausted:
+                    break
 
             if (episode + 1) % args.target_update_every == 0:
                 target_model.set_weights(model.get_weights())
@@ -1317,6 +1338,7 @@ def main():
                 ]),
                 ("outcome", outcome_metrics),
                 ("training", [
+                    ("total_timesteps", budget.collected),
                     ("replay", f"{len(buffer)}/{args.replay_capacity}"),
                     ("updates", len(losses)),
                     ("loss", f"{mean_loss:.5f}"),
@@ -1347,9 +1369,24 @@ def main():
                     )
                     last_saved_episode = episode + 1
                 request_best_checkpoint_evaluation(best_tracker, saved_path, episode + 1)
+            if budget.exhausted:
+                print(
+                    f"Transition budget reached: {budget.collected}/{budget.limit}",
+                    flush=True,
+                )
+                break
 
-        if last_saved_episode != args.num_episodes:
-            save_training_checkpoint(checkpoint, checkpoint_manager, buffer, args.num_episodes, epsilon, args, final=True)
+        completed_episode = last_completed_episode if last_completed_episode is not None else start_episode
+        if last_saved_episode != completed_episode:
+            save_training_checkpoint(
+                checkpoint,
+                checkpoint_manager,
+                buffer,
+                completed_episode,
+                epsilon,
+                args,
+                final=True,
+            )
         # The evaluation requested on the last episode is still running; collect it
         # instead of dropping a possibly-best result on the floor.
         apply_ready_best_checkpoint(best_tracker, wait_timeout=args.best_final_drain_timeout)

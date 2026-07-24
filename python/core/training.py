@@ -28,6 +28,44 @@ def episode_step_indices(max_steps):
     return count() if max_steps == 0 else range(max_steps)
 
 
+def add_training_budget_argument(parser):
+    parser.add_argument(
+        "--total-timesteps",
+        type=int,
+        default=0,
+        help=(
+            "Optional transition budget for this invocation. Zero keeps the existing "
+            "episode-based stopping behavior. Parallel/on-policy collection may finish "
+            "the small batch already in flight."
+        ),
+    )
+
+
+class TrainingBudget:
+    """Counts learner transitions and exposes a common optional stopping condition."""
+
+    def __init__(self, total_timesteps=0):
+        self.limit = int(total_timesteps)
+        if self.limit < 0:
+            raise ValueError("--total-timesteps cannot be negative; use 0 to disable the limit")
+        self.collected = 0
+
+    @property
+    def enabled(self):
+        return self.limit > 0
+
+    @property
+    def exhausted(self):
+        return self.enabled and self.collected >= self.limit
+
+    def consume(self, count):
+        count = int(count)
+        if count < 0:
+            raise ValueError("A training budget cannot consume a negative transition count")
+        self.collected += count
+        return self.exhausted
+
+
 def add_tensorflow_runtime_arguments(parser, *, include_compile_learner=False):
     parser.add_argument(
         "--gpu-memory-growth",
@@ -1177,6 +1215,29 @@ def add_dashboard_arguments(parser):
         help="Serve a live training dashboard (HTTP page + API + WebSocket) on --dashboard-port.",
     )
     parser.add_argument("--dashboard-port", type=int, default=8770)
+    parser.add_argument(
+        "--metrics-jsonl",
+        default=None,
+        help="Optional JSONL file receiving the same per-episode metrics as the dashboard.",
+    )
+
+
+class JsonlMetricsSink:
+    def __init__(self, path, metadata=None):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text("", encoding="utf-8")
+        self.metadata = dict(metadata or {})
+        self._lock = threading.Lock()
+
+    def __call__(self, metrics):
+        payload = dict(self.metadata)
+        payload.update(metrics)
+        payload["recorded_at"] = time.time()
+        line = json.dumps(payload, sort_keys=True, default=str)
+        with self._lock:
+            with self.path.open("a", encoding="utf-8") as stream:
+                stream.write(line + "\n")
 
 
 def maybe_start_dashboard(args, algorithm=None):
@@ -1184,14 +1245,11 @@ def maybe_start_dashboard(args, algorithm=None):
 
     Returns the server (or None) so the caller can server.set_meta(...) once the scenario is
     probed (e.g. the real agent count for multi-agent runs)."""
-    if not getattr(args, "dashboard", False):
-        return None
-    from dashboard.server import DashboardServer
-
     scene = getattr(args, "godot_scene", "") or ""
     scenario = scene.rsplit("/", 1)[-1].removesuffix(".tscn") if scene else "?"
     multi_agent = bool(getattr(args, "multi_agent", False))
     meta = {
+        "backend": getattr(args, "backend", "metis"),
         "algorithm": algorithm or getattr(args, "trainer_variant", None) or "?",
         "scenario": scenario,
         "num_envs": int(getattr(args, "num_envs", 0) or 0),
@@ -1201,6 +1259,15 @@ def maybe_start_dashboard(args, algorithm=None):
         "batch_size": int(getattr(args, "batch_size", 0) or 0),
         "max_steps": int(getattr(args, "max_steps_per_episode", 0) or 0),
     }
+    metrics_jsonl = getattr(args, "metrics_jsonl", None)
+    if metrics_jsonl:
+        register_metrics_sink(JsonlMetricsSink(metrics_jsonl, metadata=meta))
+        print(f"Episode metrics JSONL: {metrics_jsonl}", flush=True)
+
+    if not getattr(args, "dashboard", False):
+        return None
+    from dashboard.server import DashboardServer
+
     server = DashboardServer(port=int(getattr(args, "dashboard_port", 8770)), meta=meta)
     server.start()
     register_metrics_sink(server.record)

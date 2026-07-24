@@ -35,6 +35,8 @@ terminal conditions, validation steps, training commands, and an inference comma
   files, TensorFlow Lite, ONNX, and deployment metadata.
 - [Monitoring training](guides/monitoring-training.md) covers the optional live
   dashboard, metric fields, and SAC gradient clipping.
+- [Benchmarking training backends](guides/benchmarking-backends.md) compares native
+  Metis learners with the optional Stable-Baselines3 backend.
 - [Adding an RL algorithm](guides/adding-an-rl-algorithm.md) explains backend
   registration, collectors, checkpoints, and required tests.
 - [Extending the Godot side](guides/extending-godot.md) shows how to add observation,
@@ -53,7 +55,9 @@ terminal conditions, validation steps, training commands, and an inference comma
 Metis currently supports:
 
 - discrete, continuous, multi-discrete, and hybrid action spaces;
-- DQN, PPO, DDPG, DDPG+BC, DDPGfD, TD3, TD3+BC, and SAC;
+- native DQN, PPO, DDPG, DDPG+BC, DDPGfD, TD3, TD3+BC, and SAC;
+- limited Stable-Baselines3 compatibility for controlled backend comparisons,
+  including hybrid PPO encoding and coordinated multi-agent parameter sharing;
 - one or more environments with synchronous or asynchronous collection;
 - single-agent tasks and multi-agent parameter sharing;
 - simultaneous self-play and historical opponent pools;

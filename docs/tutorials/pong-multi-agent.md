@@ -259,6 +259,34 @@ not hold a collector forever.
 For Pong, keep `--physics-frames-per-step 1` unless you have explicitly tested another
 decision rate. Frame skipping changes how often the paddle can react.
 
+### Optional SB3 comparison
+
+Pong is also suitable for the limited SB3 adapter because a point terminates both
+paddles together:
+
+```bash
+python/.venv-sb3/bin/python python/train.py \
+  --backend sb3 \
+  --algorithm dqn \
+  --godot-bin /path/to/Godot \
+  --godot-project godot \
+  --godot-scene res://scenarios/pong/pong_scenario.tscn \
+  --num-envs 4 \
+  --total-timesteps 250000 \
+  --max-steps-per-episode 1500 \
+  --batch-size 128 \
+  --multi-agent \
+  --collector-mode sync \
+  --evaluation-episodes 50 \
+  --checkpoint-dir checkpoints/pong_sb3_dqn_v1 \
+  --headless
+```
+
+Each paddle is one SB3 vector lane and both lanes use the same DQN. This is
+current-policy simultaneous self-play, not historical opponent sampling. SB3
+collection remains synchronous even with several Godot processes; `async` and
+`--opponent-pool` are native Metis features.
+
 ## 9. Add historical opponents
 
 Current-vs-current self-play can cycle: a policy learns to exploit its latest opponent

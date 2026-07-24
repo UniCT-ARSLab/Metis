@@ -307,6 +307,40 @@ Keep one physics frame per action until projectile speed, cooldown, and sensor t
 are validated. A larger frame skip can let a fast missile cross a collider or leave too
 few steering decisions near walls.
 
+### Optional SB3 comparison
+
+Metis is the default backend for this task. The limited SB3 adapter can run a
+comparison because Tanks terminates every combatant when the match ends:
+
+```bash
+python/.venv-sb3/bin/python python/train.py \
+  --backend sb3 \
+  --algorithm ppo \
+  --godot-bin /path/to/Godot \
+  --godot-project godot \
+  --godot-scene res://scenarios/tanks/tanks_scenario.tscn \
+  --num-envs 4 \
+  --total-timesteps 500000 \
+  --max-steps-per-episode 1000 \
+  --batch-size 256 \
+  --ppo-epochs 4 \
+  --multi-agent \
+  --collector-mode sync \
+  --evaluation-episodes 40 \
+  --checkpoint-dir checkpoints/tank_battle_sb3_ppo_v1 \
+  --headless
+```
+
+This is not the same policy distribution as native Metis PPO. SB3 receives a latent
+continuous `Box`: the two movement values remain continuous, while the two weapon
+choices are represented by two logits and decoded with `argmax`. Startup prints
+`sb3_action=hybrid_box(...)` to make that distinction visible.
+
+SB3 does not support Metis's asynchronous collector or historical opponent pool. It
+does provide current-policy simultaneous self-play here because all four lanes share
+the same policy. Keep the default `--sb3-multi-agent-partial-done error`; a partial
+death should be handled by the match rules rather than silently resetting the world.
+
 ## 11. Add an opponent pool
 
 Once the current policy can navigate, hit targets, and finish matches against itself,

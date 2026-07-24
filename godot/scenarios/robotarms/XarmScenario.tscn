@@ -11,6 +11,7 @@
 [ext_resource type="Script" uid="uid://bmmjchpjospjo" path="res://scripts/agent/scenario_reward_components/ProgressDeltaScenarioReward.gd" id="8_ywys0"]
 [ext_resource type="Script" uid="uid://5rg0xs5vr24r" path="res://scripts/agent/scenario_reward_components/ProgressStallScenarioReward.gd" id="9_qy6q5"]
 [ext_resource type="Script" uid="uid://b0mpnu83er6il" path="res://scripts/agent/scenario_reward_components/EventScenarioReward.gd" id="10_ts88v"]
+[ext_resource type="Script" path="res://scripts/agent/scenario_reward_components/ProximityScenarioReward.gd" id="11_ttprox"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_ko6j8"]
 sky_horizon_color = Color(0.66224277, 0.6717428, 0.6867428, 1)
@@ -60,6 +61,7 @@ metadata/_custom_type_script = "uid://d38lybllmy6tq"
 script = ExtResource("2_dw0os")
 controlled_agents = [NodePath("../RobotArm")]
 physics_frames_per_step = 3
+continue_after_success = true
 metadata/_custom_type_script = "uid://cun4ha1fidr8n"
 
 [node name="ProgressProvider" type="Node" parent="ScenarioController" unique_id=1761560080]
@@ -97,6 +99,7 @@ script = ExtResource("9_qy6q5")
 terminate_on_stalled_progress = true
 stalled_progress_window_steps = 120
 stalled_progress_penalty = -5.0
+ignore_stall_above_progress = 0.85
 metadata/_custom_type_script = "uid://5rg0xs5vr24r"
 
 [node name="GoalReward" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=13240732]
@@ -110,6 +113,14 @@ script = ExtResource("10_ts88v")
 event_name = "collision"
 reward = -20.0
 metadata/_custom_type_script = "uid://b0mpnu83er6il"
+
+[node name="Proximity" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=35669900]
+script = ExtResource("11_ttprox")
+weight = 0.1
+proximity_scale = 1.0
+proximity_threshold = 0.8
+proximity_power = 2.0
+term_name = "proximity"
 
 [node name="Environment" type="Node3D" parent="." unique_id=2095345585]
 
