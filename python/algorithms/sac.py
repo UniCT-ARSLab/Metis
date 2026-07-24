@@ -139,6 +139,22 @@ def parse_args():
         help="Floor for the auto-tuned entropy coefficient alpha (0 = no floor). Prevents the "
         "late-training entropy collapse where alpha decays too low and the critic drifts up.",
     )
+    parser.add_argument(
+        "--caps",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="CAPS action-smoothness regularization on the actor: penalize different actions on "
+        "temporally-adjacent and nearby states. Trains a jitter-free controller that holds steady "
+        "at the target. Recommended for velocity-controlled continuous tasks.",
+    )
+    parser.add_argument("--caps-lambda-temporal", type=float, default=1.0)
+    parser.add_argument("--caps-lambda-spatial", type=float, default=1.0)
+    parser.add_argument(
+        "--caps-sigma",
+        type=float,
+        default=0.05,
+        help="Std of the Gaussian perturbation for the CAPS spatial-smoothness term (obs are ~[-1,1]).",
+    )
     parser.add_argument("--log-std-min", type=float, default=-20.0)
     parser.add_argument("--log-std-max", type=float, default=2.0)
     parser.add_argument("--action-smoothing", type=float, default=0.0)
@@ -385,6 +401,10 @@ def build_sac_learner_step(
     grad_clip_adaptive=False,
     grad_clip_k=3.0,
     grad_clip_decay=0.99,
+    caps=False,
+    caps_lambda_temporal=1.0,
+    caps_lambda_spatial=1.0,
+    caps_sigma=0.05,
 ):
     """Build the SAC gradient step, optionally compiled into a tf.function.
 
@@ -405,6 +425,15 @@ def build_sac_learner_step(
     alpha_floor_active = bool(min_alpha and min_alpha > 0.0)
     log_min_alpha_c = tf.constant(
         float(np.log(min_alpha)) if alpha_floor_active else 0.0, dtype=tf.float32)
+    # CAPS (Conditioning for Action Policy Smoothness): penalize the deterministic policy for
+    # producing different actions on temporally-adjacent states (temporal) and on nearby states
+    # (spatial). This trains a smooth, jitter-free controller that holds steady at the target
+    # (where consecutive states are ~identical, so the actions must be too). Uses the mean action
+    # tanh(mu), not the sampled one.
+    caps_enabled = bool(caps) and (caps_lambda_temporal > 0.0 or caps_lambda_spatial > 0.0)
+    caps_lt_c = tf.constant(float(caps_lambda_temporal), dtype=tf.float32)
+    caps_ls_c = tf.constant(float(caps_lambda_spatial), dtype=tf.float32)
+    caps_sigma_c = tf.constant(float(caps_sigma), dtype=tf.float32)
 
     # Build slots eagerly (outside any graph) so a deferred checkpoint restore populates them
     # deterministically and no variable is created inside the traced function after resume.
@@ -496,6 +525,17 @@ def build_sac_learner_step(
             q2_pi = critic2([obs, policy_actions], training=False)
             q_pi = tf.minimum(q1_pi, q2_pi)
             actor_loss = tf.reduce_mean(alpha * log_prob - q_pi)
+            if caps_enabled:
+                mean_now, _ = actor(obs, training=True)
+                action_now = tf.tanh(mean_now)
+                mean_next, _ = actor(next_obs, training=True)
+                temporal = tf.reduce_mean(
+                    tf.reduce_sum(tf.square(action_now - tf.tanh(mean_next)), axis=1))
+                noisy_obs = obs + tf.random.normal(tf.shape(obs)) * caps_sigma_c
+                mean_noisy, _ = actor(noisy_obs, training=True)
+                spatial = tf.reduce_mean(
+                    tf.reduce_sum(tf.square(action_now - tf.tanh(mean_noisy)), axis=1))
+                actor_loss = actor_loss + caps_lt_c * temporal + caps_ls_c * spatial
         actor_grads = tape.gradient(actor_loss, actor.trainable_variables)
         actor_grads = clip_actor(actor_grads)
         actor_optimizer.apply_gradients(zip(actor_grads, actor.trainable_variables))
@@ -711,6 +751,10 @@ def run_async_sac(
         grad_clip_norm=args.grad_clip_norm,
         grad_clip_adaptive=args.grad_clip_adaptive,
         grad_clip_k=args.grad_clip_k,
+        caps=args.caps,
+        caps_lambda_temporal=args.caps_lambda_temporal,
+        caps_lambda_spatial=args.caps_lambda_spatial,
+        caps_sigma=args.caps_sigma,
     )
     print(
         f"SAC learner: {'compiled graph' if args.tf_compile_learner else 'eager'}"
@@ -1250,6 +1294,10 @@ def main():
             grad_clip_norm=args.grad_clip_norm,
             grad_clip_adaptive=args.grad_clip_adaptive,
             grad_clip_k=args.grad_clip_k,
+            caps=args.caps,
+            caps_lambda_temporal=args.caps_lambda_temporal,
+            caps_lambda_spatial=args.caps_lambda_spatial,
+            caps_sigma=args.caps_sigma,
         )
         print(
             f"SAC learner: {'compiled graph' if args.tf_compile_learner else 'eager'}"

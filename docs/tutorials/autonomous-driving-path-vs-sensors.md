@@ -334,6 +334,43 @@ python/.venv/bin/python python/train.py \
 The path-aware model should usually learn faster. That is expected: it receives a local
 route plan in addition to obstacle sensing.
 
+### Optional SB3 comparison
+
+Metis is the default for both driving experiments. A single-car SAC baseline can also
+be trained through the limited SB3 adapter:
+
+```bash
+python/.venv-sb3/bin/python python/train.py \
+  --backend sb3 \
+  --algorithm sac \
+  --godot-bin /path/to/Godot \
+  --godot-project godot \
+  --godot-scene res://scenarios/cars/cars_scenario.tscn \
+  --num-envs 4 \
+  --total-timesteps 1000000 \
+  --max-steps-per-episode 4500 \
+  --batch-size 128 \
+  --learning-starts 12000 \
+  --buffer-size 200000 \
+  --reset-progress-curriculum \
+  --reset-progress-start-max 0.02 \
+  --reset-progress-end-max 0.60 \
+  --reset-progress-ramp-episodes 1600 \
+  --collector-mode sync \
+  --evaluation-episodes 40 \
+  --checkpoint-dir checkpoints/driving_sensor_only_sb3_sac_v1 \
+  --headless
+```
+
+Swap the scene and checkpoint directory to compare the path-aware contract. Do not
+reuse models between the two observation spaces.
+
+The replicated-car setup in the next section is not a drop-in SB3 comparison when one
+car can crash while the others continue. SB3 vector lanes expect automatic per-lane
+reset, while all cars share one physical Godot world. The adapter rejects that partial
+termination by default. `--sb3-multi-agent-partial-done reset-all` is available for
+experiments, but it truncates every surviving car and changes the task semantics.
+
 ## 13. Collect with several cars per environment
 
 Multi-environment and multi-agent collection solve different scaling problems:
@@ -458,6 +495,9 @@ The path-aware controller should plan curves earlier. The sensor-only controller
 more robust to route-model errors, provided it has seen enough varied geometry.
 
 ## 16. Run the policies
+
+These commands load native Metis/Keras policies. SB3 `.zip` models are evaluated by
+the SB3 training backend or by the backend benchmark tool, not by `python/run.py`.
 
 Sensor-only:
 

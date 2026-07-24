@@ -61,7 +61,7 @@ metadata/_custom_type_script = "uid://d38lybllmy6tq"
 script = ExtResource("2_dw0os")
 controlled_agents = [NodePath("../RobotArm")]
 physics_frames_per_step = 3
-continue_after_success = true
+continue_after_success = false
 metadata/_custom_type_script = "uid://cun4ha1fidr8n"
 
 [node name="ProgressProvider" type="Node" parent="ScenarioController" unique_id=1761560080]

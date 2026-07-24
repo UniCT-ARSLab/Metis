@@ -26,6 +26,10 @@ node or runtime contract in more detail.
 
 Each tutorial includes the Godot scene contract, observations, actions, rewards,
 terminal conditions, validation steps, training commands, and an inference command.
+Training commands use the native Metis backend unless a section is explicitly labelled
+as an optional SB3 comparison. Those SB3 examples always use synchronous collection
+and save native `.zip` models; the tutorial's `python/run.py` command applies to the
+Metis/Keras artifact.
 
 ## Practical guides
 

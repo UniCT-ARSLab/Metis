@@ -407,7 +407,40 @@ has improved.
 Resume the same run with the same checkpoint directory and `--resume`. Increase
 `--num-episodes` to the new final episode number.
 
+### Optional SB3 comparison
+
+The command above uses Metis, which remains the default backend. To compare the same
+Godot task with Stable-Baselines3 DQN, use the separate SB3 environment and synchronous
+collection:
+
+```bash
+python/.venv-sb3/bin/python python/train.py \
+  --backend sb3 \
+  --algorithm dqn \
+  --godot-bin /home/fedyfausto/Godot/Godot_v4.6.2-stable_linux.x86_64 \
+  --godot-project godot \
+  --godot-scene res://scenarios/breakout/breakout_scenario.tscn \
+  --num-envs 4 \
+  --total-timesteps 250000 \
+  --max-steps-per-episode 1500 \
+  --batch-size 128 \
+  --learning-starts 5000 \
+  --buffer-size 200000 \
+  --collector-mode sync \
+  --evaluation-episodes 20 \
+  --checkpoint-dir checkpoints/breakout_sb3_dqn_v1 \
+  --headless
+```
+
+This is a comparison run, not a continuation of the Metis run. SB3 writes `.zip`
+models and uses its own replay format. It does not support the Metis async collector,
+best-policy workflow, Keras artifacts, or demonstration-aware trainers.
+
 ## 11. Run and evaluate the policy
+
+The following command loads the native Metis/Keras policy. `python/run.py` does not
+load an SB3 `.zip` model; use `--evaluation-episodes` during an SB3 run or the backend
+benchmark tool when evaluating SB3.
 
 ```bash
 python/.venv/bin/python python/run.py \

@@ -416,6 +416,38 @@ Resume training with the original checkpoint directory and `--resume`. Loading
 `policy.keras` with `--policy-path` is a warm start and does not restore replay,
 optimizers, target networks, or counters.
 
+### Choose the training backend deliberately
+
+All commands above use the native Metis backend. It is the default and supports the
+complete framework workflow: asynchronous collection, Keras policy artifacts,
+demonstrations, historical opponents, and the Metis dashboard.
+
+The optional SB3 adapter is useful for a controlled baseline. For this discrete
+example:
+
+```bash
+python/.venv-sb3/bin/python python/train.py \
+  --backend sb3 \
+  --algorithm dqn \
+  --godot-project godot \
+  --godot-scene res://scenarios/target_seeker/target_scenario.tscn \
+  --num-envs 4 \
+  --total-timesteps 150000 \
+  --max-steps-per-episode 500 \
+  --learning-starts 5000 \
+  --collector-mode sync \
+  --evaluation-episodes 20 \
+  --checkpoint-dir checkpoints/target_seeker_sb3_dqn_v1 \
+  --headless
+```
+
+SB3 models are `.zip` artifacts and are not accepted by the current `python/run.py`.
+Evaluate them through the SB3 backend or
+[the backend benchmark tool](../guides/benchmarking-backends.md). Do not compare a
+synchronous SB3 run against an asynchronous Metis run and call the throughput
+difference an algorithm result; use the benchmark tool to hold collection mode,
+transition budget, seeds, and evaluation conditions constant.
+
 ## 12. Multi-agent, continuous, and hybrid variants
 
 For parameter sharing, add compatible instances to `controlled_agents` and pass
@@ -441,6 +473,19 @@ return values
 A hybrid agent keeps continuous components and adds a `DiscreteActionSet`, for example
 continuous locomotion plus discrete fire/reload actions. PPO handles the resulting
 component dictionary.
+
+Backend support is not identical:
+
+| Contract | Native Metis | Limited SB3 adapter |
+|---|---|---|
+| Discrete | DQN or PPO | DQN or PPO |
+| Continuous | DDPG, TD3, SAC, PPO and BC variants | DDPG, TD3, SAC or PPO |
+| Hybrid | PPO with native components | PPO through a latent continuous `Box` |
+| Multi-agent | shared policy, async support, optional opponent pool | shared policy with coordinated world resets |
+
+The SB3 hybrid encoding preserves continuous values and converts each discrete set to
+logits decoded with `argmax`. It is useful for comparison, but it is not the same
+policy distribution as native Metis PPO.
 
 ## 13. Curriculum and demonstrations
 

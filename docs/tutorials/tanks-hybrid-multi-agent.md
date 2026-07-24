@@ -324,6 +324,7 @@ python/.venv-sb3/bin/python python/train.py \
   --max-steps-per-episode 1000 \
   --batch-size 256 \
   --ppo-epochs 4 \
+  --device cpu \
   --multi-agent \
   --collector-mode sync \
   --evaluation-episodes 40 \
@@ -336,10 +337,17 @@ continuous `Box`: the two movement values remain continuous, while the two weapo
 choices are represented by two logits and decoded with `argmax`. Startup prints
 `sb3_action=hybrid_box(...)` to make that distinction visible.
 
+The example keeps PPO on CPU because this small MLP usually gains little from GPU
+execution and SB3 itself warns about the extra overhead. Benchmark both devices before
+changing it for a larger policy.
+
 SB3 does not support Metis's asynchronous collector or historical opponent pool. It
 does provide current-policy simultaneous self-play here because all four lanes share
 the same policy. Keep the default `--sb3-multi-agent-partial-done error`; a partial
 death should be handled by the match rules rather than silently resetting the world.
+
+The SB3 run evaluates its `.zip` model through `--evaluation-episodes`. The current
+`python/run.py` loads native Metis/Keras artifacts only.
 
 ## 11. Add an opponent pool
 
@@ -375,7 +383,7 @@ training. There is still one learner and one shared model artifact.
 
 ## 12. Evaluate and run
 
-Run the saved policy in realtime:
+Run the native Metis policy in realtime:
 
 ```bash
 python/.venv/bin/python python/run.py \

@@ -287,6 +287,9 @@ current-policy simultaneous self-play, not historical opponent sampling. SB3
 collection remains synchronous even with several Godot processes; `async` and
 `--opponent-pool` are native Metis features.
 
+The SB3 run evaluates its `.zip` model through `--evaluation-episodes`. The current
+`python/run.py` loads Metis/Keras artifacts only.
+
 ## 9. Add historical opponents
 
 Current-vs-current self-play can cycle: a policy learns to exploit its latest opponent

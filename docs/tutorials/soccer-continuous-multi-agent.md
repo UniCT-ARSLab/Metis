@@ -387,6 +387,37 @@ python/.venv/bin/python python/train.py \
 Keep `--physics-frames-per-step 1` initially. Contact, cooldown, and kick timing all
 depend on the decision rate.
 
+### Optional SB3 comparison
+
+Soccer can use the limited SB3 multi-agent adapter when every goal or timeout ends both
+players together. Each player becomes one vector lane, and both lanes share the same
+SAC policy:
+
+```bash
+python/.venv-sb3/bin/python python/train.py \
+  --backend sb3 \
+  --algorithm sac \
+  --godot-bin /path/to/Godot \
+  --godot-project godot \
+  --godot-scene res://scenarios/soccer/soccer_1v1.tscn \
+  --num-envs 4 \
+  --total-timesteps 500000 \
+  --max-steps-per-episode 700 \
+  --batch-size 128 \
+  --learning-starts 12000 \
+  --buffer-size 200000 \
+  --multi-agent \
+  --collector-mode sync \
+  --evaluation-episodes 50 \
+  --checkpoint-dir checkpoints/soccer_1v1_sb3_sac_v1 \
+  --headless
+```
+
+Keep `--sb3-multi-agent-partial-done error`. If only one player terminates, fix the
+scenario so the match ends coherently instead of silently resetting the shared world.
+SB3 supports current-policy parameter sharing here, but not the async collector,
+historical opponent pool, or independent team policies.
+
 Once the baseline scores reliably, a historical opponent pool can reduce strategic
 forgetting. SAC currently requires synchronous collection for that mode:
 
@@ -480,6 +511,9 @@ Use fixed seeds and both starting sides. A robust policy should improve against 
 references, not merely track the latest version of itself.
 
 ## 15. Run the policy
+
+The command below loads the native Metis/Keras artifact. `python/run.py` does not load
+SB3 `.zip` checkpoints.
 
 ```bash
 python/.venv/bin/python python/run.py \

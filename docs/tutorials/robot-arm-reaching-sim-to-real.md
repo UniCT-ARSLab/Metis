@@ -477,6 +477,34 @@ Monitor more than reward:
 A policy that approaches the target but never closes the gripper can accumulate dense
 progress without solving the task.
 
+### Optional SB3 comparison
+
+The same single-arm continuous contract can be used for a controlled SB3 SAC baseline:
+
+```bash
+python/.venv-sb3/bin/python python/train.py \
+  --backend sb3 \
+  --algorithm sac \
+  --godot-bin /path/to/Godot \
+  --godot-project godot \
+  --godot-scene res://scenarios/robotarms/XarmScenario.tscn \
+  --num-envs 4 \
+  --total-timesteps 1000000 \
+  --max-steps-per-episode 500 \
+  --batch-size 128 \
+  --learning-starts 15000 \
+  --buffer-size 500000 \
+  --collector-mode sync \
+  --evaluation-episodes 50 \
+  --checkpoint-dir checkpoints/xarm_grasp_sb3_sac_v1 \
+  --headless
+```
+
+SB3 is included here for comparison, not as a replacement for the native workflow. It
+does not use the Metis async collector and does not support the demonstration-aware
+`td3_bc`, `ddpg_bc`, or `ddpgfd` trainers described below. Keep the physics, seeds,
+transition budget, and evaluation poses equal when comparing results.
+
 ## 14. Use planners and demonstrations
 
 A static known workcell is also a motion-planning problem. Use a collision-aware planner
