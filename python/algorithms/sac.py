@@ -937,6 +937,7 @@ def run_async_sac(
                 ("outcome", [
                     ("reward", f"{reward_stats['mean']:.3f} [{reward_stats['min']:.3f}, {reward_stats['max']:.3f}]"),
                     ("progress", f"mean:{diagnostics['progress_mean']:.3f} max:{diagnostics['progress_max']:.3f}"),
+                    ("hold", f"speed:{diagnostics.get('max_joint_speed', 0.0):.3f} frames:{diagnostics.get('hold_frames', 0)}"),
                 ]),
                 ("agents", [
                     ("finish", f"{diagnostics['finishes']}/{controlled_agents} ({finish_rate:.2%})"),
@@ -1590,6 +1591,7 @@ def main():
                 ("outcome", [
                     ("reward", f"{reward_stats['mean']:.3f} [{reward_stats['min']:.3f}, {reward_stats['max']:.3f}]"),
                     ("progress", f"mean:{diagnostics['progress_mean']:.3f} max:{diagnostics['progress_max']:.3f}"),
+                    ("hold", f"speed:{diagnostics.get('max_joint_speed', 0.0):.3f} frames:{diagnostics.get('hold_frames', 0)}"),
                 ]),
                 ("agents", [
                     ("finish", f"{diagnostics['finishes']}/{controlled_agents} ({finish_rate:.2%})"),

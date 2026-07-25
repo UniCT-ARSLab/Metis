@@ -10,6 +10,9 @@ signal obstacle_collision
 @export var use_kinematic_control := true
 @export var joint_home_positions := PackedFloat32Array()
 @export var default_joint_speed := 0.5
+## Tapers commands that push a bounded revolute joint toward its hard stop. The value is a
+## fraction of that joint's complete URDF range; zero keeps only the hard stop at the limit.
+@export_range(0.0, 0.25, 0.005) var joint_limit_slowdown_ratio := 0.05
 
 @export_category("Tool Center Point")
 @export var tcp_link_name := ""
@@ -20,9 +23,20 @@ signal obstacle_collision
 @export var target: Node3D
 @export var workspace_scale := 1.0
 @export var success_distance := 0.05
-@export var success_hold_physics_frames := 10
+@export var success_hold_physics_frames := 30
 @export var terminate_on_success := true
 @export_range(1.0, 10.0, 0.1) var success_rearm_distance_multiplier := 1.5
+## Reach-and-HOLD: success also requires the arm to be nearly still (maximum |joint speed| below
+## the threshold), not just within distance. Without this, the arm can sweep THROUGH the target
+## and "succeed" transiently, so it never learns to stop/hold (CAPS keeps a constant velocity
+## smooth). Set success_require_still=false for a pure reach (no hold).
+@export var success_require_still := true
+@export var success_max_joint_speed := 0.15
+## Reach-and-HOLD shaping: the "near target" zone (metres) where the hold reward/penalty terms
+## activate. Away from the target they are zero so the fast reach stays unpenalised.
+@export var near_target_distance := 0.10
+## Joint speed (rad/s) at which the stillness reward decays to zero.
+@export var hold_stillness_speed_reference := 0.5
 
 @export_category("Safety")
 @export var safety_volumes: Array[Area3D] = []
@@ -100,10 +114,11 @@ func apply_action(action: Variant) -> Variant:
 	manual_control = false
 	var values := agent.decode_continuous_action(action)
 	for index in range(get_joint_count()):
-		var command := (
+		var requested_command := (
 			clampf(float(values[index]), -1.0, 1.0)
 			if index < values.size()
 			else 0.0)
+		var command := _limit_aware_command(index, requested_command)
 		_commands[index] = command
 		_previous_action[index] = command
 		_robot.set_joint_target_velocity(
@@ -219,7 +234,11 @@ func get_joint_position_observation() -> Array:
 		if joint and joint.type == "revolute" and joint.limit:
 			var lower := minf(joint.limit.lower, joint.limit.upper)
 			var upper := maxf(joint.limit.lower, joint.limit.upper)
-			result.append(remap(_position, lower, upper, -1.0, 1.0))
+			if is_equal_approx(lower, upper):
+				result.append(0.0)
+			else:
+				result.append(clampf(
+					remap(_position, lower, upper, -1.0, 1.0), -1.0, 1.0))
 		else:
 			result.append(clampf(_position / PI, -1.0, 1.0))
 	return result
@@ -273,6 +292,49 @@ func get_joint_limit_penalty() -> float:
 			var error := (margin - edge_distance) / margin
 			penalty -= error * error
 	return penalty / maxf(float(get_joint_count()), 1.0)
+
+
+func get_hold_stillness_reward() -> float:
+	# Immobility reward, active ONLY within near_target_distance: rewards a low max joint speed so
+	# the arm learns to SETTLE on the target instead of sweeping through it. Zero away from the
+	# target, so the fast reach is never penalised.
+	if _target_distance() > near_target_distance:
+		return 0.0
+	return clampf(
+		1.0 - _max_joint_speed() / maxf(hold_stillness_speed_reference, 0.001), 0.0, 1.0)
+
+
+func get_near_target_speed_penalty() -> float:
+	# Penalty proportional to MAX joint speed, active ONLY near the target. Drives joint velocity
+	# toward zero precisely where holding matters, without slowing the reach far away. Returns a
+	# negative term (scaled by the component weight).
+	if _target_distance() > near_target_distance:
+		return 0.0
+	return -_max_joint_speed()
+
+
+func get_hold_progress_reward() -> float:
+	# Progressive reward for consecutive hold frames: grows as the arm SUSTAINS the hold, directly
+	# rewarding staying put. Normalised by the required frames so the term stays in [0,1] across the
+	# curriculum (10 -> 20 -> 30 frames).
+	if success_hold_physics_frames <= 0:
+		return 0.0
+	return clampf(
+		float(_success_frames) / float(success_hold_physics_frames), 0.0, 1.0)
+
+
+func get_max_joint_speed() -> float:
+	return _max_joint_speed()
+
+
+func get_hold_frames() -> int:
+	return _success_frames
+
+
+func get_debug_metrics() -> Dictionary:
+	# Generic per-step diagnostics surfaced to the trainer logs (merged into the step info by
+	# ScenarioController when the body exposes this method).
+	return {"max_joint_speed": _max_joint_speed(), "hold_frames": _success_frames}
 
 
 func get_control_input(input_name: String) -> float:
@@ -339,6 +401,39 @@ func _joint_max_speed(index: int) -> float:
 	return maxf(default_joint_speed, 0.000001)
 
 
+func _limit_aware_command(index: int, command: float) -> float:
+	if (
+		is_zero_approx(command)
+		or index < 0
+		or index >= get_joint_count()
+		or not _robot
+		or not _robot.urdf
+	):
+		return command
+	var joint := _robot.urdf.get_joint(_joint_names[index])
+	if not joint or joint.type != "revolute" or not joint.limit:
+		return command
+
+	var lower := minf(joint.limit.lower, joint.limit.upper)
+	var upper := maxf(joint.limit.lower, joint.limit.upper)
+	var span := upper - lower
+	if span <= 0.0:
+		return 0.0
+
+	var position := clampf(_robot.get_joint_position(_joint_names[index]), lower, upper)
+	var distance_to_limit := (
+		position - lower
+		if command < 0.0
+		else upper - position)
+	if distance_to_limit <= 0.000001:
+		return 0.0
+
+	var slowdown_margin := span * joint_limit_slowdown_ratio
+	if slowdown_margin <= 0.000001:
+		return command
+	return command * clampf(distance_to_limit / slowdown_margin, 0.0, 1.0)
+
+
 func _update_end_effector() -> void:
 	if not end_effector or tcp_link_name.is_empty() or not _robot:
 		return
@@ -361,7 +456,8 @@ func _update_success_state() -> void:
 			_succeeded = false
 			_success_frames = 0
 		return
-	if distance <= success_distance:
+	var still := (not success_require_still) or (_max_joint_speed() <= success_max_joint_speed)
+	if distance <= success_distance and still:
 		_success_frames += 1
 	else:
 		_success_frames = 0
@@ -465,3 +561,18 @@ func _target_distance() -> float:
 	if not target or not end_effector:
 		return workspace_scale
 	return end_effector.global_position.distance_to(target.global_position)
+
+
+func _max_joint_speed() -> float:
+	# MAX |joint velocity| over the controlled joints; used by the reach-and-hold success gate to
+	# require the arm to be nearly stationary. Max (not mean) so a single fast-sweeping joint (e.g.
+	# the wide-range xarm2) cannot pass the gate while the average stays low.
+	if not _robot:
+		return 0.0
+	var names := get_controlled_joint_names()
+	if names.is_empty():
+		return 0.0
+	var fastest := 0.0
+	for joint_name in names:
+		fastest = maxf(fastest, absf(_robot.get_joint_velocity(joint_name)))
+	return fastest

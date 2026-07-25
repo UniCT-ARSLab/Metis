@@ -248,14 +248,14 @@ func _get_named_float(parser: XMLParser, name: String) -> float:
 	return 0.0 if value.is_empty() else float(value)
 
 func parse_joint_limit(parser: XMLParser, joint: URDFJoint) -> void:
-	joint.limit = URDFJoint.URDFLimit.new()
+	joint.limit = URDFLimit.new()
 	joint.limit.lower = _get_named_float(parser, "lower")
 	joint.limit.upper = _get_named_float(parser, "upper")
 	joint.limit.effort = _get_named_float(parser, "effort")
 	joint.limit.velocity = _get_named_float(parser, "velocity")
 
 func parse_joint_dynamics(parser: XMLParser, joint: URDFJoint) -> void:
-	joint.dynamics = URDFJoint.URDFDynamics.new()
+	joint.dynamics = URDFDynamics.new()
 	joint.dynamics.damping = _get_named_float(parser, "damping")
 	joint.dynamics.friction = _get_named_float(parser, "friction")
 

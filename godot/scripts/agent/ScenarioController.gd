@@ -762,6 +762,30 @@ func _build_agent_step_result(agent:Node, truncated:bool, applied_action:Variant
 	var done := terminated or truncated
 	var progress := float(context.get("progress", 0.0))
 
+	var info := {
+		"step": step_count,
+		"local_term_rewards": _agent_reward_terms(agent),
+		"scenario_reward": scenario_reward,
+		"scenario_terms": _get_scenario_terms(agent_id),
+		"events": events,
+		"target_reached": target_reached,
+		"finish_reached": finish_reached,
+		"agent_terminal": agent_terminal,
+		"progress_stalled": progress_stalled,
+		"scenario_terminal": scenario_terminal,
+		"terminal_reason": _terminal_reason(event_terminal_reason, agent_terminal, scenario_terminal_reason, truncated),
+		"target_first_seen": bool(context.get("target_first_seen", false)),
+		"progress": progress,
+		"track_progress": progress,
+		"applied_action": applied_action
+	}
+	# Generic hook: any agent body may surface extra per-step diagnostics (e.g. max_joint_speed,
+	# hold_frames) for the trainer logs, without the controller knowing the scenario specifics.
+	if agent.has_method("get_debug_metrics"):
+		var debug_metrics: Variant = agent.get_debug_metrics()
+		if typeof(debug_metrics) == TYPE_DICTIONARY:
+			info.merge(debug_metrics, true)
+
 	return {
 		"id": agent_id,
 		"obs": _agent_observation_vector(agent),
@@ -769,23 +793,7 @@ func _build_agent_step_result(agent:Node, truncated:bool, applied_action:Variant
 		"done": done,
 		"terminated": terminated,
 		"truncated": truncated,
-		"info": {
-			"step": step_count,
-			"local_term_rewards": _agent_reward_terms(agent),
-			"scenario_reward": scenario_reward,
-			"scenario_terms": _get_scenario_terms(agent_id),
-			"events": events,
-			"target_reached": target_reached,
-			"finish_reached": finish_reached,
-			"agent_terminal": agent_terminal,
-			"progress_stalled": progress_stalled,
-			"scenario_terminal": scenario_terminal,
-			"terminal_reason": _terminal_reason(event_terminal_reason, agent_terminal, scenario_terminal_reason, truncated),
-			"target_first_seen": bool(context.get("target_first_seen", false)),
-			"progress": progress,
-			"track_progress": progress,
-			"applied_action": applied_action
-		}
+		"info": info
 	}
 
 

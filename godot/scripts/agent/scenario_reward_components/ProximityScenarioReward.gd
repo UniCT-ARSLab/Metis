@@ -13,7 +13,8 @@ class_name ProximityScenarioReward
 @export var proximity_threshold := 0.8
 ## Exponent shaping the bonus curve; >1 concentrates the reward very close to the target.
 @export var proximity_power := 2.0
-@export var term_name := "proximity"
+# term_name is inherited from ScenarioRewardComponent (set it on the node in the scene); do NOT
+# redefine it here or GDScript errors ("member already exists") and the whole component fails to load.
 
 var _last_terms := {}
 

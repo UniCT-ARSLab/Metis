@@ -69,7 +69,7 @@ metadata/_custom_type_script = "uid://d1xuba84xevcv"
 [node name="JointMotion" type="Node" parent="Agent/RewardSystem" unique_id=1662626791 node_paths=PackedStringArray("node_caller")]
 script = ExtResource("8_function_reward")
 term_name = "joint_motion"
-weight = 0.003
+weight = 0.005
 method_name = &"get_joint_motion_penalty"
 node_caller = NodePath("../../..")
 
@@ -78,6 +78,27 @@ script = ExtResource("8_function_reward")
 term_name = "joint_limit"
 weight = 0.02
 method_name = &"get_joint_limit_penalty"
+node_caller = NodePath("../../..")
+
+[node name="HoldStillness" type="Node" parent="Agent/RewardSystem" unique_id=700000001 node_paths=PackedStringArray("node_caller")]
+script = ExtResource("8_function_reward")
+term_name = "hold_stillness"
+weight = 0.1
+method_name = &"get_hold_stillness_reward"
+node_caller = NodePath("../../..")
+
+[node name="NearTargetSpeed" type="Node" parent="Agent/RewardSystem" unique_id=700000002 node_paths=PackedStringArray("node_caller")]
+script = ExtResource("8_function_reward")
+term_name = "near_target_speed"
+weight = 0.05
+method_name = &"get_near_target_speed_penalty"
+node_caller = NodePath("../../..")
+
+[node name="HoldProgress" type="Node" parent="Agent/RewardSystem" unique_id=700000003 node_paths=PackedStringArray("node_caller")]
+script = ExtResource("8_function_reward")
+term_name = "hold_progress"
+weight = 0.15
+method_name = &"get_hold_progress_reward"
 node_caller = NodePath("../../..")
 
 [node name="Smoothness" type="Node" parent="Agent/RewardSystem" unique_id=1438737164]

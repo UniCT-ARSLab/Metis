@@ -17,8 +17,8 @@ extends Resource
 @export var axis: Vector3
 
 # Physics
-@export var limit: URDFLimit = null
-@export var dynamics: URDFDynamics = null
+@export var limit: URDFLimit
+@export var dynamics: URDFDynamics
 
 # A mimic joint is driven by another joint and is not an independent actuator.
 @export_group("Mimic")
@@ -29,15 +29,5 @@ extends Resource
 
 func is_mimic() -> bool:
 	return not mimic_joint.is_empty()
-
-class URDFLimit extends Resource:
-	@export var lower: float
-	@export var upper: float
-	@export var effort: float
-	@export var velocity: float
-
-class URDFDynamics extends Resource:
-	@export var damping: float
-	@export var friction: float
 
 enum JointType {FIXED, REVOLUTE, CONTINUOUS}

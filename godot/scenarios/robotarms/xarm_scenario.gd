@@ -5,10 +5,22 @@ extends Node3D
 ## adding a marker in the editor is enough (no need to also wire it into target_spawns).
 @export var target_spawns_root: Node3D
 @export var easy_target_count := 4
+## Once the basic reach is learned, sample the complete axis-aligned volume delimited by the
+## Marker3D nodes instead of memorizing a finite set of target coordinates.
+@export var continuous_target_sampling := true
+@export var continuous_target_sampling_start_episode := 800
+## Shrinks the marker-defined volume on each axis. Useful when the outer markers sit too close to
+## a wall or to the physical edge of the robot workspace.
+@export var target_sampling_inset := Vector3.ZERO
+@export var late_joint_jitter_degrees := 10.0
+## Reach-and-HOLD curriculum breakpoints (absolute training episode). The hold requirement tightens
+## in stages: a longer hold at a lower stillness threshold. Defaults assume resuming a reach policy
+## around episode 5400. Stages: <stage1 -> 10 frames / 0.30, <stage2 -> 20 / 0.20, else 30 / 0.15.
+@export var hold_curriculum_stage1_until := 5900
+@export var hold_curriculum_stage2_until := 6600
 
 @onready var controller: ScenarioController = $ScenarioController
-# Entrambi i backend implementano lo stesso contratto, ma non ereditano dalla
-# stessa classe GDScript.
+# Both robot backends implement the same contract without sharing a GDScript base class.
 @onready var arm = $RobotArm
 @onready var target: Node3D = $Target
 @onready var goal_event = $ScenarioController/ScenarioEventSystem/GoalReached
@@ -75,19 +87,56 @@ func _on_episode_reset_started(_seed:int) -> void:
 	elif _training_episode < 1500:
 		joint_jitter_degrees = 2.0
 		arm.success_distance = 0.05
-	elif _training_episode < 2500:
-		joint_jitter_degrees = 3.0
-		arm.success_distance = 0.04
-	elif _training_episode < 3500:
-		joint_jitter_degrees = 4.0
-		arm.success_distance = 0.03
 	else:
-		joint_jitter_degrees = 5.0
-		arm.success_distance = 0.025
+		joint_jitter_degrees = late_joint_jitter_degrees
+		arm.success_distance = 0.04
+
+	# Reach-and-HOLD curriculum: require a progressively LONGER hold at a TIGHTER stillness threshold.
+	# The reach (success_distance) is already at its tightest by this episode range; this teaches the
+	# arm to STOP and stay, not just touch. 10 frames / 0.30 rad/s -> 20 / 0.20 -> 30 / 0.15.
+	if _training_episode < hold_curriculum_stage1_until:
+		arm.success_hold_physics_frames = 10
+		arm.success_max_joint_speed = 0.30
+	elif _training_episode < hold_curriculum_stage2_until:
+		arm.success_hold_physics_frames = 20
+		arm.success_max_joint_speed = 0.20
+	else:
+		arm.success_hold_physics_frames = 30
+		arm.success_max_joint_speed = 0.15
 
 	var target_index := rng.randi_range(0, maxi(target_pool_size - 1, 0))
 	target.global_transform = spawn_pool[target_index].global_transform
+	if (
+		continuous_target_sampling
+		and _training_episode >= continuous_target_sampling_start_episode
+	):
+		target.global_position = _sample_target_position(rng, spawn_pool)
 	arm.set_reset_joint_offsets(_sample_joint_offsets(rng, joint_jitter_degrees))
+
+
+func _sample_target_position(
+		rng: RandomNumberGenerator,
+		spawn_pool: Array[Marker3D]) -> Vector3:
+	var lower := spawn_pool[0].global_position
+	var upper := lower
+	for marker in spawn_pool:
+		lower = lower.min(marker.global_position)
+		upper = upper.max(marker.global_position)
+
+	var inset := Vector3(
+		maxf(target_sampling_inset.x, 0.0),
+		maxf(target_sampling_inset.y, 0.0),
+		maxf(target_sampling_inset.z, 0.0))
+	for axis in range(3):
+		var half_extent := (upper[axis] - lower[axis]) * 0.5
+		var axis_inset := minf(inset[axis], half_extent)
+		lower[axis] += axis_inset
+		upper[axis] -= axis_inset
+
+	return Vector3(
+		rng.randf_range(lower.x, upper.x),
+		rng.randf_range(lower.y, upper.y),
+		rng.randf_range(lower.z, upper.z))
 
 
 func _sample_joint_offsets(rng:RandomNumberGenerator, max_degrees:float) -> Array[float]:

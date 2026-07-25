@@ -462,6 +462,17 @@ def update_episode_diagnostics(state, agent_info, agent_idx=None):
         if progress_stalled and not state["stalled_seen"]:
             state["stalled_count"] += 1
             state["stalled_seen"] = True
+        # Optional generic diagnostics surfaced by the agent body (e.g. reach-and-hold arm).
+        # setdefault keeps this backward-compatible with states that never initialised the keys.
+        max_joint_speed = agent_info.get("max_joint_speed")
+        if max_joint_speed is not None:
+            state["max_joint_speed_last"] = float(max_joint_speed)
+            state["max_joint_speed_peak"] = max(
+                float(state.get("max_joint_speed_peak", 0.0)), float(max_joint_speed))
+        hold_frames = agent_info.get("hold_frames")
+        if hold_frames is not None:
+            state["hold_frames_peak"] = max(
+                int(state.get("hold_frames_peak", 0)), int(hold_frames))
         return
 
     state["max_track_progress"][agent_idx] = max(float(state["max_track_progress"][agent_idx]), progress)
@@ -488,6 +499,10 @@ def summarize_episode_diagnostics(env_states, multi_agent):
             "finishes": int(sum(np.count_nonzero(values) for values in finish_arrays)),
             "collisions": int(sum(np.sum(values) for values in collision_arrays)),
             "stalls": int(sum(np.sum(values) for values in stalled_arrays)),
+            "max_joint_speed": float(np.mean([
+                state.get("max_joint_speed_last", 0.0) for state in env_states])),
+            "hold_frames": int(max(
+                (int(state.get("hold_frames_peak", 0)) for state in env_states), default=0)),
         }
 
     return {
@@ -496,6 +511,10 @@ def summarize_episode_diagnostics(env_states, multi_agent):
         "finishes": int(sum(1 for state in env_states if state["finish_reached"])),
         "collisions": int(sum(state["collision_count"] for state in env_states)),
         "stalls": int(sum(state["stalled_count"] for state in env_states)),
+        "max_joint_speed": float(np.mean([
+            state.get("max_joint_speed_last", 0.0) for state in env_states])),
+        "hold_frames": int(max(
+            (int(state.get("hold_frames_peak", 0)) for state in env_states), default=0)),
     }
 
 

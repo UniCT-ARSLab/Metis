@@ -2,6 +2,7 @@
 
   <?xml version="1.0" ?>
 <robot name="xarm">
+    <!-- Joint limits are consumed by both physics-motor and kinematic control. -->
     <material name="DarkGrey">
         <color rgba="0.3 0.3 0.3 1.0" />
     </material>

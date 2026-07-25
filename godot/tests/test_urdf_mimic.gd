@@ -43,7 +43,7 @@ func _validate_runtime_propagation() -> bool:
 	var source_data := URDFJoint.new()
 	source_data.name = "source"
 	source_data.type = "revolute"
-	source_data.limit = URDFJoint.URDFLimit.new()
+	source_data.limit = URDFLimit.new()
 	source_data.limit.lower = -1.0
 	source_data.limit.upper = 1.0
 	source_data.limit.velocity = 2.0
@@ -54,7 +54,7 @@ func _validate_runtime_propagation() -> bool:
 	follower_data.mimic_joint = "source"
 	follower_data.mimic_multiplier = -0.5
 	follower_data.mimic_offset = 0.25
-	follower_data.limit = URDFJoint.URDFLimit.new()
+	follower_data.limit = URDFLimit.new()
 	follower_data.limit.lower = -1.0
 	follower_data.limit.upper = 1.0
 	follower_data.limit.velocity = 2.0

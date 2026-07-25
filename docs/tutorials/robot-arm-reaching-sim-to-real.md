@@ -55,6 +55,11 @@ Each component is multiplied by the corresponding URDF velocity limit, falling b
 `default_joint_speed` when the URDF has no usable value. This is a good match for a real
 robot that already has low-level joint servos.
 
+Bounded revolute joints are also protected at the position level. Kinematic integration
+is clamped to the URDF lower and upper limits, while commands that push farther into a
+limit are tapered over the final part of the joint range. Keep this supervisor active in
+deployment; a reward penalty is not a mechanical safety limit.
+
 The IK variant later in this guide keeps a three-value Cartesian action and runs the IK
 outside the network.
 
@@ -376,6 +381,13 @@ environment pair or a self-collision pair.
 
 The scenario discovers every `Marker3D` below `target_spawns_root`. Adding another
 marker automatically adds a candidate spawn.
+
+In the reaching example, those markers delimit a training volume. After the introductory
+curriculum, `continuous_target_sampling` draws coordinates throughout the axis-aligned
+volume instead of selecting only exact marker positions. This reduces memorization and
+makes held-out positions inside the declared workspace meaningful. Moving the target
+outside that volume is still out-of-distribution and must be covered by additional
+markers or a deliberately expanded workspace.
 
 At reset it:
 
