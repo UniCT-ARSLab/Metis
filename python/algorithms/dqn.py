@@ -55,6 +55,7 @@ from core.opponent_pool import (
     validate_team_layout,
 )
 from core.replay_buffer import ReplayBuffer
+from core.training_health import OffPolicyRecoveryRuntime
 from core.training import (
     AsyncCollectorPool,
     AsyncEventScheduler,
@@ -68,6 +69,7 @@ from core.training import (
     BestCheckpointTracker,
     add_training_budget_argument,
     add_best_checkpoint_arguments,
+    add_training_health_arguments,
     apply_ready_best_checkpoint,
     add_collector_arguments,
     add_lockstep_tuning_arguments,
@@ -232,6 +234,7 @@ def parse_args():
     add_lockstep_tuning_arguments(parser)
     add_opponent_pool_arguments(parser)
     add_best_checkpoint_arguments(parser)
+    add_training_health_arguments(parser)
     add_log_format_argument(parser)
     add_dashboard_arguments(parser)
     add_tensorflow_runtime_arguments(parser, include_compile_learner=True)
@@ -389,6 +392,7 @@ def run_async_dqn(
     start_episode,
     start_epsilon,
     learner_step,
+    demo_data=None,
     budget=None,
     opponent_pool=None,
     opponent_teams=None,
@@ -422,6 +426,12 @@ def run_async_dqn(
         return fn
 
     snapshot = PolicySnapshot(model.get_weights())
+    health_monitor = getattr(best_tracker, "health_monitor", None)
+    recovery_handler = getattr(health_monitor, "recovery_handler", None)
+    if recovery_handler is not None:
+        recovery_handler.set_policy_publisher(
+            lambda: snapshot.publish(model.get_weights())
+        )
     rngs = [np.random.default_rng(args.env_seed_base + 100_003 * idx) for idx in range(len(envs))]
 
     def epsilon_for_episode(episode):
@@ -606,6 +616,25 @@ def run_async_dqn(
         queue_capacity=args.async_queue_capacity,
     )
     scheduler = AsyncEventScheduler(args)
+    recovery_runtime = OffPolicyRecoveryRuntime(
+        args,
+        buffer,
+        replay_refill=(
+            lambda: buffer.add_many(
+                demo_data["obs"],
+                demo_data["actions"],
+                demo_data["rewards"],
+                demo_data["next_obs"],
+                demo_data["dones"],
+            )
+            if demo_data is not None and args.demo_prefill
+            else 0
+        ),
+        target_sync=lambda: target_model.set_weights(model.get_weights()),
+    )
+    recovery_runtime.attach_async(pool, scheduler, snapshot)
+    if recovery_handler is not None:
+        recovery_handler.set_post_restore(recovery_runtime.post_restore)
     print(
         f"Collector mode: async workers={len(envs)} queue={args.async_queue_capacity} "
         f"policy_sync_steps={args.async_policy_sync_steps} "
@@ -634,7 +663,13 @@ def run_async_dqn(
                 done_workers += 1
                 continue
             if isinstance(event, AsyncStepEvent):
-                step_events = scheduler.drain_step_events(pool, event)
+                step_events = [
+                    item
+                    for item in scheduler.drain_step_events(pool, event)
+                    if recovery_runtime.accepts(item)
+                ]
+                if not step_events:
+                    continue
                 collected_transitions = 0
                 for step_event in step_events:
                     for transition in step_event.transitions:
@@ -643,7 +678,10 @@ def run_async_dqn(
                 budget.consume(collected_transitions)
                 updates_due = scheduler.ingest(step_events)
                 updates_performed = 0
-                if len(buffer) >= max(args.replay_warmup, args.batch_size):
+                if (
+                    len(buffer) >= max(args.replay_warmup, args.batch_size)
+                    and not bool(getattr(health_monitor, "verification_pending", False))
+                ):
                     remaining_updates = updates_due
                     while remaining_updates > 0:
                         until_publish = (
@@ -1003,6 +1041,10 @@ def main():
                 flush=True,
             )
         optimizer.learning_rate.assign(args.learning_rate)
+        best_tracker.configure_recovery(
+            checkpoint,
+            [("q_network", optimizer)],
+        )
 
         # Resolved here, not at parse time: on --resume the horizon must span the episodes
         # that are actually left, starting from the epsilon the checkpoint carried.
@@ -1097,6 +1139,7 @@ def main():
                 start_episode,
                 epsilon,
                 learner_step,
+                demo_data,
                 budget,
                 opponent_pool=opponent_pool,
                 opponent_teams=opponent_teams,
@@ -1104,6 +1147,26 @@ def main():
             model.save_weights(args.weights_path)
             print(f"Saved weights: {args.weights_path}", flush=True)
             return
+
+        recovery_runtime = OffPolicyRecoveryRuntime(
+            args,
+            buffer,
+            replay_refill=(
+                lambda: buffer.add_many(
+                    demo_data["obs"],
+                    demo_data["actions"],
+                    demo_data["rewards"],
+                    demo_data["next_obs"],
+                    demo_data["dones"],
+                )
+                if demo_data is not None and args.demo_prefill
+                else 0
+            ),
+            target_sync=lambda: target_model.set_weights(model.get_weights()),
+        )
+        recovery_handler = best_tracker.health_monitor.recovery_handler
+        if recovery_handler is not None:
+            recovery_handler.set_post_restore(recovery_runtime.post_restore)
 
         last_saved_episode = None
         for episode in range(start_episode, args.num_episodes):
@@ -1257,7 +1320,10 @@ def main():
                     state["obs"] = next_obs
                     state["done"] = done
 
-                    if len(buffer) >= max(args.replay_warmup, args.batch_size):
+                    if (
+                        len(buffer) >= max(args.replay_warmup, args.batch_size)
+                        and not best_tracker.health_monitor.verification_pending
+                    ):
                         loss = float(learner_step(buffer, args.batch_size, 1)[0])
                         losses.append(loss)
                 if budget.exhausted:

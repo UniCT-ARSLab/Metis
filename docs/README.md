@@ -68,7 +68,8 @@ Metis currently supports:
 - Inspector-configured observations and rewards;
 - scenario events, progress providers, curriculum, and seeded resets;
 - manual demonstrations, full checkpoints, replay snapshots, and best-policy tracking;
-- an optional local dashboard for live episode metrics;
+- persistent training-health alerts and guarded opt-in recovery for native trainers;
+- an optional local dashboard for metrics, health state, and recovery events;
 - real-time or lockstep inference;
 - Keras, TensorFlow Lite, and optional ONNX policy artifacts;
 - Linux CPU/CUDA and Apple Silicon with TensorFlow Metal.

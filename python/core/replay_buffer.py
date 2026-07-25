@@ -180,6 +180,19 @@ class ReplayBuffer:
         self._protected_demo_count = 0
         self._max_priority = 1.0
 
+    def clear_online(self, preserve_protected_demos=True):
+        """Remove online experience, optionally retaining protected expert transitions."""
+        if preserve_protected_demos and self._protected_demo_count > 0:
+            self._size = self._protected_demo_count
+            self._position = self._protected_demo_count
+            self._max_priority = max(
+                1.0,
+                float(np.max(self._priorities[: self._protected_demo_count])),
+            )
+            return self._protected_demo_count
+        self.clear()
+        return 0
+
     def export_snapshot(self):
         if self._size <= 0:
             raise ValueError("Cannot snapshot an empty replay buffer")

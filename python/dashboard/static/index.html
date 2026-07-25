@@ -42,7 +42,7 @@
         <span id="status-dot" class="w-2.5 h-2.5 rounded-full bg-gray-400"></span>
         <span id="status-text" class="text-gray-500 dark:text-gray-400">connecting…</span>
       </div>
-      <span id="elapsed" class="text-gray-500 dark:text-gray-400 tabular-nums hidden sm:inline" title="Tempo trascorso dall'avvio dell'allenamento"></span>
+      <span id="elapsed" class="text-gray-500 dark:text-gray-400 tabular-nums hidden sm:inline" title="Elapsed time since training started"></span>
       <label class="flex items-center gap-1.5 text-gray-500 dark:text-gray-400">
         <span class="hidden sm:inline">update every</span>
         <select id="batch" class="bg-gray-100 dark:bg-white/10 rounded-lg px-2 py-1 outline-none">
@@ -53,7 +53,7 @@
           <option value="50">50 ep</option>
         </select>
       </label>
-      <label class="flex items-center gap-1.5 text-gray-500 dark:text-gray-400" title="Smoothing: media mobile (EMA) per vedere il trend sotto il rumore per-episodio">
+      <label class="flex items-center gap-1.5 text-gray-500 dark:text-gray-400" title="EMA smoothing reveals the trend beneath per-episode noise">
         <span class="hidden sm:inline">smoothing</span>
         <select id="smoothing" class="bg-gray-100 dark:bg-white/10 rounded-lg px-2 py-1 outline-none">
           <option value="0">none</option>
@@ -71,6 +71,26 @@
 </header>
 
 <main class="max-w-7xl mx-auto px-5 py-6 space-y-6">
+  <section id="health-panel" class="card bg-white dark:bg-white/5 border border-gray-200 dark:border-white/10 p-5">
+    <div class="flex flex-col md:flex-row md:items-start gap-4">
+      <div class="flex-1 min-w-0">
+        <div class="flex flex-wrap items-center gap-2">
+          <h2 class="text-sm font-semibold">Training health</h2>
+          <span id="health-state" class="px-2 py-0.5 rounded-md text-xs font-semibold bg-gray-100 text-gray-600 dark:bg-white/10 dark:text-gray-300">warming up</span>
+          <span id="training-phase" class="px-2 py-0.5 rounded-md text-xs bg-gray-100 text-gray-600 dark:bg-white/10 dark:text-gray-300">training</span>
+        </div>
+        <p id="health-reason" class="text-sm text-gray-500 dark:text-gray-400 mt-2">Waiting for policy evaluation.</p>
+      </div>
+      <div class="grid grid-cols-2 gap-x-6 gap-y-1 text-xs text-gray-500 dark:text-gray-400 shrink-0">
+        <span>Automatic recovery</span><strong id="health-auto" class="text-right text-gray-700 dark:text-gray-200">off</strong>
+        <span title="Successful rollback operations over the lifetime of this run">Lifetime recoveries</span><strong id="health-recoveries" class="text-right text-gray-700 dark:text-gray-200">0</strong>
+        <span title="Attempt budget for the current collapse; healthy evaluations open a fresh cycle">Current cycle</span><strong id="health-cycle" class="text-right text-gray-700 dark:text-gray-200">0 · 0/3</strong>
+        <span title="Whether the restored checkpoint is awaiting an isolated frozen-policy evaluation">Verification</span><strong id="health-verification" class="text-right text-gray-700 dark:text-gray-200">idle</strong>
+      </div>
+    </div>
+    <div id="health-events" class="mt-4 pt-3 border-t border-gray-100 dark:border-white/10 space-y-1 text-xs"></div>
+  </section>
+
   <section id="kpis" class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4"></section>
 
   <section class="grid grid-cols-1 lg:grid-cols-2 gap-5">
@@ -111,6 +131,7 @@
 <script>
 const MAX_POINTS = 500;
 let episodes = [];
+let healthEvents = [];
 let charts = {};
 let runStartedAt = null, runStatus = "running", runFinalElapsed = null;
 let smoothing = parseFloat(localStorage.getItem("metis-smoothing") ?? "0.85");
@@ -177,7 +198,76 @@ function renderMeta(m) {
   if (m.started_at) runStartedAt = m.started_at;
   if (m.status) runStatus = m.status;
   if (m.elapsed_seconds != null) runFinalElapsed = m.elapsed_seconds;
+  renderHealth(m);
   tickElapsed();
+}
+
+function healthClasses(state) {
+  if (state === "healthy") return "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300";
+  if (state === "warning") return "bg-amber-100 text-amber-800 dark:bg-amber-500/20 dark:text-amber-300";
+  if (state === "critical") return "bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-300";
+  if (state === "disabled") return "bg-gray-100 text-gray-600 dark:bg-white/10 dark:text-gray-300";
+  return "bg-blue-100 text-blue-700 dark:bg-blue-500/20 dark:text-blue-300";
+}
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;"
+  })[c]);
+}
+function renderHealth(data) {
+  if (!data) return;
+  const state = data.state ?? data.health_state ?? "warming_up";
+  const phase = data.phase ?? data.training_phase ?? "training";
+  const reason = data.reason ?? data.health_reason ?? "Waiting for policy evaluation.";
+  const stateEl = document.getElementById("health-state");
+  stateEl.textContent = String(state).replaceAll("_", " ");
+  stateEl.className = "px-2 py-0.5 rounded-md text-xs font-semibold " + healthClasses(state);
+  const phaseEl = document.getElementById("training-phase");
+  phaseEl.textContent = String(phase).replaceAll("_", " ");
+  phaseEl.className = "px-2 py-0.5 rounded-md text-xs " +
+    (phase === "recovering"
+      ? "bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-300"
+      : phase === "stabilizing"
+        ? "bg-amber-100 text-amber-800 dark:bg-amber-500/20 dark:text-amber-300"
+        : phase === "verifying"
+          ? "bg-blue-100 text-blue-700 dark:bg-blue-500/20 dark:text-blue-300"
+        : "bg-gray-100 text-gray-600 dark:bg-white/10 dark:text-gray-300");
+  document.getElementById("health-reason").textContent = reason;
+  document.getElementById("health-auto").textContent =
+    (data.auto_recovery ?? false) ? "enabled" : "off";
+  document.getElementById("health-recoveries").textContent =
+    data.recovery_count ?? data.recoveries ?? 0;
+  const cycle = data.recovery_cycle ?? 0;
+  const attempt = data.recovery_cycle_attempt ?? data.recovery_attempt ?? 0;
+  const maximum = data.recovery_max_attempts ?? 3;
+  const mode = data.last_recovery_mode ? ` · ${data.last_recovery_mode}` : "";
+  document.getElementById("health-cycle").textContent =
+    `${cycle} · ${attempt}/${maximum}${mode}`;
+  document.getElementById("health-verification").textContent =
+    (data.verification_pending ?? phase === "verifying") ? "pending" : "idle";
+}
+function renderHealthEvents() {
+  const target = document.getElementById("health-events");
+  const relevant = healthEvents.filter(e => e.event !== "snapshot").slice(-5).reverse();
+  if (!relevant.length) {
+    target.innerHTML = '<span class="text-gray-400">No health alerts or recovery events yet.</span>';
+    return;
+  }
+  target.innerHTML = relevant.map(e => {
+    const color = e.severity === "critical" ? "text-red-600 dark:text-red-300"
+      : e.severity === "warning" ? "text-amber-700 dark:text-amber-300"
+      : "text-gray-500 dark:text-gray-400";
+    const episode = e.episode == null ? "" : `ep ${e.episode} · `;
+    const label = String(e.event || "state").replaceAll("_", " ");
+    return `<div class="${color}"><span class="font-medium">${escapeHtml(episode)}${escapeHtml(label)}</span><span class="text-gray-400"> · ${escapeHtml(e.detail || e.reason || "")}</span></div>`;
+  }).join("");
+}
+function ingestHealth(event) {
+  if (!event) return;
+  healthEvents.push(event);
+  if (healthEvents.length > 500) healthEvents = healthEvents.slice(-500);
+  renderHealth(event);
+  renderHealthEvents();
 }
 function fmtDuration(s) {
   s = Math.max(0, Math.floor(s));
@@ -281,6 +371,15 @@ async function loadHistory() {
     document.getElementById("footer").textContent = episodes.length + " episodes (history)";
   } catch (e) { /* ws snapshot will fill in */ }
 }
+async function loadHealthHistory() {
+  try {
+    const res = await fetch("/api/health");
+    const data = await res.json();
+    healthEvents = data.events || [];
+    if (healthEvents.length) renderHealth(healthEvents[healthEvents.length - 1]);
+    renderHealthEvents();
+  } catch (e) { renderHealthEvents(); }
+}
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${proto}://${location.host}/ws`);
@@ -292,6 +391,14 @@ function connect() {
     if (msg.type === "meta") { renderMeta(msg.data); }
     else if (msg.type === "snapshot") { if (episodes.length === 0) { episodes = msg.data; renderKpis(); updateCharts(); } }
     else if (msg.type === "episodes") { ingest(msg.data); }
+    else if (msg.type === "health") { ingestHealth(msg.data); }
+    else if (msg.type === "health_snapshot") {
+      if (healthEvents.length === 0) {
+        healthEvents = msg.data || [];
+        if (healthEvents.length) renderHealth(healthEvents[healthEvents.length - 1]);
+        renderHealthEvents();
+      }
+    }
   };
   window._ws = ws;
 }
@@ -319,7 +426,7 @@ document.getElementById("theme").addEventListener("click", () => applyTheme(!doc
 applyTheme(localStorage.getItem("metis-theme") === "dark");
 initCharts();
 loadMeta();
-loadHistory().then(connect);
+Promise.all([loadHistory(), loadHealthHistory()]).then(connect);
 </script>
 </body>
 </html>

@@ -49,6 +49,7 @@ from core.models import build_actor_forward_fn, build_continuous_actor, build_co
 from core.policy_artifact import PolicyArtifactSaver, build_policy_metadata, load_policy_into_model
 from core.opponent_pool import OpponentPool, add_opponent_pool_arguments, validate_team_layout
 from core.replay_buffer import ReplayBuffer
+from core.training_health import OffPolicyRecoveryRuntime
 from core.training import (
     AsyncCollectorPool,
     AsyncEventScheduler,
@@ -62,6 +63,7 @@ from core.training import (
     BestCheckpointTracker,
     add_training_budget_argument,
     add_best_checkpoint_arguments,
+    add_training_health_arguments,
     apply_ready_best_checkpoint,
     add_collector_arguments,
     add_lockstep_tuning_arguments,
@@ -215,6 +217,7 @@ def parse_args(trainer_variant):
     add_lockstep_tuning_arguments(parser)
     add_opponent_pool_arguments(parser)
     add_best_checkpoint_arguments(parser)
+    add_training_health_arguments(parser)
     add_log_format_argument(parser)
     add_dashboard_arguments(parser)
     add_tensorflow_runtime_arguments(parser, include_compile_learner=True)
@@ -1225,6 +1228,12 @@ def run_async_ddpg(
     # forward needs tracing.
     actor_forwards = [build_actor_forward_fn(m, obs_dim) for m in local_models]
     snapshot = PolicySnapshot(actor.get_weights())
+    health_monitor = getattr(best_tracker, "health_monitor", None)
+    recovery_handler = getattr(health_monitor, "recovery_handler", None)
+    if recovery_handler is not None:
+        recovery_handler.set_policy_publisher(
+            lambda: snapshot.publish(actor.get_weights())
+        )
     rngs = [np.random.default_rng(args.env_seed_base + 100_003 * idx) for idx in range(len(envs))]
 
     def noise_for_episode(episode):
@@ -1299,6 +1308,35 @@ def run_async_ddpg(
         queue_capacity=args.async_queue_capacity,
     )
     scheduler = AsyncEventScheduler(args)
+    def refill_recovery_replay():
+        if demo_data is None or not args.demo_prefill:
+            return 0
+        return buffer.add_many(
+            demo_data["obs"],
+            demo_data["actions"],
+            demo_data["rewards"],
+            demo_data["next_obs"],
+            demo_data["dones"],
+            is_demo=args.trainer_variant == "ddpgfd",
+            protect=args.trainer_variant == "ddpgfd",
+        )
+
+    def sync_recovery_targets():
+        target_actor.set_weights(actor.get_weights())
+        target_critic.set_weights(critic.get_weights())
+        if critic2 is not None:
+            target_critic2.set_weights(critic2.get_weights())
+
+    recovery_runtime = OffPolicyRecoveryRuntime(
+        args,
+        buffer,
+        initial_critic_warmup=critic_warmup_target,
+        replay_refill=refill_recovery_replay,
+        target_sync=sync_recovery_targets,
+    )
+    recovery_runtime.attach_async(pool, scheduler, snapshot)
+    if recovery_handler is not None:
+        recovery_handler.set_post_restore(recovery_runtime.post_restore)
     print(
         f"Collector mode: async workers={len(envs)} queue={args.async_queue_capacity} "
         f"policy_sync_steps={args.async_policy_sync_steps} "
@@ -1339,7 +1377,6 @@ def run_async_ddpg(
     completed = int(start_episode)
     done_workers = 0
     learner_updates = int(critic_optimizer.iterations.numpy())
-    critic_updates_since_resume = 0
     actor_losses = []
     critic_losses = []
     critic2_losses = []
@@ -1360,7 +1397,13 @@ def run_async_ddpg(
                 done_workers += 1
                 continue
             if isinstance(event, AsyncStepEvent):
-                step_events = scheduler.drain_step_events(pool, event)
+                step_events = [
+                    item
+                    for item in scheduler.drain_step_events(pool, event)
+                    if recovery_runtime.accepts(item)
+                ]
+                if not step_events:
+                    continue
                 collected_transitions = 0
                 for step_event in step_events:
                     for transition in step_event.transitions:
@@ -1371,8 +1414,8 @@ def run_async_ddpg(
                 updates_performed = 0
                 if len(buffer) >= max(args.replay_warmup, args.batch_size):
                     for _update in range(updates_due):
-                        update_actor = critic_updates_since_resume >= critic_warmup_target
-                        next_update = learner_updates + 1
+                        update_actor = recovery_runtime.should_update_policy()
+                        next_update = int(critic_optimizer.iterations.numpy()) + 1
                         bc_weight = scheduled_bc_weight(
                             next_update,
                             args.demo_bc_weight_start,
@@ -1390,8 +1433,8 @@ def run_async_ddpg(
                             critic2_losses.append(result["critic2_loss"])
                         if result["bc_loss"] is not None:
                             bc_losses.append(result["bc_loss"])
-                        critic_updates_since_resume += 1
-                        learner_updates += 1
+                        recovery_runtime.record_critic_update()
+                        learner_updates = int(critic_optimizer.iterations.numpy())
                         updates_performed += 1
                         if result["actor_loss"] is not None:
                             actor_losses.append(result["actor_loss"])
@@ -1431,7 +1474,7 @@ def run_async_ddpg(
                 controlled_agents = 1
             mean_action = summarize_actions(mean_actions)
             mean_delta = summarize_action_deltas([state], args.multi_agent)
-            warmup_left = max(0, critic_warmup_target - critic_updates_since_resume)
+            warmup_left = recovery_runtime.warmup_left
             throughput = scheduler.throughput(pool)
             print_episode_metrics(event.episode, [
                 ("mode", [
@@ -1798,6 +1841,14 @@ def main(trainer_variant):
         critic_optimizer.learning_rate.assign(args.critic_learning_rate)
         if critic2_optimizer is not None:
             critic2_optimizer.learning_rate.assign(args.critic_learning_rate)
+        best_tracker.configure_recovery(
+            checkpoint,
+            [
+                ("actor", actor_optimizer),
+                ("critic", critic_optimizer),
+                ("critic2", critic2_optimizer),
+            ],
+        )
 
         demo_data = None
         if args.demo_path:
@@ -1883,7 +1934,6 @@ def main(trainer_variant):
                     )
 
         critic_warmup_target = max(0, int(args.critic_warmup_updates)) if resume_checkpoint else 0
-        critic_updates_since_resume = 0
         if critic_warmup_target > 0:
             print(
                 f"Resume critic warmup: updates={critic_warmup_target} actor=frozen",
@@ -1970,6 +2020,36 @@ def main(trainer_variant):
             compiled=args.tf_compile_learner,
             xla=args.tf_xla,
         )
+
+        def refill_recovery_replay():
+            if demo_data is None or not args.demo_prefill:
+                return 0
+            return buffer.add_many(
+                demo_data["obs"],
+                demo_data["actions"],
+                demo_data["rewards"],
+                demo_data["next_obs"],
+                demo_data["dones"],
+                is_demo=args.trainer_variant == "ddpgfd",
+                protect=args.trainer_variant == "ddpgfd",
+            )
+
+        def sync_recovery_targets():
+            target_actor.set_weights(actor.get_weights())
+            target_critic.set_weights(critic.get_weights())
+            if critic2 is not None:
+                target_critic2.set_weights(critic2.get_weights())
+
+        recovery_runtime = OffPolicyRecoveryRuntime(
+            args,
+            buffer,
+            initial_critic_warmup=critic_warmup_target,
+            replay_refill=refill_recovery_replay,
+            target_sync=sync_recovery_targets,
+        )
+        recovery_handler = best_tracker.health_monitor.recovery_handler
+        if recovery_handler is not None:
+            recovery_handler.set_post_restore(recovery_runtime.post_restore)
 
         last_saved_episode = None
         for episode in range(start_episode, args.num_episodes):
@@ -2193,7 +2273,7 @@ def main(trainer_variant):
                     state["done"] = done
 
                     if len(buffer) >= max(args.replay_warmup, args.batch_size):
-                        update_actor = critic_updates_since_resume >= critic_warmup_target
+                        update_actor = recovery_runtime.should_update_policy()
                         learner_update = int(critic_optimizer.iterations.numpy()) + 1
                         bc_weight = scheduled_bc_weight(
                             learner_update,
@@ -2212,12 +2292,12 @@ def main(trainer_variant):
                             critic2_losses.append(result["critic2_loss"])
                         if result["bc_loss"] is not None:
                             bc_losses.append(result["bc_loss"])
-                        critic_updates_since_resume += 1
+                        warmup_completed = recovery_runtime.record_critic_update()
                         if result["actor_loss"] is not None:
                             actor_losses.append(result["actor_loss"])
-                        elif critic_updates_since_resume == critic_warmup_target:
+                        elif warmup_completed:
                             print(
-                                f"Resume critic warmup complete after updates={critic_updates_since_resume}; "
+                                f"Critic warmup complete after updates={recovery_runtime.critic_updates}; "
                                 "actor will be unfrozen on the next update.",
                                 flush=True,
                             )
@@ -2258,7 +2338,7 @@ def main(trainer_variant):
             finish_rate = diagnostics["finishes"] / max(controlled_agents, 1)
             collision_rate = diagnostics["collisions"] / max(controlled_agents, 1)
             stall_rate = diagnostics["stalls"] / max(controlled_agents, 1)
-            critic_warmup_remaining = max(0, critic_warmup_target - critic_updates_since_resume)
+            critic_warmup_remaining = recovery_runtime.warmup_left
             print_episode_metrics(episode, [
                 ("mode", [
                     ("algorithm", args.trainer_variant),

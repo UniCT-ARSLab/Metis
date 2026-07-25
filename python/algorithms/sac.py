@@ -28,6 +28,7 @@ from core.models import build_continuous_critic, build_sac_actor
 from core.policy_artifact import PolicyArtifactSaver, build_policy_metadata, load_policy_into_model
 from core.opponent_pool import OpponentPool, add_opponent_pool_arguments, validate_team_layout
 from core.replay_buffer import ReplayBuffer
+from core.training_health import OffPolicyRecoveryRuntime
 from core.training import (
     AsyncCollectorPool,
     AsyncEventScheduler,
@@ -41,6 +42,7 @@ from core.training import (
     BestCheckpointTracker,
     add_training_budget_argument,
     add_best_checkpoint_arguments,
+    add_training_health_arguments,
     apply_ready_best_checkpoint,
     add_collector_arguments,
     add_lockstep_tuning_arguments,
@@ -248,6 +250,7 @@ def parse_args():
     add_collector_arguments(parser)
     add_opponent_pool_arguments(parser)
     add_best_checkpoint_arguments(parser)
+    add_training_health_arguments(parser)
     add_parallel_env_arguments(parser)
     add_lockstep_tuning_arguments(parser)
     add_log_format_argument(parser)
@@ -721,6 +724,7 @@ def run_async_sac(
     random_action_low,
     random_action_high,
     critic_warmup_target,
+    demo_data=None,
     budget=None,
 ):
     validate_async_arguments(args)
@@ -774,6 +778,12 @@ def run_async_sac(
         for m in local_models
     ]
     snapshot = PolicySnapshot(actor.get_weights())
+    health_monitor = getattr(best_tracker, "health_monitor", None)
+    recovery_handler = getattr(health_monitor, "recovery_handler", None)
+    if recovery_handler is not None:
+        recovery_handler.set_policy_publisher(
+            lambda: snapshot.publish(actor.get_weights())
+        )
     rngs = [np.random.default_rng(args.env_seed_base + 100_003 * idx) for idx in range(len(envs))]
 
     def action_selector(worker_id, env, _episode, _step_idx, local_actor, state):
@@ -830,6 +840,30 @@ def run_async_sac(
         queue_capacity=args.async_queue_capacity,
     )
     scheduler = AsyncEventScheduler(args)
+    recovery_runtime = OffPolicyRecoveryRuntime(
+        args,
+        buffer,
+        initial_critic_warmup=critic_warmup_target,
+        normal_policy_update_every=args.policy_update_every,
+        replay_refill=(
+            lambda: buffer.add_many(
+                demo_data["obs"],
+                demo_data["actions"],
+                demo_data["rewards"],
+                demo_data["next_obs"],
+                demo_data["dones"],
+            )
+            if demo_data is not None and args.demo_prefill
+            else 0
+        ),
+        target_sync=lambda: (
+            target_critic1.set_weights(critic1.get_weights()),
+            target_critic2.set_weights(critic2.get_weights()),
+        ),
+    )
+    recovery_runtime.attach_async(pool, scheduler, snapshot)
+    if recovery_handler is not None:
+        recovery_handler.set_post_restore(recovery_runtime.post_restore)
     print(
         f"Collector mode: async workers={len(envs)} queue={args.async_queue_capacity} "
         f"policy_sync_steps={args.async_policy_sync_steps} "
@@ -842,8 +876,6 @@ def run_async_sac(
     done_workers = 0
     learner_updates = 0
     policy_updates_total = 0
-    critic_updates_since_resume = 0
-    policy_update_candidates = 0
     actor_losses = []
     critic1_losses = []
     critic2_losses = []
@@ -864,7 +896,13 @@ def run_async_sac(
                 done_workers += 1
                 continue
             if isinstance(event, AsyncStepEvent):
-                step_events = scheduler.drain_step_events(pool, event)
+                step_events = [
+                    item
+                    for item in scheduler.drain_step_events(pool, event)
+                    if recovery_runtime.accepts(item)
+                ]
+                if not step_events:
+                    continue
                 collected_transitions = 0
                 for step_event in step_events:
                     for transition in step_event.transitions:
@@ -875,15 +913,12 @@ def run_async_sac(
                 updates_performed = 0
                 if len(buffer) >= max(args.replay_warmup, args.batch_size):
                     for _update in range(updates_due):
-                        warmup_complete = critic_updates_since_resume >= critic_warmup_target
-                        update_policy = warmup_complete and policy_update_candidates % args.policy_update_every == 0
-                        if warmup_complete:
-                            policy_update_candidates += 1
+                        update_policy = recovery_runtime.should_update_policy()
                         batch = buffer.sample(args.batch_size, action_dtype=np.float32)
                         losses = sac_learner(*batch, update_policy=update_policy)
                         critic1_losses.append(losses[1])
                         critic2_losses.append(losses[2])
-                        critic_updates_since_resume += 1
+                        recovery_runtime.record_critic_update()
                         learner_updates += 1
                         updates_performed += 1
                         if losses[0] is not None:
@@ -924,7 +959,7 @@ def run_async_sac(
             finish_rate = diagnostics["finishes"] / max(controlled_agents, 1)
             collision_rate = diagnostics["collisions"] / max(controlled_agents, 1)
             stall_rate = diagnostics["stalls"] / max(controlled_agents, 1)
-            warmup_left = max(0, critic_warmup_target - critic_updates_since_resume)
+            warmup_left = recovery_runtime.warmup_left
             throughput = scheduler.throughput(pool)
             print_episode_metrics(event.episode, [
                 ("mode", [
@@ -1164,6 +1199,15 @@ def main():
             args,
             resumed=resume_checkpoint is not None,
         )
+        best_tracker.configure_recovery(
+            checkpoint,
+            [
+                ("actor", actor_optimizer),
+                ("critic1", critic1_optimizer),
+                ("critic2", critic2_optimizer),
+                ("alpha", alpha_optimizer),
+            ],
+        )
 
         demo_data = None
         if args.demo_path:
@@ -1217,8 +1261,6 @@ def main():
             )
 
         critic_warmup_target = max(0, int(args.critic_warmup_updates)) if resume_checkpoint else 0
-        critic_updates_since_resume = 0
-        policy_update_candidates = 0
         if critic_warmup_target > 0:
             print(
                 f"Resume critic warmup: updates={critic_warmup_target} actor=frozen alpha=frozen",
@@ -1264,6 +1306,7 @@ def main():
                 random_action_low,
                 random_action_high,
                 critic_warmup_target,
+                demo_data,
                 budget,
             )
             actor.save_weights(args.actor_weights_path)
@@ -1306,6 +1349,31 @@ def main():
             f" | grad-clip: {describe_grad_clip(args)}",
             flush=True,
         )
+
+        recovery_runtime = OffPolicyRecoveryRuntime(
+            args,
+            buffer,
+            initial_critic_warmup=critic_warmup_target,
+            normal_policy_update_every=args.policy_update_every,
+            replay_refill=(
+                lambda: buffer.add_many(
+                    demo_data["obs"],
+                    demo_data["actions"],
+                    demo_data["rewards"],
+                    demo_data["next_obs"],
+                    demo_data["dones"],
+                )
+                if demo_data is not None and args.demo_prefill
+                else 0
+            ),
+            target_sync=lambda: (
+                target_critic1.set_weights(critic1.get_weights()),
+                target_critic2.set_weights(critic2.get_weights()),
+            ),
+        )
+        recovery_handler = best_tracker.health_monitor.recovery_handler
+        if recovery_handler is not None:
+            recovery_handler.set_post_restore(recovery_runtime.post_restore)
 
         last_saved_episode = None
         for episode in range(start_episode, args.num_episodes):
@@ -1529,25 +1597,19 @@ def main():
                     state["done"] = done
 
                     if len(buffer) >= max(args.replay_warmup, args.batch_size):
-                        warmup_complete = critic_updates_since_resume >= critic_warmup_target
-                        update_policy = (
-                            warmup_complete
-                            and policy_update_candidates % args.policy_update_every == 0
-                        )
-                        if warmup_complete:
-                            policy_update_candidates += 1
+                        update_policy = recovery_runtime.should_update_policy()
                         batch = buffer.sample(args.batch_size, action_dtype=np.float32)
                         losses = sac_learner(*batch, update_policy=update_policy)
                         critic1_losses.append(losses[1])
                         critic2_losses.append(losses[2])
-                        critic_updates_since_resume += 1
+                        warmup_completed = recovery_runtime.record_critic_update()
                         if update_policy:
                             actor_losses.append(losses[0])
                             alpha_losses.append(losses[3])
                             alphas.append(losses[4])
-                        elif critic_updates_since_resume == critic_warmup_target:
+                        elif warmup_completed:
                             print(
-                                f"Resume critic warmup complete after updates={critic_updates_since_resume}; "
+                                f"Critic warmup complete after updates={recovery_runtime.critic_updates}; "
                                 "actor and alpha will be unfrozen on the next update.",
                                 flush=True,
                             )
@@ -1580,7 +1642,7 @@ def main():
             finish_rate = diagnostics["finishes"] / max(controlled_agents, 1)
             collision_rate = diagnostics["collisions"] / max(controlled_agents, 1)
             stall_rate = diagnostics["stalls"] / max(controlled_agents, 1)
-            critic_warmup_remaining = max(0, critic_warmup_target - critic_updates_since_resume)
+            critic_warmup_remaining = recovery_runtime.warmup_left
             print_episode_metrics(episode, [
                 ("mode", [
                     ("exploration", "random" if use_random_exploration else "policy"),

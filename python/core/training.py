@@ -19,6 +19,38 @@ from queue import Empty, Full, Queue
 
 import numpy as np
 
+from core.training_health import (
+    TensorFlowCheckpointRecovery,
+    TrainingHealthMonitor,
+)
+
+
+_HEALTH_EVENT_SINKS = []
+_ACTIVE_TRAINING_HEALTH_MONITOR = None
+
+
+def register_health_event_sink(sink):
+    """Register a non-blocking consumer for health-state transitions."""
+    _HEALTH_EVENT_SINKS.append(sink)
+
+
+def _emit_health_event(event):
+    for sink in list(_HEALTH_EVENT_SINKS):
+        try:
+            sink(event)
+        except Exception:
+            pass
+
+
+def ensure_training_health_monitor(args, algorithm):
+    global _ACTIVE_TRAINING_HEALTH_MONITOR
+    monitor = getattr(args, "_training_health_monitor", None)
+    if monitor is None:
+        monitor = TrainingHealthMonitor(args, algorithm, event_sink=_emit_health_event)
+        args._training_health_monitor = monitor
+    _ACTIVE_TRAINING_HEALTH_MONITOR = monitor
+    return monitor
+
 
 def episode_step_indices(max_steps):
     """Iterate episode step indices; zero means no Python-side time limit."""
@@ -192,6 +224,149 @@ def add_best_checkpoint_arguments(parser):
     )
 
 
+def add_training_health_arguments(parser):
+    parser.add_argument(
+        "--health-monitor",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Track training health from frozen policy evaluations, numerical telemetry, "
+            "and checkpoint history. Alerts are persisted even without the dashboard."
+        ),
+    )
+    parser.add_argument(
+        "--auto-recovery",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "On a confirmed policy collapse, restore the validated best checkpoint and "
+            "reduce learning rates. Disabled by default because rollback changes training."
+        ),
+    )
+    parser.add_argument(
+        "--health-warning-drop",
+        type=float,
+        default=0.35,
+        help="Relative frozen-evaluation drop that raises a warning.",
+    )
+    parser.add_argument(
+        "--health-critical-drop",
+        type=float,
+        default=0.60,
+        help="Relative frozen-evaluation drop considered a collapse candidate.",
+    )
+    parser.add_argument(
+        "--health-collapse-patience",
+        type=int,
+        default=2,
+        help="Consecutive bad frozen evaluations required before declaring collapse.",
+    )
+    parser.add_argument(
+        "--health-plateau-evaluations",
+        type=int,
+        default=6,
+        help="Frozen evaluations without a new best before emitting a plateau warning; zero disables it.",
+    )
+    parser.add_argument("--health-min-success-baseline", type=float, default=0.05)
+    parser.add_argument("--health-reward-scale-floor", type=float, default=1.0)
+    parser.add_argument(
+        "--health-state-path",
+        default=None,
+        help="Current health-state JSON path; defaults to CHECKPOINT_DIR/training_health.json.",
+    )
+    parser.add_argument(
+        "--recovery-lr-factor",
+        type=float,
+        default=None,
+        help=(
+            "Legacy common learning-rate factor. When set, it is the fallback for "
+            "optimizer roles without an explicit recovery factor."
+        ),
+    )
+    parser.add_argument(
+        "--recovery-actor-lr-factor",
+        type=float,
+        default=None,
+        help="Actor LR scale; effective default is 1/30.",
+    )
+    parser.add_argument(
+        "--recovery-critic-lr-factor",
+        type=float,
+        default=None,
+        help="Critic LR scale; effective default is 1/3.",
+    )
+    parser.add_argument(
+        "--recovery-alpha-lr-factor",
+        type=float,
+        default=None,
+        help="SAC entropy-temperature LR scale; effective default is 1/30.",
+    )
+    parser.add_argument(
+        "--recovery-policy-lr-factor",
+        type=float,
+        default=None,
+        help="DQN/PPO optimizer LR scale; effective default is 1/4.",
+    )
+    parser.add_argument("--recovery-min-lr-scale", type=float, default=0.01)
+    parser.add_argument(
+        "--recovery-max-attempts",
+        type=int,
+        default=3,
+        help="Maximum attempts in one recovery cycle, not over the lifetime of the run.",
+    )
+    parser.add_argument(
+        "--recovery-hard-after-attempt",
+        type=int,
+        default=2,
+        help="Cycle attempt that starts clearing stale online replay; one means always hard.",
+    )
+    parser.add_argument(
+        "--recovery-critic-warmup-updates",
+        type=int,
+        default=3000,
+        help="Critic-only updates after SAC/DDPG/TD3-family rollback.",
+    )
+    parser.add_argument(
+        "--recovery-policy-update-every",
+        type=int,
+        default=4,
+        help="Minimum critic updates between actor updates while a recovered off-policy run stabilizes.",
+    )
+    parser.add_argument(
+        "--recovery-cycle-reset-evaluations",
+        type=int,
+        default=2,
+        help="Healthy frozen evaluations required to close a recovery cycle.",
+    )
+    parser.add_argument(
+        "--recovery-min-evaluations",
+        type=int,
+        default=5,
+        help="Frozen evaluations required before an automatic rollback may consume an attempt.",
+    )
+    parser.add_argument(
+        "--recovery-require-success-baseline",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "With success-based/auto ranking, wait for a meaningful best success rate "
+            "before rollback. Reward-only tasks should use --best-metric reward_mean."
+        ),
+    )
+    parser.add_argument(
+        "--recovery-cooldown-evaluations",
+        type=int,
+        default=2,
+        help="Frozen evaluations to wait before another automatic recovery.",
+    )
+    parser.add_argument(
+        "--recovery-keep-diagnostics",
+        type=int,
+        default=3,
+        help="Pre-recovery TensorFlow checkpoints retained for diagnosis or manual rollback.",
+    )
+
+
 @dataclass(frozen=True)
 class PolicyEvaluationResult:
     episode: int
@@ -207,7 +382,13 @@ class BestCheckpointTracker:
     def __init__(self, args, algorithm):
         self.args = args
         self.algorithm = str(algorithm)
+        self.health_monitor = ensure_training_health_monitor(args, algorithm)
         self.enabled = bool(getattr(args, "best_checkpoint", False))
+        if self.health_monitor.auto_recovery and not self.enabled:
+            raise ValueError(
+                "--auto-recovery requires --best-checkpoint because only a frozen, "
+                "validated policy is safe to restore automatically"
+            )
         configured_dir = getattr(args, "best_checkpoint_dir", None)
         self.directory = Path(configured_dir or (Path(args.checkpoint_dir) / "best"))
         self.metadata_path = self.directory / "best_metrics.json"
@@ -228,6 +409,19 @@ class BestCheckpointTracker:
             self._clear_staging()  # drop leftovers from a killed run
             self._load_retained()
             self._load_metadata()
+
+    def configure_recovery(self, checkpoint, optimizers, *, policy_publisher=None, post_restore=None):
+        handler = TensorFlowCheckpointRecovery(
+            checkpoint,
+            self.args.checkpoint_dir,
+            optimizers,
+            keep_diagnostics=getattr(self.args, "recovery_keep_diagnostics", 3),
+            policy_publisher=policy_publisher,
+            post_restore=post_restore,
+        )
+        self.health_monitor.set_recovery_handler(handler)
+        self.args._training_recovery_handler = handler
+        return handler
 
     def _validate_arguments(self):
         # The tracker owns and prunes its directory, so sharing it with the training
@@ -278,7 +472,11 @@ class BestCheckpointTracker:
 
     def should_evaluate(self, episode):
         every = int(getattr(self.args, "best_evaluation_every", 0))
-        return self.enabled and every > 0 and int(episode) > 0 and int(episode) % every == 0
+        if not self.enabled or int(episode) <= 0:
+            return False
+        if self.health_monitor.verification_pending:
+            return self._pending is None and self._ready is None
+        return every > 0 and int(episode) % every == 0
 
     def comparison_key(self, summary):
         success_rate = float(summary.get("success_rate", 0.0))
@@ -289,6 +487,8 @@ class BestCheckpointTracker:
 
     def is_improvement(self, result):
         candidate_key = self.comparison_key(result.summary)
+        if not all(np.isfinite(value) for value in candidate_key):
+            return False
         return self.best_key is None or candidate_key > self.best_key
 
     def _evaluation_command(self, checkpoint_path, summary_path):
@@ -851,6 +1051,7 @@ class ParallelEnvStepper:
 class AsyncStepEvent:
     worker_id: int
     transitions: tuple
+    policy_version: int | None = None
 
 
 @dataclass(frozen=True)
@@ -982,6 +1183,32 @@ class AsyncCollectorPool:
     def get(self, timeout=0.2):
         return self.events.get(timeout=timeout)
 
+    def discard_pending_experience(self):
+        """Drop queued experience while preserving worker lifecycle/error signals."""
+        preserved = []
+        dropped_events = 0
+        dropped_transitions = 0
+        while True:
+            try:
+                event = self.events.get_nowait()
+            except Empty:
+                break
+            if isinstance(
+                event,
+                (AsyncEpisodeEvent, AsyncWorkerDoneEvent, AsyncWorkerErrorEvent),
+            ):
+                preserved.append(event)
+                continue
+            dropped_events += 1
+            if isinstance(event, AsyncStepEvent):
+                dropped_transitions += len(event.transitions)
+        for event in preserved:
+            self.events.put_nowait(event)
+        return {
+            "events": dropped_events,
+            "transitions": dropped_transitions,
+        }
+
     def stop(self):
         self.stop_event.set()
 
@@ -1057,6 +1284,40 @@ class AsyncEventScheduler:
 
     def record_updates(self, count):
         self._interval_updates += int(count)
+
+    def reset_after_recovery(self, pool=None):
+        """Forget update credit and queued/deferred experience from the old policy era."""
+        dropped_events = 0
+        dropped_transitions = 0
+        preserved = []
+        while self._deferred:
+            event = self._deferred.popleft()
+            if isinstance(
+                event,
+                (AsyncEpisodeEvent, AsyncWorkerDoneEvent, AsyncWorkerErrorEvent),
+            ):
+                preserved.append(event)
+                continue
+            dropped_events += 1
+            if isinstance(event, AsyncStepEvent):
+                dropped_transitions += len(event.transitions)
+        if pool is not None:
+            dropped = pool.discard_pending_experience()
+            dropped_events += dropped["events"]
+            dropped_transitions += dropped["transitions"]
+        self._deferred.extend(preserved)
+        self._collection_credit = 0
+        self._interval_started = time.monotonic()
+        self._interval_steps = 0
+        self._interval_transitions = 0
+        self._interval_updates = 0
+        self._interval_requested_updates = 0
+        self._interval_throttled_updates = 0
+        self._last_throughput = None
+        return {
+            "events": dropped_events,
+            "transitions": dropped_transitions,
+        }
 
     def throughput(self, pool):
         queue_size = pool.events.qsize()
@@ -1171,7 +1432,13 @@ def build_async_worker(
                     step_result,
                 )
                 control_steps += 1
-                if transitions and not put(AsyncStepEvent(worker_id, tuple(transitions))):
+                if transitions and not put(
+                    AsyncStepEvent(
+                        worker_id,
+                        tuple(transitions),
+                        policy_version=policy_version,
+                    )
+                ):
                     return
             payload = finish_episode(worker_id, env, episode, state)
             if not put(AsyncEpisodeEvent(worker_id, episode, payload)):
@@ -1259,6 +1526,28 @@ def maybe_start_dashboard(args, algorithm=None):
         "batch_size": int(getattr(args, "batch_size", 0) or 0),
         "max_steps": int(getattr(args, "max_steps_per_episode", 0) or 0),
     }
+    health_monitor = ensure_training_health_monitor(
+        args,
+        algorithm or getattr(args, "trainer_variant", None) or "?",
+    )
+    print(
+        "Training health: "
+        f"monitor={'enabled' if health_monitor.enabled else 'disabled'} "
+        f"auto_recovery={'enabled' if health_monitor.auto_recovery else 'off'} "
+        f"state_file={health_monitor.state_path}",
+        flush=True,
+    )
+    meta.update(
+        health_state=health_monitor.state,
+        training_phase=health_monitor.phase,
+        health_reason=health_monitor.reason,
+        auto_recovery=health_monitor.auto_recovery,
+        recovery_count=health_monitor.recovery_count,
+        recovery_cycle=health_monitor.recovery_cycle,
+        recovery_cycle_attempt=health_monitor.recovery_cycle_attempt,
+        recovery_max_attempts=int(getattr(args, "recovery_max_attempts", 3)),
+        verification_pending=health_monitor.verification_pending,
+    )
     metrics_jsonl = getattr(args, "metrics_jsonl", None)
     if metrics_jsonl:
         register_metrics_sink(JsonlMetricsSink(metrics_jsonl, metadata=meta))
@@ -1271,6 +1560,9 @@ def maybe_start_dashboard(args, algorithm=None):
     server = DashboardServer(port=int(getattr(args, "dashboard_port", 8770)), meta=meta)
     server.start()
     register_metrics_sink(server.record)
+    register_health_event_sink(server.record_health)
+    health_monitor.replay_events(server.record_health)
+    health_monitor.emit_snapshot()
     print(f"Dashboard live: http://127.0.0.1:{server.port}", flush=True)
     return server
 
@@ -1286,6 +1578,9 @@ def report_training_time(dashboard, start_monotonic):
         f"Training wall-clock time: {hours:02d}:{minutes:02d}:{seconds:02d} ({elapsed:.1f}s)",
         flush=True,
     )
+    monitor = globals().get("_ACTIVE_TRAINING_HEALTH_MONITOR")
+    if monitor is not None:
+        monitor.mark_finished()
     if dashboard is not None:
         try:
             dashboard.set_meta(status="finished", elapsed_seconds=round(elapsed, 1))
@@ -1299,11 +1594,15 @@ def print_episode_metrics(episode, sections, log_format="pretty"):
         for name, metrics in sections
         if metrics
     ]
-    if _METRICS_SINKS:
+    monitor = globals().get("_ACTIVE_TRAINING_HEALTH_MONITOR")
+    if _METRICS_SINKS or monitor is not None:
         flat = {"episode": int(episode)}
         for _name, metrics in normalized:
             for key, value in metrics:
                 flat[key] = _coerce_metric_value(value)
+        if monitor is not None:
+            monitor.observe_episode(flat)
+            flat.update(monitor.episode_fields())
         for sink in _METRICS_SINKS:
             try:
                 sink(flat)
@@ -1372,10 +1671,32 @@ def apply_ready_best_checkpoint(tracker, wait_timeout=0.0):
     result = tracker.poll_ready(timeout=wait_timeout)
     if result is None:
         return None
-    if not tracker.is_improvement(result):
+    improved = tracker.is_improvement(result)
+    if not improved:
+        best_summary = tracker.best_summary
+        best_checkpoint = (
+            best_summary.get("checkpoint")
+            if isinstance(best_summary, dict)
+            else None
+        )
+        tracker.health_monitor.observe_evaluation(
+            episode=result.episode,
+            summary=result.summary,
+            best_summary=best_summary,
+            best_checkpoint=best_checkpoint,
+            improved=False,
+        )
         tracker.discard_ready()
         return None
-    return tracker.promote_ready(result)
+    checkpoint_path = tracker.promote_ready(result)
+    tracker.health_monitor.observe_evaluation(
+        episode=result.episode,
+        summary=result.summary,
+        best_summary=tracker.best_summary,
+        best_checkpoint=str(checkpoint_path),
+        improved=True,
+    )
+    return checkpoint_path
 
 
 def checkpoint_shard_paths(prefix):

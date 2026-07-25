@@ -103,6 +103,19 @@ class SB3BackendCliTests(unittest.TestCase):
         self.assertTrue(codec.uses_hybrid_encoding)
         self.assertEqual(codec.policy_space.shape, (4,))
 
+    def test_auto_recovery_is_rejected_instead_of_silently_ignored(self):
+        module = load_sb3_backend_module()
+        args = module.parse_args(
+            [
+                "--algorithm",
+                "ppo",
+                "--auto-recovery",
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "native Metis backend"):
+            module.validate_args(args)
+
 
 if __name__ == "__main__":
     unittest.main()

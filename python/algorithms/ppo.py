@@ -61,6 +61,7 @@ from core.training import (
     BestCheckpointTracker,
     add_training_budget_argument,
     add_best_checkpoint_arguments,
+    add_training_health_arguments,
     apply_ready_best_checkpoint,
     add_collector_arguments,
     add_log_format_argument,
@@ -143,6 +144,7 @@ def parse_args():
     add_collector_arguments(parser)
     add_opponent_pool_arguments(parser)
     add_best_checkpoint_arguments(parser)
+    add_training_health_arguments(parser)
     add_parallel_env_arguments(parser)
     add_lockstep_tuning_arguments(parser)
     add_log_format_argument(parser)
@@ -628,6 +630,12 @@ def run_async_ppo(
     # thread-safe. set_weights on the closed-over model keeps each trace current.
     sample_fns = [build_sample_action_fn(m, obs_dim, action_meta) for m in local_models]
     snapshot = PolicySnapshot(model.get_weights(), state=log_std.numpy())
+    health_monitor = getattr(best_tracker, "health_monitor", None)
+    recovery_handler = getattr(health_monitor, "recovery_handler", None)
+    if recovery_handler is not None:
+        recovery_handler.set_policy_publisher(
+            lambda: snapshot.publish(model.get_weights(), state=log_std.numpy())
+        )
 
     def worker(worker_id, env, _allocator, put, stop_event):
         local_model = local_models[worker_id]
@@ -768,6 +776,17 @@ def run_async_ppo(
     )
     completed = int(start_episode)
     pending = {}
+    if recovery_handler is not None:
+        recovery_handler.set_post_restore(
+            lambda request: {
+                "replay_buffer": "not applicable to on-policy PPO",
+                "stabilization": (
+                    "pre-recovery rollout generations are rejected and policy updates "
+                    "remain frozen until immediate verification completes"
+                ),
+                "async_queue": "kept for generation accounting; stale policy versions are discarded",
+            }
+        )
     last_saved_episode = None
     interrupted = False
     done_workers = 0
@@ -796,22 +815,23 @@ def run_async_ppo(
 
             payloads = [generation[worker_id] for worker_id in range(len(envs))]
             versions = {payload["policy_version"] for payload in payloads}
-            if len(versions) != 1 or next(iter(versions)) != snapshot.version:
+            if len(versions) != 1:
                 raise RuntimeError(
-                    f"PPO generation {completed} mixed policy versions: {sorted(versions)} "
-                    f"current={snapshot.version}"
+                    f"PPO generation {completed} mixed collector policy versions: "
+                    f"{sorted(versions)}"
                 )
+            stale_after_recovery = next(iter(versions)) != snapshot.version
+            verification_freeze = bool(
+                getattr(health_monitor, "verification_pending", False)
+            )
             trajectories = [
                 trajectory
                 for payload in payloads
                 for trajectory in payload["trajectories"]
             ]
             rewards_summary = [payload["rewards"] for payload in payloads]
-            update_batch = build_update_batch(
-                trajectories,
-                action_meta,
-                args.gamma,
-                args.gae_lambda,
+            update_batch = None if stale_after_recovery or verification_freeze else build_update_batch(
+                trajectories, action_meta, args.gamma, args.gae_lambda
             )
             if update_batch is None:
                 metrics = None
@@ -820,14 +840,22 @@ def run_async_ppo(
                 metrics = ppo_update(model, log_std, optimizer, update_batch, action_meta, args)
 
             completed += 1
-            policy_version = snapshot.publish(model.get_weights(), state=log_std.numpy())
+            policy_version = (
+                snapshot.version
+                if stale_after_recovery
+                else snapshot.publish(model.get_weights(), state=log_std.numpy())
+            )
             training_metrics = [
                 ("completed", f"{completed}/{args.num_episodes}"),
                 ("total_timesteps", budget.collected),
                 ("queue", pool.events.qsize()),
                 ("policy_version", policy_version),
             ]
-            if metrics is None:
+            if stale_after_recovery:
+                training_metrics.append(("skipped", "pre_recovery_policy"))
+            elif verification_freeze:
+                training_metrics.append(("skipped", "recovery_verification"))
+            elif metrics is None:
                 training_metrics.append(("skipped", "no_samples"))
             else:
                 training_metrics.extend([
@@ -1003,6 +1031,10 @@ def main():
                 flush=True,
             )
         optimizer.learning_rate.assign(args.learning_rate)
+        best_tracker.configure_recovery(
+            checkpoint,
+            [("policy", optimizer)],
+        )
 
         opponent_teams = validate_team_layout(envs, args.opponent_pool)
         opponent_pool = OpponentPool(
@@ -1053,6 +1085,18 @@ def main():
                 fn = build_sample_action_fn(sampled_model, obs_dim, action_meta)
                 sample_fns[id(sampled_model)] = fn
             return fn
+
+        recovery_handler = best_tracker.health_monitor.recovery_handler
+        if recovery_handler is not None:
+            recovery_handler.set_post_restore(
+                lambda request: {
+                    "replay_buffer": "not applicable to on-policy PPO",
+                    "stabilization": (
+                        "the next rollout is collected with restored weights and policy "
+                        "updates remain frozen until immediate verification completes"
+                    ),
+                }
+            )
 
         last_saved_episode = None
         for episode in range(start_episode, args.num_episodes):
@@ -1213,20 +1257,33 @@ def main():
                 last_completed_episode = episode + 1
                 continue
 
-            metrics = ppo_update(model, log_std, optimizer, update_batch, action_meta, args)
             sample_count = len(update_batch["rewards"]) if "rewards" in update_batch else len(update_batch["obs"])
             budget.consume(sample_count)
-            print_episode_metrics(episode, [
-                ("mode", [("opponent", opponent_match.label)]),
-                ("outcome", [("rewards", rewards_summary)]),
-                ("training", [
-                    ("samples", sample_count),
-                    ("total_timesteps", budget.collected),
+            verification_freeze = bool(
+                best_tracker.health_monitor.verification_pending
+            )
+            metrics = (
+                None
+                if verification_freeze
+                else ppo_update(model, log_std, optimizer, update_batch, action_meta, args)
+            )
+            training_metrics = [
+                ("samples", sample_count),
+                ("total_timesteps", budget.collected),
+            ]
+            if verification_freeze:
+                training_metrics.append(("skipped", "recovery_verification"))
+            else:
+                training_metrics.extend([
                     ("loss", f"{metrics['loss']:.5f}"),
                     ("policy_loss", f"{metrics['policy_loss']:.5f}"),
                     ("value_loss", f"{metrics['value_loss']:.5f}"),
                     ("entropy", f"{metrics['entropy']:.5f}"),
-                ]),
+                ])
+            print_episode_metrics(episode, [
+                ("mode", [("opponent", opponent_match.label)]),
+                ("outcome", [("rewards", rewards_summary)]),
+                ("training", training_metrics),
             ], args.log_format)
             last_completed_episode = episode + 1
             snapshot_path = opponent_pool.snapshot(model, episode + 1)

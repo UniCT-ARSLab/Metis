@@ -117,7 +117,10 @@ of Metis Keras policy bundles.
 - `replay_buffer.py`: uniform/prioritized replay, protected demonstrations, snapshots;
 - `opponent_pool.py`: historical policy snapshots and opponent sampling;
 - `training.py`: async collection, parallel stepping, TensorFlow setup, best-policy
-  evaluation, transition budgets, JSONL metrics, and shared utilities;
+  evaluation, health/recovery wiring, transition budgets, JSONL metrics, and shared
+  utilities;
+- `training_health.py`: health-state transitions, persistent alerts, collapse
+  confirmation, and TensorFlow checkpoint recovery;
 - `evaluation.py`: TensorFlow-free episode and evaluation summaries shared by native
   inference and the SB3 adapter.
 
@@ -225,6 +228,26 @@ The bundled dashboard recognizes the shared keys `reward`, `progress`,
 `collision`, and `stall`. Algorithms remain free to report additional fields; they
 still appear in `/api/metrics` even when the current page has no chart for them.
 
+`TrainingHealthMonitor` adds `health_state`, `training_phase`, lifetime recovery
+count, recovery cycle, and cycle attempt to metric rows. It emits a separate event
+stream at `/api/health`; current state and event history are persisted beside the
+training checkpoints. Native trainers connect the same monitor to
+`BestCheckpointTracker`, so health decisions use isolated frozen evaluations rather
+than raw episode noise.
+
+The recovery contract is shared, while stabilization remains algorithm-aware:
+
+- DQN restores the full checkpoint, synchronizes the target Q network, rejects stale
+  async transitions, and waits for verification before learning again.
+- PPO rejects rollout generations from the previous policy version and freezes
+  optimization during verification. It has no replay-clearing phase.
+- SAC and the DDPG/TD3 family can escalate from replay-preserving soft recovery to a
+  hard recovery that removes online replay, retains protected DDPGfD demonstrations,
+  synchronizes targets, and performs critic-only warmup.
+
+Recovery limits belong to the current collapse cycle. Validated healthy evaluations
+close the cycle without deleting lifetime recovery telemetry.
+
 See [Monitoring training](../guides/monitoring-training.md) for the launch command,
 retention behavior, and dashboard limitations.
 
@@ -243,5 +266,9 @@ retention behavior, and dashboard limitations.
 - Best-checkpoint evaluation uses one CPU thread by default to avoid starving the
   learner and collectors. Configure it with `--best-evaluation-cpu-threads`, or turn
   it off with `--no-best-checkpoint`.
+- Automatic recovery requires best-checkpoint evaluation. It restores complete
+  validated TensorFlow state, scales optimizer roles separately, republishes async
+  policy snapshots, verifies the restore immediately, and escalates off-policy replay
+  handling only when a soft attempt fails.
 - Public commands remain `train.py`, `run.py`, `recorder.py`, and `export.py`. Internal
   modules are not additional user-facing entry points.

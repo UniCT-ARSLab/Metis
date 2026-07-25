@@ -39,6 +39,7 @@ from core.training import (
     add_godot_render_argument,
     add_lockstep_tuning_arguments,
     add_parallel_env_arguments,
+    add_training_health_arguments,
     build_lockstep_user_args,
     maybe_start_dashboard,
     print_episode_metrics,
@@ -175,6 +176,7 @@ def parse_args(argv=None):
     add_lockstep_tuning_arguments(parser)
     add_godot_render_argument(parser)
     add_dashboard_arguments(parser)
+    add_training_health_arguments(parser)
     parser.add_argument("--log-format", choices=["pretty", "compact"], default="pretty")
     return parser.parse_args(argv)
 
@@ -197,6 +199,11 @@ def validate_args(args):
         raise ValueError("--physics-frames-per-step must be at least 1")
     if args.policy_path and (args.resume or args.resume_checkpoint):
         raise ValueError("--policy-path cannot be combined with --resume or --resume-checkpoint")
+    if args.auto_recovery:
+        raise ValueError(
+            "--auto-recovery requires the native Metis backend. The SB3 comparison "
+            "adapter exposes telemetry health but not isolated frozen-checkpoint rollback."
+        )
 
 
 def validate_scenario(args, envs):

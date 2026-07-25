@@ -4,7 +4,9 @@ Metis can serve a small live dashboard from the training process. It is useful f
 spotting a stalled collector, a saturated queue, a collapsing reward, or a loss that
 starts to diverge without reading a long terminal log.
 
-The dashboard is optional and has no effect on a normal training command.
+The dashboard is optional and has no effect on a normal training command. The shared
+health monitor is separate: it runs even without the web page and is enabled by
+default.
 
 ## Install the dashboard dependencies
 
@@ -54,6 +56,19 @@ The cards and charts consume the same per-episode values printed by the trainer:
 | Entropy temperature | `alpha` |
 | Outcomes | `finish`, `collision`, `stall` |
 
+Above the charts, the health panel reports two related values:
+
+- **Health state**: `warming_up`, `healthy`, `warning`, `critical`, or `disabled`.
+- **Training phase**: `training`, `recovering`, `verifying`, `stabilizing`, or
+  `finished`.
+
+The accompanying reason is the useful part. It names the frozen metric that dropped,
+the number of confirmations still required, a plateau, a numerical failure, or the
+checkpoint used for recovery. The recent event list makes transitions visible even
+when episodes complete slowly. The right side separates lifetime recovery count from
+the attempt count in the current recovery cycle. `Verification: pending` means policy
+updates are temporarily held while an isolated evaluator checks the restored policy.
+
 Not every metric exists for every algorithm or scene. For example, DQN reports a
 single `loss`, PPO reports policy and value losses, and only SAC has a learned
 `alpha`. A panel with no line therefore means that the current backend did not emit
@@ -74,11 +89,118 @@ available at:
 ```text
 http://127.0.0.1:8770/api/metrics
 http://127.0.0.1:8770/api/metrics?since=500
+http://127.0.0.1:8770/api/health
 ```
 
-History is not written to disk and disappears when training exits. Checkpoints,
-replay snapshots, policies, and best-policy evaluation remain the persistent record
-of a run.
+Episode chart history is not written to disk unless `--metrics-jsonl` is used. Health
+state is always persistent while monitoring is enabled:
+
+```text
+CHECKPOINT_DIR/training_health.json
+CHECKPOINT_DIR/training_health_events.jsonl
+```
+
+The first file is an atomic current snapshot. The second is an append-only event
+history. Both are restored when the trainer resumes from the same checkpoint run.
+
+## How collapse detection works
+
+Metis does not decide that training collapsed because one actor or critic loss moved
+up. Loss scales differ by algorithm and reward scale, and a temporary spike can be
+normal. The authoritative signal is the existing frozen-policy evaluation:
+
+1. a checkpoint is evaluated deterministically in an isolated Godot process;
+2. its success rate and mean reward are compared with the validated best checkpoint;
+3. a moderate relative drop produces `warning`;
+4. a critical drop must repeat for `--health-collapse-patience` evaluations before
+   the state becomes `critical`.
+
+Automatic intervention also has a maturity gate. By default Metis waits for five
+frozen evaluations and, when ranking by success, a non-trivial best success rate.
+This prevents an early policy with zero successes from repeatedly rolling back to
+another equally immature checkpoint. For tasks that deliberately have no success
+signal, select `--best-metric reward_mean`.
+
+Useful controls are:
+
+```text
+--health-warning-drop 0.35
+--health-critical-drop 0.60
+--health-collapse-patience 2
+--health-plateau-evaluations 6
+```
+
+A plateau raises an alert but does not cause rollback: returning to an older policy
+does not solve a policy that simply stopped improving.
+
+NaN or infinite telemetry is considered critical immediately. Recovery still needs a
+previously validated best checkpoint.
+
+## Automatic recovery
+
+Alerts are enabled by default; intervention is not. Enable it explicitly:
+
+```bash
+python/.venv/bin/python python/train.py \
+  ... \
+  --best-checkpoint \
+  --auto-recovery \
+  --dashboard
+```
+
+On confirmed collapse, native Metis trainers archive the current TensorFlow state,
+restore the full best checkpoint, reduce learning rates by optimizer role, and
+publish the restored policy to async collectors. Experience tagged with an older
+policy version is rejected. An isolated frozen evaluation is requested immediately;
+policy updates remain paused until that result is available.
+
+Recovery is staged:
+
+1. A **soft** attempt keeps off-policy replay and restores the validated policy.
+2. A failed verification escalates later attempts to **hard** recovery. Online replay
+   is cleared, protected DDPGfD demonstrations are retained, target networks are
+   synchronized, and queued async experience and update credit are discarded.
+3. SAC, DDPG, DDPG+BC, DDPGfD, TD3, and TD3+BC then train critics alone before
+   resuming less frequent actor updates.
+4. DQN has no actor/critic split, so it synchronizes the target Q network and resumes
+   after verification. PPO has no replay: it rejects stale rollout generations and
+   skips policy optimization during verification.
+
+The main safeguards are:
+
+```text
+--recovery-actor-lr-factor 0.033333
+--recovery-critic-lr-factor 0.333333
+--recovery-alpha-lr-factor 0.033333
+--recovery-policy-lr-factor 0.25
+--recovery-min-lr-scale 0.01
+--recovery-max-attempts 3
+--recovery-hard-after-attempt 2
+--recovery-critic-warmup-updates 3000
+--recovery-policy-update-every 4
+--recovery-cycle-reset-evaluations 2
+--recovery-min-evaluations 5
+--recovery-cooldown-evaluations 2
+--recovery-keep-diagnostics 3
+```
+
+Role-specific factors are applied relative to the run's configured learning rates,
+without going below the minimum scale. The legacy `--recovery-lr-factor` remains a
+common fallback when explicitly supplied.
+
+`--recovery-max-attempts` applies to one collapse cycle. A new best checkpoint or the
+configured number of healthy frozen evaluations closes that cycle, so a later,
+independent collapse receives a fresh attempt budget. The lifetime counter remains
+available for diagnosis. Reaching the limit means Metis will keep training and
+alerting but will not loop indefinitely over the same failing checkpoint.
+
+Recovery events are printed in the terminal, persisted to JSONL, and shown in the
+dashboard. Use `--no-health-monitor` to disable the complete monitor or
+`--no-auto-recovery` to retain alerts without intervention.
+
+This mechanism covers DQN, PPO, SAC, DDPG, DDPG+BC, DDPGfD, TD3, and TD3+BC through
+their shared Metis checkpoint contract. The SB3 comparison adapter reports finite
+telemetry state but does not claim equivalent frozen-evaluation rollback.
 
 ## SAC gradient clipping
 

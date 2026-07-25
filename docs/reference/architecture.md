@@ -166,6 +166,29 @@ isolated from training, and the dashboard thread exits with the Python process.
 The dashboard is an observer, not part of the checkpoint contract. Its history is not
 restored on resume and should not be used as the only experiment record.
 
+Training health is a separate shared service. It consumes flattened numerical
+telemetry and the results of isolated best-checkpoint evaluations, persists an atomic
+state snapshot plus an event log, and publishes transitions to the dashboard when it
+is present. Alerting does not mutate the learner.
+
+With `--auto-recovery`, a confirmed collapse invokes the trainer's registered
+checkpoint recovery handler on the learner thread. Full model, target-network, and
+optimizer state comes from the validated best checkpoint. Optimizer roles receive
+separate conservative learning-rate factors, async policy snapshots are refreshed,
+queued experience carries a policy version, and a frozen verification is scheduled
+immediately.
+
+The first off-policy recovery keeps replay. A later hard attempt clears online replay,
+preserves protected DDPGfD demonstrations, synchronizes target networks, removes
+queued transitions from the previous policy era, and stages critic-only warmup before
+actor updates resume. DQN uses the shared checkpoint and queue safeguards but has no
+actor warmup. PPO marks old rollout generations stale and freezes policy optimization
+during verification because replay reuse would violate its on-policy contract.
+
+Attempt limits are scoped to one collapse cycle. A new best result or consecutive
+healthy frozen evaluations closes that cycle and restores a fresh budget while the
+lifetime recovery count remains available to monitoring.
+
 ## Checkpoints, replay, and policy bundles
 
 Native TensorFlow checkpoints store the model variables, target networks, optimizers, and

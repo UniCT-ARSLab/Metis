@@ -180,6 +180,32 @@ class AsyncCollectorTests(unittest.TestCase):
         events = [AsyncStepEvent(0, tuple((idx,) for idx in range(10))) for _ in range(4)]
         self.assertEqual(scheduler.ingest(events), 1)
 
+    def test_recovery_reset_discards_experience_but_preserves_lifecycle_events(self):
+        args = argparse.Namespace(
+            async_update_basis="transitions",
+            async_update_every=4,
+            async_updates_per_step=1,
+            async_max_updates_per_env_step=1,
+            async_drain_max_events=8,
+        )
+        scheduler = AsyncEventScheduler(args)
+        pool = AsyncCollectorPool([], lambda *_args: None, 0, 0, queue_capacity=8)
+        scheduler.ingest([
+            AsyncStepEvent(0, ((1,), (2,), (3,))),
+        ])
+        pool.events.put(AsyncEpisodeEvent(0, 7, {"episode": 7}))
+        scheduler.drain_step_events(pool, AsyncStepEvent(0, ((0,),)))
+        pool.events.put(AsyncStepEvent(0, ((4,), (5,)), policy_version=2))
+        pool.events.put(AsyncWorkerDoneEvent(0))
+
+        dropped = scheduler.reset_after_recovery(pool)
+
+        self.assertEqual(dropped, {"events": 1, "transitions": 2})
+        self.assertIsInstance(scheduler.next_event(pool), AsyncEpisodeEvent)
+        self.assertIsInstance(pool.get(), AsyncWorkerDoneEvent)
+        # The three pre-reset units must not combine with one new unit to grant an update.
+        self.assertEqual(scheduler.ingest([AsyncStepEvent(0, ((6,),))]), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

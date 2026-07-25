@@ -44,7 +44,8 @@ the first time, read [Build a new agent and scenario](docs/tutorials/new-agent-a
 | Competition | Simultaneous self-play and historical opponent pools |
 | Demonstrations | Manual recording, replay prefill, and behavior cloning |
 | Persistence | Full checkpoints, replay snapshots, best-policy tracking, Keras bundles |
-| Monitoring | Optional local dashboard with live metrics and WebSocket updates |
+| Monitoring | Persistent health state, alerts, and an optional live dashboard |
+| Recovery | Opt-in rollback to a validated best policy with guarded learning-rate reduction |
 | Inference | Reproducible lockstep or real-time execution |
 | Export | Keras, TensorFlow Lite, and optional ONNX |
 | Platforms | Linux CPU/CUDA and Apple Silicon with TensorFlow Metal |
@@ -425,6 +426,10 @@ Every trainer can publish its per-episode log metrics to a local dashboard:
 
 The page follows rewards, progress, losses, throughput, SAC entropy temperature, and
 success, collision, or stall rates when the selected backend reports those fields.
+Its health panel also shows whether the run is warming up, healthy, warning, critical,
+recovering, verifying, or stabilizing. It reports lifetime recoveries separately from
+the attempt budget for the current collapse, together with the reason and recent state
+transitions.
 Changing **update every** batches browser refreshes; it does not change collection or
 learning. The server listens on `127.0.0.1`, keeps its recent history in memory, and
 stops with the trainer. It does not replace checkpoints or persistent experiment
@@ -432,6 +437,50 @@ logging.
 
 See [Monitoring training](docs/guides/monitoring-training.md) for installation,
 metric names, and troubleshooting.
+
+## Training health and recovery
+
+Native Metis trainers monitor numerical telemetry and, more importantly, compare
+frozen deterministic policy evaluations with the validated best checkpoint. The
+monitor is enabled by default:
+
+```text
+--health-monitor
+```
+
+It only reports and persists state; it does not alter training. The current snapshot
+is written to `CHECKPOINT_DIR/training_health.json`, and state transitions are
+appended to `training_health_events.jsonl`. A warning requires a meaningful
+evaluation drop, while a collapse requires consecutive bad evaluations so one noisy
+sample cannot trigger a rollback.
+
+Automatic recovery is deliberately opt-in:
+
+```text
+--auto-recovery
+```
+
+After a confirmed collapse, Metis:
+
+1. writes a diagnostic checkpoint under `CHECKPOINT_DIR/recovery/`;
+2. restores the full validated best TensorFlow checkpoint;
+3. applies conservative learning rates by optimizer role;
+4. republishes the restored policy and rejects stale async experience;
+5. freezes policy learning while an immediate isolated evaluation verifies the restore.
+
+The first attempt is soft and keeps off-policy replay. If verification continues to
+fail, a hard attempt clears online replay, keeps protected DDPGfD demonstrations,
+synchronizes target networks, resets async update credit, and warms the critics before
+the actor resumes. DQN synchronizes its target network; PPO rejects old policy
+generations and pauses its next update instead of using replay.
+
+The default three-attempt limit belongs to one collapse cycle, not the lifetime of the
+run. A new best result or two healthy frozen evaluations closes the cycle and restores
+a fresh budget. Early, immature policies are not rolled back until enough evaluations
+and a meaningful baseline exist. Recovery still cannot repair an incorrect reward,
+observation, terminal condition, physics setup, or curriculum. The SB3 comparison
+backend publishes telemetry health, but automatic rollback remains a native Metis
+feature.
 
 ## Multi-agent and self-play
 

@@ -23,6 +23,7 @@ class DashboardServer:
         self.port = int(port)
         self.host = host
         self._history = deque(maxlen=int(history))
+        self._health_history = deque(maxlen=500)
         self._clients = {}  # ws -> {"batch": int, "buf": list}
         self._meta = dict(meta or {})  # run info: algorithm, scenario, agents, envs, ...
         self._meta.setdefault("started_at", time.time())  # epoch; client ticks a live timer off it
@@ -51,6 +52,30 @@ class DashboardServer:
                     state["buf"] = []
         for ws, batch in to_send:
             self._safe_send(ws, {"type": "episodes", "data": batch})
+
+    def record_health(self, event):
+        """Store a health-state transition and publish it independently of episodes."""
+        event = dict(event)
+        meta_update = {
+            "health_state": event.get("state"),
+            "training_phase": event.get("phase"),
+            "health_reason": event.get("reason"),
+            "auto_recovery": event.get("auto_recovery"),
+            "recovery_count": event.get("recovery_count"),
+            "recovery_cycle": event.get("recovery_cycle"),
+            "recovery_cycle_attempt": event.get("recovery_cycle_attempt"),
+            "recovery_max_attempts": event.get("recovery_max_attempts"),
+            "last_recovery_mode": event.get("last_recovery_mode"),
+            "verification_pending": event.get("verification_pending"),
+        }
+        with self._lock:
+            self._health_history.append(event)
+            self._meta.update(
+                {key: value for key, value in meta_update.items() if value is not None}
+            )
+            clients = list(self._clients)
+        for ws in clients:
+            self._safe_send(ws, {"type": "health", "data": event})
 
     def _safe_send(self, ws, payload):
         try:
@@ -100,14 +125,22 @@ class DashboardServer:
                     pass
             return jsonify({"metrics": data, "count": len(data)})
 
+        @app.route("/api/health")
+        def api_health():
+            with server._lock:
+                data = list(server._health_history)
+            return jsonify({"events": data, "count": len(data)})
+
         @sock.route("/ws")
         def ws_route(ws):
             with server._lock:
                 server._clients[ws] = {"batch": 1, "buf": []}
                 snapshot = list(server._history)[-1000:]
+                health_snapshot = list(server._health_history)
                 meta = dict(server._meta)
             server._safe_send(ws, {"type": "meta", "data": meta})
             server._safe_send(ws, {"type": "snapshot", "data": snapshot})
+            server._safe_send(ws, {"type": "health_snapshot", "data": health_snapshot})
             try:
                 while True:
                     message = ws.receive()
