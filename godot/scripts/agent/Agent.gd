@@ -7,6 +7,7 @@ class_name Agent
 @export var observation_system_path: NodePath = NodePath("ObservationSystem")
 @export var reward_system_path: NodePath = NodePath("RewardSystem")
 @export var auto_register_observations := true
+@export var policy_id: StringName = &"shared"
 
 var _action_names: Array[String] = []
 var _observation_names: Array[String] = []
@@ -20,6 +21,10 @@ func _ready() -> void:
 	_reward_system = get_node_or_null(reward_system_path)
 	if auto_register_observations:
 		register_observation_sources(get_parent())
+
+
+func get_policy_id() -> StringName:
+	return policy_id
 
 # AGENT'S ACTIONS
 func add_action(action:String, callable:Callable) -> int:

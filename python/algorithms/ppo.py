@@ -7,6 +7,7 @@ import sys
 import sysconfig
 import time
 from collections import OrderedDict
+from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty
 
@@ -48,6 +49,14 @@ import numpy as np
 import tensorflow as tf
 
 from core.models import build_hybrid_actor_critic
+from core.multi_policy import (
+    MultiPolicySnapshot,
+    add_multi_policy_arguments,
+    build_policy_assignment,
+    load_multi_policy_manifest,
+    validate_multi_policy_options,
+    write_multi_policy_manifest,
+)
 from core.policy_artifact import PolicyArtifactSaver, build_policy_metadata, load_policy_into_model
 from core.opponent_pool import OpponentPool, add_opponent_pool_arguments, validate_team_layout
 from core.training import (
@@ -116,6 +125,7 @@ def parse_args():
     parser.add_argument("--env-timeout", type=float, default=30.0)
     parser.add_argument("--agent-id", default=None)
     parser.add_argument("--multi-agent", action=argparse.BooleanOptionalAction, default=False)
+    add_multi_policy_arguments(parser)
     parser.add_argument("--weights-path", default="generic_ppo_hybrid.weights.h5")
     parser.add_argument(
         "--policy-path",
@@ -906,6 +916,938 @@ def run_async_ppo(
     return completed
 
 
+@dataclass
+class PPOPolicyState:
+    policy_id: str
+    model: object
+    log_std: object
+    optimizer: object
+    artifact: PolicyArtifactSaver
+    sample_fn: object
+    trainable: bool
+
+
+def _save_multi_policy_ppo_checkpoint(
+    checkpoint,
+    checkpoint_manager,
+    policy_states,
+    assignment,
+    episode,
+    args,
+    *,
+    final=False,
+):
+    checkpoint.episode.assign(int(episode))
+    saved_path = checkpoint_manager.save(checkpoint_number=int(episode))
+    print(
+        f"Saved {'final ' if final else ''}multi-policy checkpoint: {saved_path}",
+        flush=True,
+    )
+    for state in policy_states.values():
+        state.artifact.save(episode)
+    write_multi_policy_manifest(
+        args.checkpoint_dir,
+        assignment,
+        "ppo",
+        episode=episode,
+        policy_metadata={
+            policy_id: {
+                "log_std": np.asarray(state.log_std.numpy()).tolist(),
+            }
+            for policy_id, state in policy_states.items()
+        },
+    )
+    return saved_path
+
+
+def run_async_multi_policy_ppo(
+    args,
+    envs,
+    policy_states,
+    assignment,
+    action_meta,
+    checkpoint,
+    checkpoint_manager,
+    best_tracker,
+    start_episode,
+    budget,
+):
+    env0 = envs[0]
+    with tf.device("/CPU:0"):
+        local_models = [
+            {
+                policy_id: build_hybrid_actor_critic(
+                    obs_dim=env0.obs_dim,
+                    discrete_sizes=action_meta["discrete_sizes"],
+                    continuous_size=action_meta["continuous_size"],
+                )
+                for policy_id in assignment.policy_ids
+            }
+            for _env in envs
+        ]
+    sample_fns = [
+        {
+            policy_id: build_sample_action_fn(
+                model,
+                env0.obs_dim,
+                action_meta,
+            )
+            for policy_id, model in worker_models.items()
+        }
+        for worker_models in local_models
+    ]
+
+    def live_weights():
+        return {
+            policy_id: state.model.get_weights()
+            for policy_id, state in policy_states.items()
+        }
+
+    def live_log_stds():
+        return {
+            policy_id: state.log_std.numpy()
+            for policy_id, state in policy_states.items()
+        }
+
+    snapshot = MultiPolicySnapshot(
+        live_weights(),
+        state_by_policy=live_log_stds(),
+    )
+    health_monitor = getattr(best_tracker, "health_monitor", None)
+    recovery_handler = getattr(health_monitor, "recovery_handler", None)
+    if recovery_handler is not None:
+        recovery_handler.set_policy_publisher(
+            lambda: snapshot.publish(
+                live_weights(),
+                state_by_policy=live_log_stds(),
+            )
+        )
+        recovery_handler.set_post_restore(
+            lambda _request: {
+                "replay_buffer": "not applicable to on-policy PPO",
+                "stabilization": (
+                    "pre-recovery multi-policy rollout generations are rejected"
+                ),
+                "async_queue": (
+                    "kept for generation accounting; stale group versions are discarded"
+                ),
+            }
+        )
+
+    def worker(worker_id, env, _allocator, put, stop_event):
+        worker_models = local_models[worker_id]
+        worker_sample_fns = sample_fns[worker_id]
+        policy_version = -1
+        for episode in range(start_episode, args.num_episodes):
+            if stop_event.is_set():
+                return
+            policy_version, log_std_values = snapshot.sync_model_with_state(
+                worker_models,
+                policy_version,
+            )
+            local_log_stds = {
+                policy_id: tf.convert_to_tensor(
+                    log_std_values[policy_id],
+                    dtype=tf.float32,
+                )
+                for policy_id in assignment.policy_ids
+            }
+            env.configure(
+                training_episode=episode,
+                max_steps=args.max_steps_per_episode,
+                physics_frames_per_step=args.physics_frames_per_step,
+                training_mode=True,
+            )
+            obs, info = env.reset(
+                seed=args.episode_seed_multiplier * episode + worker_id
+            )
+            done_mask = np.asarray(
+                info.get(
+                    "per_agent_done",
+                    np.zeros((len(env.agent_ids),), dtype=np.bool_),
+                ),
+                dtype=np.bool_,
+            )
+            trajectories = {
+                agent_id: new_trajectory()
+                for agent_id in env.agent_ids
+                if policy_states[
+                    assignment.policy_for_agent(agent_id)
+                ].trainable
+            }
+            episode_reward = np.zeros(
+                (len(env.agent_ids),),
+                dtype=np.float32,
+            )
+            global_done = False
+            for _step_idx in episode_step_indices(
+                args.max_steps_per_episode
+            ):
+                if stop_event.is_set() or global_done:
+                    break
+                action_payload = {}
+                selected_by_agent = {}
+                for agent_idx, agent_id in enumerate(env.agent_ids):
+                    if done_mask[agent_idx]:
+                        action_payload[agent_id] = zero_env_action(
+                            action_meta
+                        )
+                        continue
+                    policy_id = assignment.policy_for_agent(agent_id)
+                    selected = select_action(
+                        worker_sample_fns[policy_id],
+                        local_log_stds[policy_id],
+                        obs[agent_idx],
+                        action_meta,
+                    )
+                    action_payload[agent_id] = selected["env_action"]
+                    if policy_states[policy_id].trainable:
+                        selected_by_agent[agent_id] = (
+                            agent_idx,
+                            policy_id,
+                            selected,
+                            obs[agent_idx].copy(),
+                        )
+
+                next_obs, _reward, terminated, truncated, step_info = (
+                    env.step(action_payload)
+                )
+                global_done = bool(terminated or truncated)
+                cut_short = bool(truncated and not terminated)
+                rewards = np.asarray(
+                    step_info.get("per_agent_rewards"),
+                    dtype=np.float32,
+                )
+                per_agent_done = np.asarray(
+                    step_info.get("per_agent_done"),
+                    dtype=np.bool_,
+                )
+                per_agent_terminated = np.asarray(
+                    step_info.get(
+                        "per_agent_terminated",
+                        per_agent_done,
+                    ),
+                    dtype=np.bool_,
+                )
+                episode_reward += rewards
+                for (
+                    agent_id,
+                    (
+                        agent_idx,
+                        policy_id,
+                        selected,
+                        selected_obs,
+                    ),
+                ) in selected_by_agent.items():
+                    trajectory = trajectories[agent_id]
+                    append_transition(
+                        trajectory,
+                        selected_obs,
+                        selected,
+                        float(rewards[agent_idx]),
+                        bool(
+                            terminated
+                            or per_agent_terminated[agent_idx]
+                        ),
+                    )
+                    if (
+                        cut_short
+                        and not per_agent_terminated[agent_idx]
+                    ):
+                        trajectory["bootstrap_value"] = value_of(
+                            worker_sample_fns[policy_id],
+                            local_log_stds[policy_id],
+                            next_obs[agent_idx],
+                            action_meta,
+                        )
+                obs = next_obs
+                done_mask = np.logical_or(done_mask, per_agent_done)
+                global_done = global_done or bool(np.all(done_mask))
+
+            if stop_event.is_set():
+                return
+            by_policy = {
+                policy_id: []
+                for policy_id in assignment.policy_ids
+            }
+            for agent_id, trajectory in trajectories.items():
+                if trajectory_has_samples(trajectory):
+                    by_policy[
+                        assignment.policy_for_agent(agent_id)
+                    ].append(trajectory)
+            payload = {
+                "policy_version": policy_version,
+                "trajectories": by_policy,
+                "rewards": episode_reward.tolist(),
+            }
+            if not put(AsyncEpisodeEvent(worker_id, episode, payload)):
+                return
+            if episode + 1 < args.num_episodes:
+                if not snapshot.wait_for_newer(
+                    policy_version,
+                    stop_event,
+                ):
+                    return
+
+    pool = AsyncCollectorPool(
+        envs,
+        worker,
+        start_episode,
+        args.num_episodes,
+        queue_capacity=args.async_queue_capacity,
+    )
+    print(
+        "Collector mode: async on-policy multi-policy "
+        f"workers={len(envs)} policies={list(assignment.policy_ids)} "
+        "barrier=policy_generation",
+        flush=True,
+    )
+    completed = int(start_episode)
+    pending = {}
+    last_saved_episode = None
+    interrupted = False
+    done_workers = 0
+    pool.start()
+    try:
+        while completed < args.num_episodes:
+            apply_ready_best_checkpoint(best_tracker)
+            try:
+                event = pool.get(timeout=0.2)
+            except Empty:
+                if done_workers == len(envs):
+                    raise RuntimeError(
+                        "All multi-policy PPO collectors stopped before completion"
+                    )
+                continue
+            if isinstance(event, AsyncWorkerErrorEvent):
+                raise RuntimeError(
+                    f"Async multi-policy PPO collector {event.worker_id} failed"
+                ) from event.error
+            if isinstance(event, AsyncWorkerDoneEvent):
+                done_workers += 1
+                continue
+            if not isinstance(event, AsyncEpisodeEvent):
+                continue
+
+            generation = pending.setdefault(event.episode, {})
+            generation[event.worker_id] = event.payload
+            if event.episode != completed or len(generation) < len(envs):
+                continue
+            payloads = [
+                generation[worker_id]
+                for worker_id in range(len(envs))
+            ]
+            versions = {
+                payload["policy_version"]
+                for payload in payloads
+            }
+            if len(versions) != 1:
+                raise RuntimeError(
+                    f"PPO multi-policy generation {completed} mixed group "
+                    f"versions: {sorted(versions)}"
+                )
+            stale = next(iter(versions)) != snapshot.version
+            verification_freeze = bool(
+                getattr(health_monitor, "verification_pending", False)
+            )
+            by_policy_metrics = {}
+            for policy_id, state in policy_states.items():
+                trajectories = [
+                    trajectory
+                    for payload in payloads
+                    for trajectory in payload["trajectories"][policy_id]
+                ]
+                batch = (
+                    None
+                    if (
+                        stale
+                        or verification_freeze
+                        or not state.trainable
+                        or not trajectories
+                    )
+                    else build_update_batch(
+                        trajectories,
+                        action_meta,
+                        args.gamma,
+                        args.gae_lambda,
+                    )
+                )
+                metrics = None
+                if state.trainable and batch is not None:
+                    budget.consume(len(batch["obs"]))
+                    metrics = ppo_update(
+                        state.model,
+                        state.log_std,
+                        state.optimizer,
+                        batch,
+                        action_meta,
+                        args,
+                    )
+                by_policy_metrics[policy_id] = {
+                    "samples": len(batch["obs"]) if batch is not None else 0,
+                    "loss": (
+                        metrics["loss"] if metrics is not None else 0.0
+                    ),
+                    "policy_loss": (
+                        metrics["policy_loss"]
+                        if metrics is not None
+                        else 0.0
+                    ),
+                    "value_loss": (
+                        metrics["value_loss"]
+                        if metrics is not None
+                        else 0.0
+                    ),
+                }
+
+            completed += 1
+            policy_version = (
+                snapshot.version
+                if stale
+                else snapshot.publish(
+                    live_weights(),
+                    state_by_policy=live_log_stds(),
+                )
+            )
+            training_metrics = [
+                ("completed", f"{completed}/{args.num_episodes}"),
+                ("total_timesteps", budget.collected),
+                ("queue", pool.events.qsize()),
+                ("by_policy", by_policy_metrics),
+                ("policy_version", policy_version),
+            ]
+            if stale:
+                training_metrics.append(
+                    ("skipped", "pre_recovery_policy")
+                )
+            elif verification_freeze:
+                training_metrics.append(
+                    ("skipped", "recovery_verification")
+                )
+            print_episode_metrics(event.episode, [
+                ("mode", [
+                    ("collector", "async_on_policy"),
+                    ("workers", len(envs)),
+                    ("policies", len(policy_states)),
+                ]),
+                (
+                    "outcome",
+                    [(
+                        "rewards",
+                        [payload["rewards"] for payload in payloads],
+                    )],
+                ),
+                ("training", training_metrics),
+            ], args.log_format)
+            pending.pop(event.episode, None)
+
+            if (
+                args.checkpoint_every > 0
+                and completed % args.checkpoint_every == 0
+            ):
+                saved_path = _save_multi_policy_ppo_checkpoint(
+                    checkpoint,
+                    checkpoint_manager,
+                    policy_states,
+                    assignment,
+                    completed,
+                    args,
+                )
+                last_saved_episode = completed
+            else:
+                saved_path = None
+            if best_tracker.should_evaluate(completed):
+                if saved_path is None:
+                    saved_path = _save_multi_policy_ppo_checkpoint(
+                        checkpoint,
+                        checkpoint_manager,
+                        policy_states,
+                        assignment,
+                        completed,
+                        args,
+                    )
+                    last_saved_episode = completed
+                request_best_checkpoint_evaluation(
+                    best_tracker,
+                    saved_path,
+                    completed,
+                )
+            if budget.exhausted:
+                break
+    except KeyboardInterrupt:
+        interrupted = True
+        print(
+            "\nInterrupt received: stopping async multi-policy PPO collectors...",
+            flush=True,
+        )
+    finally:
+        pool.close()
+
+    if last_saved_episode != completed:
+        _save_multi_policy_ppo_checkpoint(
+            checkpoint,
+            checkpoint_manager,
+            policy_states,
+            assignment,
+            completed,
+            args,
+            final=True,
+        )
+    if not interrupted:
+        apply_ready_best_checkpoint(
+            best_tracker,
+            wait_timeout=args.best_final_drain_timeout,
+        )
+    return completed
+
+
+def run_sync_multi_policy_ppo(
+    args,
+    envs,
+    stepper,
+    action_meta,
+    best_tracker,
+    budget,
+):
+    assignment = build_policy_assignment(envs, args)
+    validate_multi_policy_options(
+        args,
+        supports_async=True,
+        supports_opponent_pool=False,
+    )
+    if args.policy_path:
+        raise ValueError(
+            "Independent multi-policy PPO warm starts currently use "
+            "--resume/--resume-checkpoint."
+        )
+    if len(assignment.trainable_policy_ids) < len(assignment.policy_ids) and not (
+        args.resume or args.resume_checkpoint
+    ):
+        raise ValueError(
+            "--train-policy requires --resume or --resume-checkpoint so frozen policies "
+            "have trained weights."
+        )
+
+    env0 = envs[0]
+    first_agent_for_policy = {
+        policy_id: next(
+            agent_id
+            for agent_id in env0.agent_ids
+            if assignment.policy_for_agent(agent_id) == policy_id
+        )
+        for policy_id in assignment.policy_ids
+    }
+    policy_states = OrderedDict()
+    policy_trackables = {}
+    for policy_id in assignment.policy_ids:
+        model = build_hybrid_actor_critic(
+            obs_dim=env0.obs_dim,
+            discrete_sizes=action_meta["discrete_sizes"],
+            continuous_size=action_meta["continuous_size"],
+        )
+        model(np.zeros((1, env0.obs_dim), dtype=np.float32), training=False)
+        log_std = tf.Variable(
+            np.full(
+                (action_meta["continuous_size"],),
+                args.initial_log_std,
+                dtype=np.float32,
+            ),
+            name=f"log_std_{assignment.key_for(policy_id)}",
+            trainable=True,
+        )
+        optimizer = tf.keras.optimizers.Adam(
+            learning_rate=args.learning_rate
+        )
+        metadata = build_policy_metadata(
+            "ppo",
+            env0,
+            agent_id=first_agent_for_policy[policy_id],
+        )
+        metadata.update({
+            "policy_id": policy_id,
+            "agent_ids": [
+                agent_id
+                for agent_id in env0.agent_ids
+                if assignment.policy_for_agent(agent_id) == policy_id
+            ],
+            "parameter_sharing": len(
+                assignment.indices_for(env0.agent_ids, policy_id)
+            ) > 1,
+        })
+        state = PPOPolicyState(
+            policy_id=policy_id,
+            model=model,
+            log_std=log_std,
+            optimizer=optimizer,
+            artifact=PolicyArtifactSaver(
+                model,
+                Path(args.checkpoint_dir)
+                / "policies"
+                / assignment.key_for(policy_id),
+                metadata,
+            ),
+            sample_fn=build_sample_action_fn(
+                model,
+                env0.obs_dim,
+                action_meta,
+            ),
+            trainable=assignment.is_trainable(policy_id),
+        )
+        policy_states[policy_id] = state
+        policy_trackables[assignment.key_for(policy_id)] = tf.train.Checkpoint(
+            model=model,
+            log_std=log_std,
+            optimizer=optimizer,
+        )
+
+    checkpoint = tf.train.Checkpoint(
+        episode=tf.Variable(0, dtype=tf.int64),
+        policies=tf.train.Checkpoint(**policy_trackables),
+    )
+    checkpoint_manager = tf.train.CheckpointManager(
+        checkpoint,
+        directory=args.checkpoint_dir,
+        max_to_keep=args.keep_checkpoints,
+    )
+    resume_checkpoint = resolve_resume_checkpoint(args, checkpoint_manager)
+    start_episode = 0
+    if resume_checkpoint:
+        manifest_path = Path(args.checkpoint_dir) / "multi_policy.json"
+        if manifest_path.is_file():
+            stored = load_multi_policy_manifest(manifest_path)
+            if stored.get("agent_to_policy", {}) != assignment.agent_to_policy:
+                raise RuntimeError(
+                    "The checkpoint policy assignment does not match the scenario"
+                )
+            if str(stored.get("algorithm", "ppo")) != "ppo":
+                raise RuntimeError(
+                    f"Multi-policy checkpoint algorithm={stored.get('algorithm')!r}, "
+                    "expected 'ppo'"
+                )
+        checkpoint.restore(resume_checkpoint).expect_partial()
+        start_episode = int(checkpoint.episode.numpy())
+        print(
+            f"Resumed multi-policy checkpoint {resume_checkpoint} "
+            f"from episode={start_episode}",
+            flush=True,
+        )
+    for state in policy_states.values():
+        state.optimizer.learning_rate.assign(args.learning_rate)
+
+    write_multi_policy_manifest(
+        args.checkpoint_dir,
+        assignment,
+        "ppo",
+        episode=start_episode,
+    )
+    best_tracker.configure_recovery(
+        checkpoint,
+        [
+            (f"policy_{assignment.key_for(policy_id)}", state.optimizer)
+            for policy_id, state in policy_states.items()
+            if state.trainable
+        ],
+    )
+    print(
+        "Independent multi-policy PPO: "
+        f"assignment={assignment.mode} policies={list(assignment.policy_ids)} "
+        f"trainable={list(assignment.trainable_policy_ids)} "
+        f"agent_map={assignment.agent_to_policy}",
+        flush=True,
+    )
+
+    if args.collector_mode == "async":
+        return run_async_multi_policy_ppo(
+            args,
+            envs,
+            policy_states,
+            assignment,
+            action_meta,
+            checkpoint,
+            checkpoint_manager,
+            best_tracker,
+            start_episode,
+            budget,
+        )
+
+    last_completed_episode = start_episode
+    last_saved_episode = None
+    interrupted = False
+    try:
+        for episode in range(start_episode, args.num_episodes):
+            trajectories = {
+                policy_id: []
+                for policy_id in assignment.policy_ids
+            }
+            rewards_summary = []
+            env_states = []
+            for env_idx, env in enumerate(envs):
+                env.configure(
+                    training_episode=episode,
+                    max_steps=args.max_steps_per_episode,
+                    physics_frames_per_step=args.physics_frames_per_step,
+                    training_mode=True,
+                )
+                obs, info = env.reset(
+                    seed=args.episode_seed_multiplier * episode + env_idx
+                )
+                done_mask = np.asarray(
+                    info.get(
+                        "per_agent_done",
+                        np.zeros((len(env.agent_ids),), dtype=np.bool_),
+                    ),
+                    dtype=np.bool_,
+                )
+                env_states.append({
+                    "obs": obs,
+                    "done": False,
+                    "done_mask": done_mask,
+                    "episode_reward": np.zeros(
+                        (len(env.agent_ids),),
+                        dtype=np.float32,
+                    ),
+                    "trajectories": {
+                        agent_id: new_trajectory()
+                        for agent_id in env.agent_ids
+                        if policy_states[
+                            assignment.policy_for_agent(agent_id)
+                        ].trainable
+                    },
+                })
+
+            for _step in episode_step_indices(args.max_steps_per_episode):
+                requests = []
+                for env, env_state in zip(envs, env_states):
+                    if env_state["done"]:
+                        continue
+                    action_payload = {}
+                    selected_by_agent = {}
+                    for agent_idx, agent_id in enumerate(env.agent_ids):
+                        if env_state["done_mask"][agent_idx]:
+                            action_payload[agent_id] = zero_env_action(
+                                action_meta
+                            )
+                            continue
+                        policy_id = assignment.policy_for_agent(agent_id)
+                        policy = policy_states[policy_id]
+                        selected = select_action(
+                            policy.sample_fn,
+                            policy.log_std,
+                            env_state["obs"][agent_idx],
+                            action_meta,
+                        )
+                        action_payload[agent_id] = selected["env_action"]
+                        if policy.trainable:
+                            selected_by_agent[agent_id] = (
+                                agent_idx,
+                                policy_id,
+                                selected,
+                                env_state["obs"][agent_idx].copy(),
+                            )
+                    env_state["selected_by_agent"] = selected_by_agent
+                    requests.append((env, env_state, action_payload))
+
+                for env, env_state, _action, step_result in stepper.step(
+                    requests
+                ):
+                    next_obs, _reward, terminated, truncated, info = step_result
+                    global_done = bool(terminated or truncated)
+                    cut_short = bool(truncated and not terminated)
+                    rewards = np.asarray(
+                        info.get("per_agent_rewards"),
+                        dtype=np.float32,
+                    )
+                    per_agent_done = np.asarray(
+                        info.get("per_agent_done"),
+                        dtype=np.bool_,
+                    )
+                    per_agent_terminated = np.asarray(
+                        info.get("per_agent_terminated", per_agent_done),
+                        dtype=np.bool_,
+                    )
+                    env_state["episode_reward"] += rewards
+                    for (
+                        agent_id,
+                        (
+                            agent_idx,
+                            policy_id,
+                            selected,
+                            agent_obs,
+                        ),
+                    ) in env_state["selected_by_agent"].items():
+                        trajectory = env_state["trajectories"][agent_id]
+                        append_transition(
+                            trajectory,
+                            agent_obs,
+                            selected,
+                            float(rewards[agent_idx]),
+                            bool(
+                                terminated
+                                or per_agent_terminated[agent_idx]
+                            ),
+                        )
+                        if (
+                            cut_short
+                            and not per_agent_terminated[agent_idx]
+                        ):
+                            policy = policy_states[policy_id]
+                            trajectory["bootstrap_value"] = value_of(
+                                policy.sample_fn,
+                                policy.log_std,
+                                next_obs[agent_idx],
+                                action_meta,
+                            )
+                    env_state["obs"] = next_obs
+                    env_state["done_mask"] = np.logical_or(
+                        env_state["done_mask"],
+                        per_agent_done,
+                    )
+                    env_state["done"] = (
+                        global_done
+                        or bool(np.all(env_state["done_mask"]))
+                    )
+                if all(state["done"] for state in env_states):
+                    break
+
+            for env, env_state in zip(envs, env_states):
+                rewards_summary.append(
+                    env_state["episode_reward"].tolist()
+                )
+                for agent_id, trajectory in env_state["trajectories"].items():
+                    if trajectory_has_samples(trajectory):
+                        trajectories[
+                            assignment.policy_for_agent(agent_id)
+                        ].append(trajectory)
+
+            verification_freeze = bool(
+                best_tracker.health_monitor.verification_pending
+            )
+            policy_metrics = {}
+            for policy_id, policy in policy_states.items():
+                batch = build_update_batch(
+                    trajectories[policy_id],
+                    action_meta,
+                    args.gamma,
+                    args.gae_lambda,
+                )
+                sample_count = (
+                    len(batch["obs"])
+                    if batch is not None
+                    else 0
+                )
+                if policy.trainable and sample_count:
+                    budget.consume(sample_count)
+                metrics = None
+                if (
+                    policy.trainable
+                    and batch is not None
+                    and not verification_freeze
+                ):
+                    metrics = ppo_update(
+                        policy.model,
+                        policy.log_std,
+                        policy.optimizer,
+                        batch,
+                        action_meta,
+                        args,
+                    )
+                policy_metrics[policy_id] = {
+                    "trainable": policy.trainable,
+                    "samples": sample_count,
+                    "loss": (
+                        f"{metrics['loss']:.5f}"
+                        if metrics is not None
+                        else "0.00000"
+                    ),
+                    "policy_loss": (
+                        f"{metrics['policy_loss']:.5f}"
+                        if metrics is not None
+                        else "0.00000"
+                    ),
+                    "value_loss": (
+                        f"{metrics['value_loss']:.5f}"
+                        if metrics is not None
+                        else "0.00000"
+                    ),
+                }
+
+            print_episode_metrics(episode, [
+                ("mode", [
+                    ("policies", len(policy_states)),
+                    ("assignment", assignment.mode),
+                ]),
+                ("outcome", [("rewards", rewards_summary)]),
+                ("training", [
+                    ("total_timesteps", budget.collected),
+                    ("by_policy", policy_metrics),
+                    *(
+                        [("skipped", "recovery_verification")]
+                        if verification_freeze
+                        else []
+                    ),
+                ]),
+            ], args.log_format)
+            last_completed_episode = episode + 1
+
+            apply_ready_best_checkpoint(best_tracker)
+            if (
+                args.checkpoint_every > 0
+                and (episode + 1) % args.checkpoint_every == 0
+            ):
+                saved_path = _save_multi_policy_ppo_checkpoint(
+                    checkpoint,
+                    checkpoint_manager,
+                    policy_states,
+                    assignment,
+                    episode + 1,
+                    args,
+                )
+                last_saved_episode = episode + 1
+            else:
+                saved_path = None
+            if best_tracker.should_evaluate(episode + 1):
+                if saved_path is None:
+                    saved_path = _save_multi_policy_ppo_checkpoint(
+                        checkpoint,
+                        checkpoint_manager,
+                        policy_states,
+                        assignment,
+                        episode + 1,
+                        args,
+                    )
+                    last_saved_episode = episode + 1
+                request_best_checkpoint_evaluation(
+                    best_tracker,
+                    saved_path,
+                    episode + 1,
+                )
+            if budget.exhausted:
+                break
+    except KeyboardInterrupt:
+        interrupted = True
+        print(
+            "\nInterrupt received: saving the multi-policy PPO state...",
+            flush=True,
+        )
+
+    if last_saved_episode != last_completed_episode:
+        _save_multi_policy_ppo_checkpoint(
+            checkpoint,
+            checkpoint_manager,
+            policy_states,
+            assignment,
+            last_completed_episode,
+            args,
+            final=True,
+        )
+    if not interrupted:
+        apply_ready_best_checkpoint(
+            best_tracker,
+            wait_timeout=args.best_final_drain_timeout,
+        )
+    return last_completed_episode
+
+
 def main():
     args = parse_args()
     budget = TrainingBudget(args.total_timesteps)
@@ -986,6 +1928,17 @@ def main():
                 action_space = spec.get("action_space", {})
                 if json.dumps(action_space, sort_keys=True) != expected_action_space:
                     raise RuntimeError("Hybrid PPO currently requires all controlled agents to share the same action_space spec")
+
+        if args.multi_policy:
+            run_sync_multi_policy_ppo(
+                args,
+                envs,
+                stepper,
+                action_meta,
+                best_tracker,
+                budget,
+            )
+            return
 
         model = build_hybrid_actor_critic(
             obs_dim=obs_dim,

@@ -54,6 +54,11 @@ class ScenarioGymEnv(gym.Env):
         self.agent_ids = [str(item["id"]) for item in self.agent_specs]
         self.agent_team_ids = [item.get("team_id") for item in self.agent_specs]
         self.agent_team_by_id = dict(zip(self.agent_ids, self.agent_team_ids))
+        self.agent_policy_ids = [
+            str(item.get("policy_id", "shared") or "shared")
+            for item in self.agent_specs
+        ]
+        self.agent_policy_by_id = dict(zip(self.agent_ids, self.agent_policy_ids))
         if agent_id is None:
             self.agent_id = self.agent_ids[0]
         else:
@@ -375,3 +380,7 @@ class ScenarioGymEnv(gym.Env):
         teams = sorted({team_id for team_id in self.agent_team_ids if team_id is not None}, key=str)
         missing = sum(team_id is None for team_id in self.agent_team_ids)
         return f"teams={teams} unassigned={missing}"
+
+    def policy_summary(self):
+        policies = sorted(set(self.agent_policy_ids))
+        return f"declared_policies={policies}"

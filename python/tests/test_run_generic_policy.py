@@ -3,11 +3,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 os.environ.setdefault("GODOT_GYM_TF_LD_READY", "1")
 
+import numpy as np
+import tensorflow as tf
+
+
+from core.multi_policy import PolicyAssignment
 from run import (
     agent_succeeded,
+    build_multi_policy_checkpoint,
     checkpoint_episode,
     normalize_checkpoint_path,
     parse_args,
@@ -19,6 +24,15 @@ from run import (
 
 
 class RunGenericPolicyTests(unittest.TestCase):
+    @staticmethod
+    def _linear_model():
+        model = tf.keras.Sequential([
+            tf.keras.layers.Input(shape=(2,)),
+            tf.keras.layers.Dense(1, use_bias=False),
+        ])
+        model(np.zeros((1, 2), dtype=np.float32), training=False)
+        return model
+
     def test_no_reset_cli_disables_automatic_episode_reset(self):
         self.assertFalse(parse_args(["--no-reset"]).reset)
         self.assertTrue(parse_args([]).reset)
@@ -102,6 +116,58 @@ class RunGenericPolicyTests(unittest.TestCase):
         env = type("Env", (), {"action_type": "discrete"})()
         with self.assertRaisesRegex(RuntimeError, "does not match policy manifest"):
             resolve_algorithm("dqn", env, "legacy.weights.h5", {"algorithm": "ppo"})
+
+    def test_multi_policy_checkpoint_restores_each_model_by_policy_key(self):
+        assignment = PolicyAssignment(
+            mode="policy_id",
+            policy_ids=("red", "blue"),
+            agent_to_policy={"RedAgent": "red", "BlueAgent": "blue"},
+            trainable_policy_ids=("red", "blue"),
+            policy_keys={"red": "red", "blue": "blue"},
+        )
+        source = {
+            "red": self._linear_model(),
+            "blue": self._linear_model(),
+        }
+        source["red"].set_weights([
+            np.full((2, 1), 1.5, dtype=np.float32),
+        ])
+        source["blue"].set_weights([
+            np.full((2, 1), -2.0, dtype=np.float32),
+        ])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            checkpoint = tf.train.Checkpoint(
+                episode=tf.Variable(12, dtype=tf.int64),
+                policies=tf.train.Checkpoint(
+                    red=tf.train.Checkpoint(model=source["red"]),
+                    blue=tf.train.Checkpoint(model=source["blue"]),
+                ),
+            )
+            saved_path = tf.train.CheckpointManager(
+                checkpoint,
+                temp_dir,
+                max_to_keep=1,
+            ).save(checkpoint_number=12)
+
+            restored = {
+                "red": self._linear_model(),
+                "blue": self._linear_model(),
+            }
+            build_multi_policy_checkpoint(
+                restored,
+                assignment,
+                "dqn",
+            ).restore(saved_path).expect_partial()
+
+            np.testing.assert_allclose(
+                restored["red"].get_weights()[0],
+                source["red"].get_weights()[0],
+            )
+            np.testing.assert_allclose(
+                restored["blue"].get_weights()[0],
+                source["blue"].get_weights()[0],
+            )
 
 
 if __name__ == "__main__":

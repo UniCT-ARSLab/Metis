@@ -110,6 +110,9 @@ Install this optional backend from `requirements-sb3.txt`. It stores SB3/PyTorch
 models as `.zip` files and off-policy replay as `.pkl`; those files are independent
 of Metis Keras policy bundles.
 
+The SB3 adapter does not implement independent multi-policy learning.
+`--multi-policy` is rejected rather than silently falling back to parameter sharing.
+
 ### `python/core/`
 
 - `models.py`: Keras model factories and compiled inference functions;
@@ -192,6 +195,7 @@ only from a model accepting batched tensors.
 | Asynchronous collectors | yes | no |
 | Hybrid PPO | native mixed heads | latent Box adapter |
 | Multi-agent parameter sharing | general shared contract | coordinated group reset |
+| Independent multi-policy | all native trainers, sync/async | no |
 | Simultaneous self-play | yes | shared current policy only |
 | Historical opponent sampling | yes | no |
 | Demonstration prefill and BC variants | yes | no |

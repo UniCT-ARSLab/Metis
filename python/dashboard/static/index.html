@@ -79,7 +79,8 @@
           <span id="health-state" class="px-2 py-0.5 rounded-md text-xs font-semibold bg-gray-100 text-gray-600 dark:bg-white/10 dark:text-gray-300">warming up</span>
           <span id="training-phase" class="px-2 py-0.5 rounded-md text-xs bg-gray-100 text-gray-600 dark:bg-white/10 dark:text-gray-300">training</span>
         </div>
-        <p id="health-reason" class="text-sm text-gray-500 dark:text-gray-400 mt-2">Waiting for policy evaluation.</p>
+        <p id="health-reason" class="text-sm text-gray-700 dark:text-gray-200 font-medium mt-2">Waiting for policy evaluation.</p>
+        <div id="health-detail" class="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2"></div>
       </div>
       <div class="grid grid-cols-2 gap-x-6 gap-y-1 text-xs text-gray-500 dark:text-gray-400 shrink-0">
         <span>Automatic recovery</span><strong id="health-auto" class="text-right text-gray-700 dark:text-gray-200">off</strong>
@@ -192,6 +193,7 @@ function renderMeta(m) {
   if (m.num_envs) parts.push(chip(m.num_envs + " env" + (m.num_envs > 1 ? "s" : "")));
   if (m.agents != null) parts.push(chip(m.agents + " agent" + (m.agents > 1 ? "s" : "")));
   if (m.multi_agent) parts.push(chip("multi-agent", "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300"));
+  if (m.multi_policy) parts.push(chip("multi-policy", "bg-amber-100 text-amber-800 dark:bg-amber-500/20 dark:text-amber-200"));
   if (m.collector_mode) parts.push(chip(m.collector_mode));
   document.getElementById("meta-chips").innerHTML = parts.join("");
   if (m.scenario && m.scenario !== "?") document.title = `Metis · ${m.scenario}`;
@@ -214,6 +216,29 @@ function escapeHtml(value) {
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;"
   })[c]);
 }
+function formatHealthReason(reason) {
+  // Turn a long "Headline. Label: value. Label: value." recovery message into a short headline
+  // plus structured label/value items, so the panel shows a scannable grid instead of a wall.
+  const text = String(reason ?? "").trim();
+  if (!text) return { headline: "Waiting for policy evaluation.", items: [] };
+  const parts = text.split(/\.\s+(?=[A-Z0-9])/).map(s => s.replace(/\.\s*$/, "").trim()).filter(Boolean);
+  const items = [], headline = [];
+  for (const p of parts) {
+    const m = p.match(/^([A-Za-z][A-Za-z /_-]{1,40}?):\s*([\s\S]+)$/);
+    if (m) items.push({ label: m[1].trim(), value: m[2].trim() });
+    else headline.push(p);
+  }
+  return { headline: headline.length ? headline.join(". ") + "." : text, items };
+}
+function compactValue(value) {
+  // Shorten verbose float dumps (learning rates) and drop python-dict quotes for readability.
+  return String(value ?? "").replace(/-?\d+\.\d{3,}(e[-+]?\d+)?/gi, m => {
+    const n = Number(m);
+    if (!Number.isFinite(n)) return m;
+    if (n !== 0 && Math.abs(n) < 0.01) return n.toExponential(1);
+    return String(Number(n.toPrecision(3)));
+  }).replace(/'/g, "");
+}
 function renderHealth(data) {
   if (!data) return;
   const state = data.state ?? data.health_state ?? "warming_up";
@@ -232,7 +257,13 @@ function renderHealth(data) {
         : phase === "verifying"
           ? "bg-blue-100 text-blue-700 dark:bg-blue-500/20 dark:text-blue-300"
         : "bg-gray-100 text-gray-600 dark:bg-white/10 dark:text-gray-300");
-  document.getElementById("health-reason").textContent = reason;
+  const parsed = formatHealthReason(reason);
+  document.getElementById("health-reason").textContent = parsed.headline;
+  document.getElementById("health-detail").innerHTML = parsed.items.map(it => `
+    <div class="rounded-md bg-gray-50 dark:bg-white/5 px-2.5 py-1.5 min-w-0" title="${escapeHtml(it.value)}">
+      <div class="text-[10px] uppercase tracking-wide text-gray-400 dark:text-gray-500">${escapeHtml(it.label)}</div>
+      <div class="text-xs font-mono text-gray-600 dark:text-gray-300 break-words leading-snug">${escapeHtml(compactValue(it.value))}</div>
+    </div>`).join("");
   document.getElementById("health-auto").textContent =
     (data.auto_recovery ?? false) ? "enabled" : "off";
   document.getElementById("health-recoveries").textContent =
@@ -259,7 +290,9 @@ function renderHealthEvents() {
       : "text-gray-500 dark:text-gray-400";
     const episode = e.episode == null ? "" : `ep ${e.episode} · `;
     const label = String(e.event || "state").replaceAll("_", " ");
-    return `<div class="${color}"><span class="font-medium">${escapeHtml(episode)}${escapeHtml(label)}</span><span class="text-gray-400"> · ${escapeHtml(e.detail || e.reason || "")}</span></div>`;
+    const full = e.detail || e.reason || "";
+    const short = formatHealthReason(full).headline;
+    return `<div class="${color} truncate" title="${escapeHtml(full)}"><span class="font-medium">${escapeHtml(episode)}${escapeHtml(label)}</span>${short ? `<span class="text-gray-400"> · ${escapeHtml(short)}</span>` : ""}</div>`;
   }).join("");
 }
 function ingestHealth(event) {

@@ -114,9 +114,21 @@ In single-agent mode, `step` accepts one action and exposes the first result cha
 In multi-agent mode, it accepts an action mapping and returns one channel per agent.
 
 Agents with the same observation and action contract may use one shared policy. Their
-transitions remain independent records in replay or rollout storage. Independent
-policies require an explicit `agent_id -> policy_id` assignment and separate model
-state; that general workflow is not implemented yet.
+transitions remain independent records in replay or rollout storage.
+
+Independent multi-policy mode adds an explicit `agent_id -> policy_id` assignment.
+The assignment can come from `Agent.policy_id`, from `team_id`, or from one policy per
+agent. Every policy owns separate model, optimizer, replay or rollout state, and
+metrics. Checkpoints stay atomic so a resume cannot accidentally combine policies
+from different training moments. A root `multi_policy.json` persists the assignment
+used by both training and inference.
+
+Independent policies require homogeneous observation and action contracts. All native
+trainers support both synchronous and asynchronous collection. Async workers receive
+one atomic snapshot containing every policy, and transitions carry their `policy_id`
+into separate replay or rollout storage. Demonstration-specific deterministic
+variants split recorder data by `agent_ids`. The SB3 adapter and historical opponent
+pool do not support independent policy routing.
 
 ## Synchronous and asynchronous collection
 
@@ -125,9 +137,11 @@ easier to reproduce and required by some self-play configurations.
 
 The asynchronous collector lets each environment run independently. Workers publish
 transitions to a bounded queue and periodically receive a new policy snapshot. Each
-transition retains its worker, episode, and policy-version metadata, so data from
-different workers is not confused. The trade-off is policy lag: a worker may finish
-an episode using a slightly older policy.
+transition retains its worker, episode, policy-version, and, in independent mode,
+policy identity, so data from different workers or learners is not confused. A
+multi-policy snapshot is published as one version: workers never observe a half-old,
+half-new set. The trade-off is policy lag: a worker may finish an episode using a
+slightly older policy group.
 
 PPO collects complete rollout generations and only trains on data produced by the
 same frozen policy version. Off-policy algorithms can mix older data through replay by

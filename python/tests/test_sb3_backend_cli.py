@@ -116,6 +116,20 @@ class SB3BackendCliTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "native Metis backend"):
             module.validate_args(args)
 
+    def test_independent_multi_policy_is_rejected_explicitly(self):
+        module = load_sb3_backend_module()
+        args = module.parse_args(
+            [
+                "--algorithm",
+                "ppo",
+                "--multi-agent",
+                "--multi-policy",
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "does not support independent"):
+            module.validate_args(args)
+
 
 if __name__ == "__main__":
     unittest.main()

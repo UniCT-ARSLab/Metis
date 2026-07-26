@@ -56,6 +56,12 @@ from core.evaluation import (
     write_evaluation_summary,
 )
 from core.models import build_continuous_actor, build_hybrid_actor_critic, build_sac_actor, build_shared_q_network
+from core.multi_policy import (
+    add_multi_policy_arguments,
+    assignment_from_manifest,
+    build_policy_assignment,
+    load_multi_policy_manifest,
+)
 from core.policy_artifact import (
     POLICY_MODEL_FILENAME,
     load_policy_into_model,
@@ -108,6 +114,7 @@ def parse_args(argv=None):
     parser.add_argument("--port", type=int, default=6200)
     parser.add_argument("--agent-id", default=None)
     parser.add_argument("--multi-agent", action=argparse.BooleanOptionalAction, default=False)
+    add_multi_policy_arguments(parser, training=False)
     parser.add_argument("--episodes", type=int, default=1)
     parser.add_argument(
         "--max-steps",
@@ -286,6 +293,178 @@ def select_multi_hybrid_actions(model, obs_batch, agent_ids, action_meta):
         agent_id: select_hybrid_action(model, obs, action_meta)
         for agent_id, obs in zip(agent_ids, np.asarray(obs_batch, dtype=np.float32))
     }
+
+
+def build_inference_model(algorithm, env, action_meta=None):
+    if algorithm == "dqn":
+        return build_shared_q_network(
+            obs_dim=env.obs_dim,
+            num_actions=env.num_actions,
+        )
+    if algorithm in {"ddpg", "ddpg_bc", "ddpgfd", "td3", "td3_bc"}:
+        return build_continuous_actor(
+            obs_dim=env.obs_dim,
+            action_size=env.action_size,
+        )
+    if algorithm == "sac":
+        return build_sac_actor(
+            obs_dim=env.obs_dim,
+            action_size=env.action_size,
+        )
+    if algorithm == "ppo":
+        if action_meta is None:
+            action_meta = build_action_metadata(env.action_space_spec)
+        model = build_hybrid_actor_critic(
+            obs_dim=env.obs_dim,
+            discrete_sizes=action_meta["discrete_sizes"],
+            continuous_size=action_meta["continuous_size"],
+        )
+        model(np.zeros((1, env.obs_dim), dtype=np.float32), training=False)
+        return model
+    raise RuntimeError(f"Unsupported algorithm={algorithm!r}")
+
+
+def _multi_policy_manifest_for_args(args):
+    candidates = []
+    if args.policy_path:
+        candidates.append(Path(args.policy_path))
+    candidates.append(Path(args.checkpoint_dir))
+    for candidate in candidates:
+        manifest_path = (
+            candidate / "multi_policy.json"
+            if candidate.is_dir() or not candidate.suffix
+            else candidate
+        )
+        if manifest_path.name != "multi_policy.json":
+            continue
+        if manifest_path.is_file():
+            return load_multi_policy_manifest(manifest_path), manifest_path
+    return None, None
+
+
+def build_multi_policy_checkpoint(models, assignment, algorithm):
+    policies = {}
+    model_attribute = "actor" if algorithm in {
+        "ddpg",
+        "ddpg_bc",
+        "ddpgfd",
+        "td3",
+        "td3_bc",
+        "sac",
+    } else "model"
+    for policy_id, model in models.items():
+        policies[assignment.key_for(policy_id)] = tf.train.Checkpoint(
+            **{model_attribute: model}
+        )
+    return tf.train.Checkpoint(
+        policies=tf.train.Checkpoint(**policies),
+    )
+
+
+def load_multi_policy_models(args, algorithm, assignment, models, manifest_path=None):
+    checkpoint_dir = Path(args.checkpoint_dir)
+    latest_checkpoint = tf.train.latest_checkpoint(str(checkpoint_dir))
+    if args.checkpoint_path:
+        if args.load_from in {"weights", "policy", "keras"}:
+            raise RuntimeError(
+                "--checkpoint-path requires --load-from checkpoint or auto"
+            )
+        selected = normalize_checkpoint_path(args.checkpoint_path)
+        build_multi_policy_checkpoint(
+            models,
+            assignment,
+            algorithm,
+        ).restore(selected).expect_partial()
+        print(f"Loaded exact multi-policy checkpoint: {selected}", flush=True)
+        return "checkpoint", selected
+
+    if args.load_from == "checkpoint" or (
+        args.load_from == "auto" and latest_checkpoint
+    ):
+        if not latest_checkpoint:
+            raise RuntimeError(f"No checkpoint found in {checkpoint_dir}")
+        build_multi_policy_checkpoint(
+            models,
+            assignment,
+            algorithm,
+        ).restore(latest_checkpoint).expect_partial()
+        print(
+            f"Loaded multi-policy checkpoint: {latest_checkpoint}",
+            flush=True,
+        )
+        return "checkpoint", latest_checkpoint
+
+    if args.load_from == "weights":
+        raise RuntimeError(
+            "Independent multi-policy inference does not accept one shared "
+            "--weights-path; use a checkpoint or the policy bundle."
+        )
+
+    bundle_root = (
+        Path(args.policy_path)
+        if args.policy_path
+        else checkpoint_dir
+    )
+    if bundle_root.is_file():
+        raise RuntimeError(
+            "--multi-policy expects --policy-path to name a bundle directory, "
+            "not one model file"
+        )
+    for policy_id, model in models.items():
+        policy_path = (
+            bundle_root
+            / "policies"
+            / assignment.key_for(policy_id)
+            / POLICY_MODEL_FILENAME
+        )
+        loaded = load_policy_into_model(
+            model,
+            policy_path,
+            expected_algorithm=algorithm,
+        )
+        print(
+            f"Loaded policy={policy_id} {loaded['source_kind']}: "
+            f"{loaded['path']}",
+            flush=True,
+        )
+    return "policy", str(manifest_path or bundle_root / "multi_policy.json")
+
+
+def select_multi_policy_actions(
+    models,
+    assignment,
+    env,
+    obs_batch,
+    algorithm,
+    action_meta,
+    epsilon,
+):
+    actions = {}
+    for agent_idx, agent_id in enumerate(env.agent_ids):
+        policy_id = assignment.policy_for_agent(agent_id)
+        model = models[policy_id]
+        obs = obs_batch[agent_idx]
+        if env.action_type == "hybrid":
+            actions[agent_id] = select_hybrid_action(
+                model,
+                obs,
+                action_meta,
+            )
+        elif env.action_type == "continuous":
+            actions[agent_id] = select_continuous_action(
+                model,
+                obs,
+                env,
+                algorithm,
+            )
+        else:
+            actions[agent_id], _ = select_action(
+                model,
+                obs,
+                epsilon,
+                env.num_actions,
+            )
+    return actions
 
 
 def resolve_algorithm(requested, env, weights_path, manifest=None):
@@ -503,53 +682,96 @@ def main():
             agent_id=args.agent_id,
             multi_agent=args.multi_agent,
         )
-        model, policy_manifest, direct_policy_kind, direct_policy_path = load_direct_policy(args)
-        algorithm = resolve_algorithm(
-            args.algorithm,
-            env,
-            args.actor_weights_path or args.weights_path,
-            manifest=policy_manifest,
+        models = None
+        assignment = None
+        multi_policy_manifest, multi_policy_manifest_path = (
+            _multi_policy_manifest_for_args(args)
+            if args.multi_policy
+            else (None, None)
         )
-        action_meta = None
-        if algorithm == "ppo":
-            action_meta = build_action_metadata(env.action_space_spec)
-        if model is not None:
-            validate_keras_policy(model, policy_manifest, env)
-            loaded_kind, loaded_path = direct_policy_kind, direct_policy_path
+        if args.multi_policy:
+            if not args.multi_agent:
+                raise ValueError("--multi-policy requires --multi-agent")
+            manifest_algorithm = (
+                multi_policy_manifest.get("algorithm")
+                if multi_policy_manifest is not None
+                else None
+            )
+            algorithm = resolve_algorithm(
+                args.algorithm,
+                env,
+                args.actor_weights_path or args.weights_path,
+                manifest=(
+                    {"algorithm": manifest_algorithm}
+                    if manifest_algorithm
+                    else None
+                ),
+            )
+            action_meta = (
+                build_action_metadata(env.action_space_spec)
+                if algorithm == "ppo"
+                else None
+            )
+            assignment = (
+                assignment_from_manifest(multi_policy_manifest, env)
+                if multi_policy_manifest is not None
+                else build_policy_assignment([env], args)
+            )
+            models = {
+                policy_id: build_inference_model(
+                    algorithm,
+                    env,
+                    action_meta,
+                )
+                for policy_id in assignment.policy_ids
+            }
+            loaded_kind, loaded_path = load_multi_policy_models(
+                args,
+                algorithm,
+                assignment,
+                models,
+                manifest_path=multi_policy_manifest_path,
+            )
+            for policy_model in models.values():
+                warm_policy_inference(policy_model, env.obs_dim)
+            model = None
+            policy_manifest = None
         else:
-            if algorithm == "dqn":
-                model = build_shared_q_network(obs_dim=env.obs_dim, num_actions=env.num_actions)
-            elif algorithm in {"ddpg", "ddpg_bc", "ddpgfd", "td3", "td3_bc"}:
-                model = build_continuous_actor(obs_dim=env.obs_dim, action_size=env.action_size)
-            elif algorithm == "sac":
-                model = build_sac_actor(obs_dim=env.obs_dim, action_size=env.action_size)
-            elif algorithm == "ppo":
-                model = build_hybrid_actor_critic(
-                    obs_dim=env.obs_dim,
-                    discrete_sizes=action_meta["discrete_sizes"],
-                    continuous_size=action_meta["continuous_size"],
-                )
-                model(np.zeros((1, env.obs_dim), dtype=np.float32), training=False)
-            else:
-                raise RuntimeError(f"Unsupported algorithm={algorithm!r}")
-            if direct_policy_path is not None:
-                loaded_policy = load_policy_into_model(
-                    model,
-                    direct_policy_path,
-                    expected_algorithm=algorithm,
-                )
-                loaded_kind = loaded_policy["source_kind"]
-                loaded_path = str(loaded_policy["path"])
+            model, policy_manifest, direct_policy_kind, direct_policy_path = load_direct_policy(args)
+            algorithm = resolve_algorithm(
+                args.algorithm,
+                env,
+                args.actor_weights_path or args.weights_path,
+                manifest=policy_manifest,
+            )
+            action_meta = None
+            if algorithm == "ppo":
+                action_meta = build_action_metadata(env.action_space_spec)
+            if model is not None:
                 validate_keras_policy(model, policy_manifest, env)
-                print(f"Loaded policy weights: {loaded_path}", flush=True)
+                loaded_kind, loaded_path = direct_policy_kind, direct_policy_path
             else:
-                loaded_kind, loaded_path = load_policy(model, args, algorithm)
-        warm_policy_inference(model, env.obs_dim)
+                model = build_inference_model(algorithm, env, action_meta)
+                if direct_policy_path is not None:
+                    loaded_policy = load_policy_into_model(
+                        model,
+                        direct_policy_path,
+                        expected_algorithm=algorithm,
+                    )
+                    loaded_kind = loaded_policy["source_kind"]
+                    loaded_path = str(loaded_policy["path"])
+                    validate_keras_policy(model, policy_manifest, env)
+                    print(f"Loaded policy weights: {loaded_path}", flush=True)
+                else:
+                    loaded_kind, loaded_path = load_policy(model, args, algorithm)
+            warm_policy_inference(model, env.obs_dim)
 
         env_max_steps = configured_max_steps(args)
         inferred_episode = checkpoint_episode(loaded_path) if loaded_kind == "checkpoint" else None
         if policy_manifest is not None and direct_policy_path is not None:
             inferred_episode = int(policy_manifest.get("episode", 0))
+        if multi_policy_manifest is not None and loaded_kind == "policy":
+            inferred_episode = int(multi_policy_manifest.get("episode", 0))
         training_episode = args.training_episode
         if training_episode is None:
             training_episode = inferred_episode if inferred_episode is not None else 0
@@ -580,7 +802,12 @@ def main():
         print(
             f"Running policy algorithm={algorithm} obs_dim={env.obs_dim} "
             f"action_type={env.action_type} action_size={env.action_size} agents={env.agent_ids} "
-            f"training_episode={training_episode} execution_mode={args.execution_mode}",
+            f"training_episode={training_episode} execution_mode={args.execution_mode}"
+            + (
+                f" policies={assignment.agent_to_policy}"
+                if assignment is not None
+                else ""
+            ),
             flush=True,
         )
         if args.execution_mode == "realtime":
@@ -617,7 +844,17 @@ def main():
                 total_reward = np.zeros((len(env.agent_ids),), dtype=np.float32)
 
             for step in episode_step_indices(env_max_steps):
-                if env.action_type == "hybrid":
+                if assignment is not None:
+                    action = select_multi_policy_actions(
+                        models,
+                        assignment,
+                        env,
+                        obs,
+                        algorithm,
+                        action_meta,
+                        args.epsilon,
+                    )
+                elif env.action_type == "hybrid":
                     if args.multi_agent:
                         action = select_multi_hybrid_actions(model, obs, env.agent_ids, action_meta)
                     else:

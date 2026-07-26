@@ -5,6 +5,7 @@ import os
 import sys
 
 from core.training import add_godot_render_argument
+from core.multi_policy import add_multi_policy_arguments
 from pathlib import Path
 
 from envs.process_manager import GodotProcessManager
@@ -63,6 +64,7 @@ def parse_args(argv):
     parser.add_argument("--env-seed-base", type=int, default=100)
     parser.add_argument("--agent-id", default=None)
     parser.add_argument("--multi-agent", action=argparse.BooleanOptionalAction, default=False)
+    add_multi_policy_arguments(parser)
     parser.add_argument("--godot-bin", default=os.environ.get("GODOT_BIN"))
     parser.add_argument("--godot-project", default=None)
     parser.add_argument("--godot-scene", default=None)

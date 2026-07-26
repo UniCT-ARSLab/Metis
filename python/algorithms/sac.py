@@ -2,6 +2,9 @@ import argparse
 import os
 import random
 import time
+from collections import OrderedDict
+from dataclasses import dataclass
+from pathlib import Path
 from queue import Empty
 
 import numpy as np
@@ -25,6 +28,16 @@ from algorithms.common import (
 import tensorflow as tf
 
 from core.models import build_continuous_critic, build_sac_actor
+from core.multi_policy import (
+    MultiPolicySnapshot,
+    add_multi_policy_arguments,
+    build_policy_assignment,
+    load_multi_policy_manifest,
+    restore_policy_replays,
+    save_policy_replays,
+    validate_multi_policy_options,
+    write_multi_policy_manifest,
+)
 from core.policy_artifact import PolicyArtifactSaver, build_policy_metadata, load_policy_into_model
 from core.opponent_pool import OpponentPool, add_opponent_pool_arguments, validate_team_layout
 from core.replay_buffer import ReplayBuffer
@@ -190,6 +203,7 @@ def parse_args():
     parser.add_argument("--env-timeout", type=float, default=30.0)
     parser.add_argument("--agent-id", default=None)
     parser.add_argument("--multi-agent", action=argparse.BooleanOptionalAction, default=False)
+    add_multi_policy_arguments(parser)
     parser.add_argument("--actor-weights-path", default="generic_sac_actor.weights.h5")
     parser.add_argument(
         "--policy-path",
@@ -1043,6 +1057,1204 @@ def run_async_sac(
     return completed
 
 
+@dataclass
+class SACPolicyState:
+    policy_id: str
+    actor: object
+    critic1: object
+    critic2: object
+    target_critic1: object
+    target_critic2: object
+    actor_optimizer: object
+    critic1_optimizer: object
+    critic2_optimizer: object
+    alpha_optimizer: object
+    log_alpha: object
+    buffer: ReplayBuffer
+    learner: object
+    recovery: OffPolicyRecoveryRuntime
+    artifact: PolicyArtifactSaver
+    trainable: bool
+
+
+def _save_multi_policy_sac_checkpoint(
+    checkpoint,
+    checkpoint_manager,
+    policy_states,
+    assignment,
+    episode,
+    args,
+    *,
+    final=False,
+):
+    checkpoint.episode.assign(int(episode))
+    saved_path = checkpoint_manager.save(checkpoint_number=int(episode))
+    print(
+        f"Saved {'final ' if final else ''}multi-policy checkpoint: {saved_path}",
+        flush=True,
+    )
+    for state in policy_states.values():
+        state.artifact.save(episode)
+    write_multi_policy_manifest(
+        args.checkpoint_dir,
+        assignment,
+        "sac",
+        episode=episode,
+        policy_metadata={
+            policy_id: {
+                "alpha": float(tf.exp(state.log_alpha).numpy()),
+                "replay_size": len(state.buffer),
+            }
+            for policy_id, state in policy_states.items()
+        },
+    )
+    if args.save_replay_buffer:
+        save_policy_replays(
+            saved_path,
+            checkpoint_manager,
+            assignment,
+            {
+                policy_id: state.buffer
+                for policy_id, state in policy_states.items()
+                if state.trainable
+            },
+        )
+    return saved_path
+
+
+def _multi_policy_sac_recovery_callback(policy_states):
+    def post_restore(request):
+        outcomes = {
+            policy_id: state.recovery.post_restore(request)
+            for policy_id, state in policy_states.items()
+            if state.trainable
+        }
+        return {
+            "multi_policy": outcomes,
+            "target_networks": "all policy critic targets synchronized",
+        }
+
+    return post_restore
+
+
+def run_async_multi_policy_sac(
+    args,
+    envs,
+    policy_states,
+    assignment,
+    checkpoint,
+    checkpoint_manager,
+    best_tracker,
+    start_episode,
+    action_low,
+    action_high,
+    random_action_low,
+    random_action_high,
+    budget,
+):
+    env0 = envs[0]
+    obs_dim = env0.obs_dim
+    action_size = env0.action_size
+    with tf.device("/CPU:0"):
+        local_models = [
+            {
+                policy_id: build_sac_actor(
+                    obs_dim=obs_dim,
+                    action_size=action_size,
+                )
+                for policy_id in assignment.policy_ids
+            }
+            for _env in envs
+        ]
+    sample_fns = [
+        {
+            policy_id: build_sac_sample_fn(
+                model,
+                obs_dim,
+                action_low,
+                action_high,
+                args.log_std_min,
+                args.log_std_max,
+            )
+            for policy_id, model in worker_models.items()
+        }
+        for worker_models in local_models
+    ]
+
+    def live_weights():
+        return {
+            policy_id: state.actor.get_weights()
+            for policy_id, state in policy_states.items()
+        }
+
+    snapshot = MultiPolicySnapshot(live_weights())
+    rngs = [
+        np.random.default_rng(args.env_seed_base + 100_003 * worker_id)
+        for worker_id in range(len(envs))
+    ]
+
+    def action_selector(
+        worker_id,
+        env,
+        _episode,
+        _step_idx,
+        _worker_models,
+        state,
+    ):
+        if state["use_random_exploration"]:
+            actions = sample_exploratory_action(
+                action_low,
+                action_high,
+                env.action_names,
+                rng=rngs[worker_id],
+                num_agents=len(env.agent_ids),
+                drive_min=args.random_drive_min,
+                steering_abs_max=args.random_steering_abs_max,
+                exploration_low=random_action_low,
+                exploration_high=random_action_high,
+            )
+            actions[state["done_mask"]] = action_low
+            for agent_idx, agent_id in enumerate(env.agent_ids):
+                policy_id = assignment.policy_for_agent(agent_id)
+                if (
+                    state["done_mask"][agent_idx]
+                    or policy_states[policy_id].trainable
+                ):
+                    continue
+                actions[agent_idx] = select_action_with(
+                    sample_fns[worker_id][policy_id],
+                    state["obs"][agent_idx],
+                    action_low,
+                    action_high,
+                )
+        else:
+            actions = np.zeros(
+                (len(env.agent_ids), action_size),
+                dtype=np.float32,
+            )
+            for agent_idx, agent_id in enumerate(env.agent_ids):
+                if state["done_mask"][agent_idx]:
+                    actions[agent_idx] = action_low
+                    continue
+                policy_id = assignment.policy_for_agent(agent_id)
+                actions[agent_idx] = select_action_with(
+                    sample_fns[worker_id][policy_id],
+                    state["obs"][agent_idx],
+                    action_low,
+                    action_high,
+                )
+        return smooth_actions(
+            actions,
+            state["previous_action"],
+            action_low,
+            action_high,
+            args.action_smoothing,
+        )
+
+    worker = create_continuous_async_worker(
+        args,
+        envs,
+        local_models,
+        snapshot,
+        action_size,
+        action_selector,
+        policy_assignment=assignment,
+    )
+    pool = AsyncCollectorPool(
+        envs,
+        worker,
+        start_episode,
+        args.num_episodes,
+        queue_capacity=args.async_queue_capacity,
+    )
+    scheduler = AsyncEventScheduler(args)
+    minimum_policy_version = {"value": None}
+    health_monitor = getattr(best_tracker, "health_monitor", None)
+    recovery_handler = getattr(health_monitor, "recovery_handler", None)
+    if recovery_handler is not None:
+        recovery_handler.set_policy_publisher(
+            lambda: snapshot.publish(live_weights())
+        )
+        base_post_restore = _multi_policy_sac_recovery_callback(policy_states)
+
+        def post_restore(request):
+            outcome = base_post_restore(request)
+            dropped = scheduler.reset_after_recovery(pool)
+            minimum_policy_version["value"] = snapshot.version
+            outcome["async_queue"] = (
+                f"dropped {dropped['events']} events/"
+                f"{dropped['transitions']} transitions"
+            )
+            return outcome
+
+        recovery_handler.set_post_restore(post_restore)
+
+    print(
+        "Collector mode: async multi-policy SAC "
+        f"workers={len(envs)} policies={list(assignment.policy_ids)} "
+        f"queue={args.async_queue_capacity}",
+        flush=True,
+    )
+    completed = int(start_episode)
+    done_workers = 0
+    publish_update_count = 0
+    metrics = {
+        policy_id: {
+            "actor": [],
+            "critic1": [],
+            "critic2": [],
+            "alpha_loss": [],
+        }
+        for policy_id in assignment.policy_ids
+    }
+    last_saved_episode = None
+    interrupted = False
+    pool.start()
+    try:
+        while done_workers < len(envs):
+            apply_ready_best_checkpoint(best_tracker)
+            try:
+                event = scheduler.next_event(pool, timeout=0.2)
+            except Empty:
+                continue
+            if isinstance(event, AsyncWorkerErrorEvent):
+                raise RuntimeError(
+                    f"Async multi-policy SAC collector {event.worker_id} failed"
+                ) from event.error
+            if isinstance(event, AsyncWorkerDoneEvent):
+                done_workers += 1
+                continue
+            if isinstance(event, AsyncStepEvent):
+                step_events = scheduler.drain_step_events(pool, event)
+                minimum = minimum_policy_version["value"]
+                if minimum is not None:
+                    step_events = [
+                        item
+                        for item in step_events
+                        if item.policy_version is None
+                        or int(item.policy_version) >= int(minimum)
+                    ]
+                if not step_events:
+                    continue
+
+                collected = 0
+                for step_event in step_events:
+                    for transition in step_event.transitions:
+                        policy_id, *payload = transition
+                        state = policy_states[policy_id]
+                        if state.trainable:
+                            state.buffer.add(*payload)
+                            collected += 1
+                budget.consume(collected)
+                updates_due = scheduler.ingest_by_policy(
+                    step_events,
+                    lambda transition: transition[0],
+                )
+                performed = 0
+                if not bool(
+                    getattr(health_monitor, "verification_pending", False)
+                ):
+                    for policy_id, due in updates_due.items():
+                        state = policy_states[policy_id]
+                        if (
+                            due <= 0
+                            or not state.trainable
+                            or len(state.buffer)
+                            < max(args.replay_warmup, args.batch_size)
+                        ):
+                            continue
+                        for _update in range(due):
+                            update_policy = (
+                                state.recovery.should_update_policy()
+                            )
+                            result = state.learner(
+                                *state.buffer.sample(
+                                    args.batch_size,
+                                    action_dtype=np.float32,
+                                ),
+                                update_policy=update_policy,
+                            )
+                            metrics[policy_id]["critic1"].append(result[1])
+                            metrics[policy_id]["critic2"].append(result[2])
+                            state.recovery.record_critic_update()
+                            if result[0] is not None:
+                                metrics[policy_id]["actor"].append(result[0])
+                                metrics[policy_id]["alpha_loss"].append(
+                                    result[3]
+                                )
+                            update_number = int(
+                                state.critic1_optimizer.iterations.numpy()
+                            )
+                            if (
+                                update_number > 0
+                                and update_number
+                                % args.target_update_every
+                                == 0
+                            ):
+                                soft_update(
+                                    state.target_critic1,
+                                    state.critic1,
+                                    args.tau,
+                                )
+                                soft_update(
+                                    state.target_critic2,
+                                    state.critic2,
+                                    args.tau,
+                                )
+                            performed += 1
+                            publish_update_count += 1
+                scheduler.record_updates(performed)
+                if (
+                    performed > 0
+                    and publish_update_count
+                    >= args.async_policy_publish_updates
+                ):
+                    snapshot.publish(live_weights())
+                    publish_update_count %= args.async_policy_publish_updates
+                if budget.exhausted:
+                    break
+                continue
+
+            if not isinstance(event, AsyncEpisodeEvent):
+                continue
+            completed += 1
+            payload = event.payload
+            by_policy = {}
+            for policy_id, state in policy_states.items():
+                indices = assignment.indices_for(
+                    env0.agent_ids,
+                    policy_id,
+                )
+                rewards = [
+                    float(payload["ep_reward"][index])
+                    for index in indices
+                ]
+                values = metrics[policy_id]
+                by_policy[policy_id] = {
+                    "reward_mean": (
+                        float(np.mean(rewards)) if rewards else 0.0
+                    ),
+                    "alpha": float(tf.exp(state.log_alpha).numpy()),
+                    "replay": len(state.buffer),
+                    "policy_updates": len(values["actor"]),
+                    "critic_updates": len(values["critic1"]),
+                    "actor_loss": (
+                        float(np.mean(values["actor"]))
+                        if values["actor"]
+                        else 0.0
+                    ),
+                    "critic_loss": (
+                        float(np.mean(values["critic1"]))
+                        if values["critic1"]
+                        else 0.0
+                    ),
+                }
+            diagnostics = summarize_episode_diagnostics([payload], True)
+            throughput = scheduler.throughput(pool)
+            print_episode_metrics(event.episode, [
+                ("mode", [
+                    ("collector", "async"),
+                    ("worker", event.worker_id),
+                    ("policies", len(policy_states)),
+                ]),
+                ("outcome", [
+                    (
+                        "progress",
+                        f"mean:{diagnostics['progress_mean']:.3f} "
+                        f"max:{diagnostics['progress_max']:.3f}",
+                    ),
+                ]),
+                ("training", [
+                    ("completed", f"{completed}/{args.num_episodes}"),
+                    ("total_timesteps", budget.collected),
+                    ("by_policy", by_policy),
+                    ("policy_version", snapshot.version),
+                ]),
+                ("throughput", [
+                    ("env_steps_s", f"{throughput['env_steps_s']:.1f}"),
+                    (
+                        "transitions_s",
+                        f"{throughput['transitions_s']:.1f}",
+                    ),
+                    ("updates_s", f"{throughput['updates_s']:.1f}"),
+                ]),
+            ], args.log_format)
+            for values in metrics.values():
+                for series in values.values():
+                    series.clear()
+
+            if (
+                args.checkpoint_every > 0
+                and completed % args.checkpoint_every == 0
+            ):
+                saved_path = _save_multi_policy_sac_checkpoint(
+                    checkpoint,
+                    checkpoint_manager,
+                    policy_states,
+                    assignment,
+                    completed,
+                    args,
+                )
+                last_saved_episode = completed
+            else:
+                saved_path = None
+            if best_tracker.should_evaluate(completed):
+                if saved_path is None:
+                    saved_path = _save_multi_policy_sac_checkpoint(
+                        checkpoint,
+                        checkpoint_manager,
+                        policy_states,
+                        assignment,
+                        completed,
+                        args,
+                    )
+                    last_saved_episode = completed
+                request_best_checkpoint_evaluation(
+                    best_tracker,
+                    saved_path,
+                    completed,
+                )
+    except KeyboardInterrupt:
+        interrupted = True
+        print(
+            "\nInterrupt received: stopping async multi-policy SAC collectors...",
+            flush=True,
+        )
+    finally:
+        pool.close()
+
+    if last_saved_episode != completed:
+        _save_multi_policy_sac_checkpoint(
+            checkpoint,
+            checkpoint_manager,
+            policy_states,
+            assignment,
+            completed,
+            args,
+            final=True,
+        )
+    if not interrupted:
+        apply_ready_best_checkpoint(
+            best_tracker,
+            wait_timeout=args.best_final_drain_timeout,
+        )
+    for state in policy_states.values():
+        state.buffer.wait_for_pending_saves()
+    return completed
+
+
+def run_sync_multi_policy_sac(
+    args,
+    envs,
+    stepper,
+    best_tracker,
+    budget,
+):
+    assignment = build_policy_assignment(envs, args)
+    validate_multi_policy_options(
+        args,
+        supports_async=True,
+        supports_opponent_pool=False,
+    )
+    if args.demo_path:
+        raise ValueError(
+            "SAC demonstrations are not yet routed by policy. Remove --demo-path "
+            "for independent multi-policy training."
+        )
+    if args.policy_path:
+        raise ValueError(
+            "Independent multi-policy SAC warm starts currently use "
+            "--resume/--resume-checkpoint."
+        )
+    if len(assignment.trainable_policy_ids) < len(assignment.policy_ids) and not (
+        args.resume or args.resume_checkpoint
+    ):
+        raise ValueError(
+            "--train-policy requires --resume or --resume-checkpoint so frozen policies "
+            "have trained weights."
+        )
+
+    env0 = envs[0]
+    obs_dim = env0.obs_dim
+    action_size = env0.action_size
+    action_low = np.asarray(env0.action_low, dtype=np.float32)
+    action_high = np.asarray(env0.action_high, dtype=np.float32)
+    random_action_low, random_action_high = continuous_exploration_bounds(
+        env0.action_space_spec,
+        action_low,
+        action_high,
+    )
+    target_entropy = (
+        args.target_entropy
+        if args.target_entropy is not None
+        else -float(action_size)
+    )
+    first_agent_for_policy = {
+        policy_id: next(
+            agent_id
+            for agent_id in env0.agent_ids
+            if assignment.policy_for_agent(agent_id) == policy_id
+        )
+        for policy_id in assignment.policy_ids
+    }
+
+    policy_states = OrderedDict()
+    policy_trackables = {}
+    for policy_id in assignment.policy_ids:
+        actor = build_sac_actor(obs_dim=obs_dim, action_size=action_size)
+        critic1 = build_continuous_critic(
+            obs_dim=obs_dim,
+            action_size=action_size,
+        )
+        critic2 = build_continuous_critic(
+            obs_dim=obs_dim,
+            action_size=action_size,
+        )
+        target_critic1 = build_continuous_critic(
+            obs_dim=obs_dim,
+            action_size=action_size,
+        )
+        target_critic2 = build_continuous_critic(
+            obs_dim=obs_dim,
+            action_size=action_size,
+        )
+        target_critic1.set_weights(critic1.get_weights())
+        target_critic2.set_weights(critic2.get_weights())
+        actor_optimizer = tf.keras.optimizers.Adam(
+            learning_rate=args.actor_learning_rate
+        )
+        critic1_optimizer = tf.keras.optimizers.Adam(
+            learning_rate=args.critic_learning_rate
+        )
+        critic2_optimizer = tf.keras.optimizers.Adam(
+            learning_rate=args.critic_learning_rate
+        )
+        alpha_optimizer = tf.keras.optimizers.Adam(
+            learning_rate=args.alpha_learning_rate
+        )
+        log_alpha = tf.Variable(
+            np.log(args.initial_alpha),
+            dtype=tf.float32,
+            name=f"log_alpha_{assignment.key_for(policy_id)}",
+        )
+        buffer = ReplayBuffer(capacity=args.replay_capacity)
+        learner = build_sac_learner_step(
+            actor,
+            critic1,
+            critic2,
+            target_critic1,
+            target_critic2,
+            actor_optimizer,
+            critic1_optimizer,
+            critic2_optimizer,
+            alpha_optimizer,
+            log_alpha,
+            target_entropy,
+            args.gamma,
+            action_low,
+            action_high,
+            args.log_std_min,
+            args.log_std_max,
+            compiled=args.tf_compile_learner,
+            xla=args.tf_xla,
+            tune_alpha=args.tune_alpha,
+            min_alpha=args.min_alpha,
+            grad_clip_norm=args.grad_clip_norm,
+            grad_clip_adaptive=args.grad_clip_adaptive,
+            grad_clip_k=args.grad_clip_k,
+            caps=args.caps,
+            caps_lambda_temporal=args.caps_lambda_temporal,
+            caps_lambda_spatial=args.caps_lambda_spatial,
+            caps_sigma=args.caps_sigma,
+        )
+        recovery = OffPolicyRecoveryRuntime(
+            args,
+            buffer,
+            normal_policy_update_every=args.policy_update_every,
+            target_sync=lambda c1=critic1, c2=critic2, t1=target_critic1, t2=target_critic2: (
+                t1.set_weights(c1.get_weights()),
+                t2.set_weights(c2.get_weights()),
+            ),
+        )
+        metadata = build_policy_metadata(
+            "sac",
+            env0,
+            agent_id=first_agent_for_policy[policy_id],
+        )
+        metadata.update({
+            "policy_id": policy_id,
+            "agent_ids": [
+                agent_id
+                for agent_id in env0.agent_ids
+                if assignment.policy_for_agent(agent_id) == policy_id
+            ],
+            "parameter_sharing": len(
+                assignment.indices_for(env0.agent_ids, policy_id)
+            ) > 1,
+        })
+        state = SACPolicyState(
+            policy_id=policy_id,
+            actor=actor,
+            critic1=critic1,
+            critic2=critic2,
+            target_critic1=target_critic1,
+            target_critic2=target_critic2,
+            actor_optimizer=actor_optimizer,
+            critic1_optimizer=critic1_optimizer,
+            critic2_optimizer=critic2_optimizer,
+            alpha_optimizer=alpha_optimizer,
+            log_alpha=log_alpha,
+            buffer=buffer,
+            learner=learner,
+            recovery=recovery,
+            artifact=PolicyArtifactSaver(
+                actor,
+                Path(args.checkpoint_dir)
+                / "policies"
+                / assignment.key_for(policy_id),
+                metadata,
+            ),
+            trainable=assignment.is_trainable(policy_id),
+        )
+        policy_states[policy_id] = state
+        policy_trackables[assignment.key_for(policy_id)] = tf.train.Checkpoint(
+            actor=actor,
+            critic1=critic1,
+            critic2=critic2,
+            target_critic1=target_critic1,
+            target_critic2=target_critic2,
+            actor_optimizer=actor_optimizer,
+            critic1_optimizer=critic1_optimizer,
+            critic2_optimizer=critic2_optimizer,
+            alpha_optimizer=alpha_optimizer,
+            log_alpha=log_alpha,
+        )
+
+    checkpoint = tf.train.Checkpoint(
+        episode=tf.Variable(0, dtype=tf.int64),
+        policies=tf.train.Checkpoint(**policy_trackables),
+    )
+    checkpoint_manager = tf.train.CheckpointManager(
+        checkpoint,
+        directory=args.checkpoint_dir,
+        max_to_keep=args.keep_checkpoints,
+    )
+    resume_checkpoint = resolve_resume_checkpoint(args, checkpoint_manager)
+    start_episode = 0
+    if resume_checkpoint:
+        manifest_path = Path(args.checkpoint_dir) / "multi_policy.json"
+        if manifest_path.is_file():
+            stored = load_multi_policy_manifest(manifest_path)
+            if stored.get("agent_to_policy", {}) != assignment.agent_to_policy:
+                raise RuntimeError(
+                    "The checkpoint policy assignment does not match the scenario"
+                )
+            if str(stored.get("algorithm", "sac")) != "sac":
+                raise RuntimeError(
+                    f"Multi-policy checkpoint algorithm={stored.get('algorithm')!r}, "
+                    "expected 'sac'"
+                )
+        checkpoint.restore(resume_checkpoint).expect_partial()
+        start_episode = int(checkpoint.episode.numpy())
+        restore_policy_replays(
+            args,
+            resume_checkpoint,
+            assignment,
+            {
+                policy_id: state.buffer
+                for policy_id, state in policy_states.items()
+                if state.trainable
+            },
+        )
+        print(
+            f"Resumed multi-policy checkpoint {resume_checkpoint} "
+            f"from episode={start_episode}",
+            flush=True,
+        )
+
+    critic_warmup = (
+        max(0, int(args.critic_warmup_updates))
+        if resume_checkpoint
+        else 0
+    )
+    for state in policy_states.values():
+        apply_optimizer_learning_rates(
+            state.actor_optimizer,
+            state.critic1_optimizer,
+            state.critic2_optimizer,
+            state.alpha_optimizer,
+            args,
+            resumed=resume_checkpoint is not None,
+        )
+        state.recovery.critic_warmup_target = (
+            critic_warmup if state.trainable else 0
+        )
+
+    write_multi_policy_manifest(
+        args.checkpoint_dir,
+        assignment,
+        "sac",
+        episode=start_episode,
+    )
+    best_tracker.configure_recovery(
+        checkpoint,
+        [
+            (f"actor_{assignment.key_for(policy_id)}", state.actor_optimizer)
+            for policy_id, state in policy_states.items()
+            if state.trainable
+        ]
+        + [
+            (f"critic1_{assignment.key_for(policy_id)}", state.critic1_optimizer)
+            for policy_id, state in policy_states.items()
+            if state.trainable
+        ]
+        + [
+            (f"critic2_{assignment.key_for(policy_id)}", state.critic2_optimizer)
+            for policy_id, state in policy_states.items()
+            if state.trainable
+        ]
+        + [
+            (f"alpha_{assignment.key_for(policy_id)}", state.alpha_optimizer)
+            for policy_id, state in policy_states.items()
+            if state.trainable
+        ],
+        post_restore=_multi_policy_sac_recovery_callback(policy_states),
+    )
+    print(
+        "Independent multi-policy SAC: "
+        f"assignment={assignment.mode} policies={list(assignment.policy_ids)} "
+        f"trainable={list(assignment.trainable_policy_ids)} "
+        f"agent_map={assignment.agent_to_policy}",
+        flush=True,
+    )
+    print(
+        f"SAC learner instances={len(policy_states)} "
+        f"target_entropy={target_entropy:.3f} "
+        f"grad_clip={describe_grad_clip(args)}",
+        flush=True,
+    )
+
+    if args.collector_mode == "async":
+        return run_async_multi_policy_sac(
+            args,
+            envs,
+            policy_states,
+            assignment,
+            checkpoint,
+            checkpoint_manager,
+            best_tracker,
+            start_episode,
+            action_low,
+            action_high,
+            random_action_low,
+            random_action_high,
+            budget,
+        )
+
+    last_completed_episode = start_episode
+    last_saved_episode = None
+    interrupted = False
+    try:
+        for episode in range(start_episode, args.num_episodes):
+            use_random = episode < max(
+                0,
+                args.random_exploration_episodes,
+            )
+            reset_progress_max = curriculum_reset_progress_max(
+                episode,
+                args,
+            )
+            env_states = []
+            for env_idx, env in enumerate(envs):
+                config = {
+                    "training_episode": episode,
+                    "max_steps": args.max_steps_per_episode,
+                    "physics_frames_per_step": args.physics_frames_per_step,
+                    "training_mode": True,
+                }
+                if reset_progress_max is not None:
+                    config.update(
+                        reset_progress_min=0.0,
+                        reset_progress_max=reset_progress_max,
+                    )
+                env.configure(**config)
+                obs, info = env.reset(
+                    seed=args.episode_seed_multiplier * episode + env_idx
+                )
+                agent_count = len(env.agent_ids)
+                env_states.append({
+                    "obs": obs,
+                    "done": False,
+                    "done_mask": np.asarray(
+                        info.get(
+                            "per_agent_done",
+                            np.zeros((agent_count,), dtype=np.bool_),
+                        ),
+                        dtype=np.bool_,
+                    ),
+                    "ep_reward": np.zeros(
+                        (agent_count,),
+                        dtype=np.float32,
+                    ),
+                    "action_sum": np.zeros(
+                        (agent_count, action_size),
+                        dtype=np.float32,
+                    ),
+                    "action_count": np.zeros(
+                        (agent_count, 1),
+                        dtype=np.float32,
+                    ),
+                    "previous_action": np.full(
+                        (agent_count, action_size),
+                        np.nan,
+                        dtype=np.float32,
+                    ),
+                    "action_delta_sum": np.zeros(
+                        (agent_count, action_size),
+                        dtype=np.float32,
+                    ),
+                    "action_delta_count": np.zeros(
+                        (agent_count, 1),
+                        dtype=np.float32,
+                    ),
+                    "max_track_progress": np.zeros(
+                        (agent_count,),
+                        dtype=np.float32,
+                    ),
+                    "last_track_progress": np.zeros(
+                        (agent_count,),
+                        dtype=np.float32,
+                    ),
+                    "finish_reached": np.zeros(
+                        (agent_count,),
+                        dtype=np.bool_,
+                    ),
+                    "collision_seen": np.zeros(
+                        (agent_count,),
+                        dtype=np.bool_,
+                    ),
+                    "collision_count": np.zeros(
+                        (agent_count,),
+                        dtype=np.int32,
+                    ),
+                    "stalled_seen": np.zeros(
+                        (agent_count,),
+                        dtype=np.bool_,
+                    ),
+                    "stalled_count": np.zeros(
+                        (agent_count,),
+                        dtype=np.int32,
+                    ),
+                })
+
+            metrics = {
+                policy_id: {
+                    "actor": [],
+                    "critic1": [],
+                    "critic2": [],
+                    "alpha_loss": [],
+                    "alpha": [],
+                }
+                for policy_id in assignment.policy_ids
+            }
+            for step_idx in episode_step_indices(
+                args.max_steps_per_episode
+            ):
+                requests = []
+                for env, env_state in zip(envs, env_states):
+                    if env_state["done"]:
+                        continue
+                    actions = np.zeros(
+                        (len(env.agent_ids), action_size),
+                        dtype=np.float32,
+                    )
+                    for agent_idx, agent_id in enumerate(env.agent_ids):
+                        if env_state["done_mask"][agent_idx]:
+                            actions[agent_idx] = action_low
+                            continue
+                        policy = policy_states[
+                            assignment.policy_for_agent(agent_id)
+                        ]
+                        if use_random and policy.trainable:
+                            selected = sample_exploratory_action(
+                                action_low,
+                                action_high,
+                                env.action_names,
+                                rng=np.random,
+                                drive_min=args.random_drive_min,
+                                steering_abs_max=args.random_steering_abs_max,
+                                exploration_low=random_action_low,
+                                exploration_high=random_action_high,
+                            )
+                        else:
+                            selected = select_action(
+                                policy.actor,
+                                env_state["obs"][agent_idx],
+                                action_low,
+                                action_high,
+                                args.log_std_min,
+                                args.log_std_max,
+                            )
+                        actions[agent_idx] = smooth_actions(
+                            selected,
+                            env_state["previous_action"][agent_idx],
+                            action_low,
+                            action_high,
+                            args.action_smoothing,
+                        )
+                    requests.append((env, env_state, actions))
+
+                for env, env_state, actions, step_result in stepper.step(
+                    requests
+                ):
+                    next_obs, _reward, terminated, truncated, info = step_result
+                    done = bool(terminated or truncated)
+                    rewards = np.asarray(
+                        info.get("per_agent_rewards"),
+                        dtype=np.float32,
+                    )
+                    per_agent_done = np.asarray(
+                        info.get("per_agent_done"),
+                        dtype=np.bool_,
+                    )
+                    per_agent_terminated = np.asarray(
+                        info.get("per_agent_terminated", per_agent_done),
+                        dtype=np.bool_,
+                    )
+                    agent_infos = list(info.get("per_agent_infos", []))
+                    for agent_idx, agent_id in enumerate(env.agent_ids):
+                        if (
+                            env_state["done_mask"][agent_idx]
+                            and per_agent_done[agent_idx]
+                        ):
+                            continue
+                        agent_info = (
+                            agent_infos[agent_idx]
+                            if agent_idx < len(agent_infos)
+                            else {}
+                        )
+                        update_episode_diagnostics(
+                            env_state,
+                            agent_info,
+                            agent_idx=agent_idx,
+                        )
+                        policy_id = assignment.policy_for_agent(agent_id)
+                        policy = policy_states[policy_id]
+                        if policy.trainable:
+                            policy.buffer.add(
+                                env_state["obs"][agent_idx],
+                                actions[agent_idx],
+                                float(rewards[agent_idx]),
+                                next_obs[agent_idx],
+                                bool(
+                                    per_agent_terminated[agent_idx]
+                                    or terminated
+                                ),
+                            )
+                            budget.consume(1)
+                        env_state["ep_reward"][agent_idx] += rewards[agent_idx]
+                        env_state["action_sum"][agent_idx] += actions[agent_idx]
+                        env_state["action_count"][agent_idx, 0] += 1.0
+                        previous = env_state["previous_action"][agent_idx]
+                        if np.all(np.isfinite(previous)):
+                            env_state["action_delta_sum"][
+                                agent_idx
+                            ] += np.abs(actions[agent_idx] - previous)
+                            env_state["action_delta_count"][
+                                agent_idx, 0
+                            ] += 1.0
+                        env_state["previous_action"][agent_idx] = (
+                            actions[agent_idx]
+                        )
+
+                    env_state["obs"] = next_obs
+                    env_state["done_mask"] = per_agent_done
+                    env_state["done"] = done or bool(
+                        np.all(per_agent_done)
+                    )
+
+                    if not best_tracker.health_monitor.verification_pending:
+                        for policy_id, policy in policy_states.items():
+                            if (
+                                not policy.trainable
+                                or len(policy.buffer)
+                                < max(args.replay_warmup, args.batch_size)
+                            ):
+                                continue
+                            update_policy = (
+                                policy.recovery.should_update_policy()
+                            )
+                            result = policy.learner(
+                                *policy.buffer.sample(
+                                    args.batch_size,
+                                    action_dtype=np.float32,
+                                ),
+                                update_policy=update_policy,
+                            )
+                            metrics[policy_id]["critic1"].append(result[1])
+                            metrics[policy_id]["critic2"].append(result[2])
+                            policy.recovery.record_critic_update()
+                            if update_policy:
+                                metrics[policy_id]["actor"].append(result[0])
+                                metrics[policy_id]["alpha_loss"].append(
+                                    result[3]
+                                )
+                                metrics[policy_id]["alpha"].append(result[4])
+
+                if (step_idx + 1) % args.target_update_every == 0:
+                    for policy in policy_states.values():
+                        if (
+                            policy.trainable
+                            and len(policy.buffer)
+                            >= max(args.replay_warmup, args.batch_size)
+                        ):
+                            soft_update(
+                                policy.target_critic1,
+                                policy.critic1,
+                                args.tau,
+                            )
+                            soft_update(
+                                policy.target_critic2,
+                                policy.critic2,
+                                args.tau,
+                            )
+                if budget.exhausted:
+                    break
+
+            rewards_summary = [
+                state["ep_reward"].tolist()
+                for state in env_states
+            ]
+            diagnostics = summarize_episode_diagnostics(
+                env_states,
+                True,
+            )
+            by_policy = {}
+            for policy_id, policy in policy_states.items():
+                indices = assignment.indices_for(
+                    env0.agent_ids,
+                    policy_id,
+                )
+                rewards = [
+                    float(state["ep_reward"][index])
+                    for state in env_states
+                    for index in indices
+                ]
+                values = metrics[policy_id]
+                by_policy[policy_id] = {
+                    "reward_mean": (
+                        float(np.mean(rewards)) if rewards else 0.0
+                    ),
+                    "alpha": (
+                        float(np.mean(values["alpha"]))
+                        if values["alpha"]
+                        else float(tf.exp(policy.log_alpha).numpy())
+                    ),
+                    "replay": len(policy.buffer),
+                    "policy_updates": len(values["actor"]),
+                    "critic_updates": len(values["critic1"]),
+                    "actor_loss": (
+                        float(np.mean(values["actor"]))
+                        if values["actor"]
+                        else 0.0
+                    ),
+                    "critic_loss": (
+                        float(np.mean(values["critic1"]))
+                        if values["critic1"]
+                        else 0.0
+                    ),
+                }
+
+            print_episode_metrics(episode, [
+                ("mode", [
+                    ("policies", len(policy_states)),
+                    ("assignment", assignment.mode),
+                    ("exploration", "random" if use_random else "policy"),
+                    *(
+                        [(
+                            "reset_progress_max",
+                            f"{reset_progress_max:.3f}",
+                        )]
+                        if reset_progress_max is not None
+                        else []
+                    ),
+                ]),
+                ("outcome", [
+                    ("reward", rewards_summary),
+                    (
+                        "progress",
+                        f"mean:{diagnostics['progress_mean']:.3f} "
+                        f"max:{diagnostics['progress_max']:.3f}",
+                    ),
+                ]),
+                ("training", [
+                    ("total_timesteps", budget.collected),
+                    ("by_policy", by_policy),
+                ]),
+            ], args.log_format)
+            last_completed_episode = episode + 1
+
+            apply_ready_best_checkpoint(best_tracker)
+            if (
+                args.checkpoint_every > 0
+                and (episode + 1) % args.checkpoint_every == 0
+            ):
+                saved_path = _save_multi_policy_sac_checkpoint(
+                    checkpoint,
+                    checkpoint_manager,
+                    policy_states,
+                    assignment,
+                    episode + 1,
+                    args,
+                )
+                last_saved_episode = episode + 1
+            else:
+                saved_path = None
+            if best_tracker.should_evaluate(episode + 1):
+                if saved_path is None:
+                    saved_path = _save_multi_policy_sac_checkpoint(
+                        checkpoint,
+                        checkpoint_manager,
+                        policy_states,
+                        assignment,
+                        episode + 1,
+                        args,
+                    )
+                    last_saved_episode = episode + 1
+                request_best_checkpoint_evaluation(
+                    best_tracker,
+                    saved_path,
+                    episode + 1,
+                )
+            if budget.exhausted:
+                break
+    except KeyboardInterrupt:
+        interrupted = True
+        print(
+            "\nInterrupt received: saving the multi-policy SAC state...",
+            flush=True,
+        )
+
+    if last_saved_episode != last_completed_episode:
+        _save_multi_policy_sac_checkpoint(
+            checkpoint,
+            checkpoint_manager,
+            policy_states,
+            assignment,
+            last_completed_episode,
+            args,
+            final=True,
+        )
+    if not interrupted:
+        apply_ready_best_checkpoint(
+            best_tracker,
+            wait_timeout=args.best_final_drain_timeout,
+        )
+    for state in policy_states.values():
+        state.buffer.wait_for_pending_saves()
+    return last_completed_episode
+
+
 def main():
     args = parse_args()
     budget = TrainingBudget(args.total_timesteps)
@@ -1131,6 +2343,16 @@ def main():
         for env in envs[1:]:
             if env.obs_dim != obs_dim or env.action_type != "continuous" or env.action_size != action_size:
                 raise RuntimeError("All parallel environments must expose the same obs_dim and continuous action_size")
+
+        if args.multi_policy:
+            run_sync_multi_policy_sac(
+                args,
+                envs,
+                stepper,
+                best_tracker,
+                budget,
+            )
+            return
 
         actor = build_sac_actor(obs_dim=obs_dim, action_size=action_size)
         args.policy_artifact = PolicyArtifactSaver(

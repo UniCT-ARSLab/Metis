@@ -14,11 +14,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core.models import build_continuous_actor, build_continuous_critic  # noqa: E402
 from core.replay_buffer import ReplayBuffer  # noqa: E402
 from algorithms.common import (  # noqa: E402
+    partition_demonstrations_by_policy,
     scheduled_bc_weight,
     train_deterministic_step,
     variant_uses_joint_bc,
     variant_uses_td3,
 )
+from core.multi_policy import PolicyAssignment  # noqa: E402
 import train  # noqa: E402
 from train import BACKENDS  # noqa: E402
 
@@ -56,6 +58,45 @@ class VariantSelectionTests(unittest.TestCase):
         self.assertTrue(variant_uses_joint_bc("ddpg_bc"))
         self.assertTrue(variant_uses_joint_bc("td3_bc"))
         self.assertFalse(variant_uses_joint_bc("ddpgfd"))
+
+    def test_multi_policy_demonstrations_are_partitioned_by_agent(self):
+        assignment = PolicyAssignment(
+            mode="policy_id",
+            policy_ids=("red", "blue"),
+            agent_to_policy={"Red0": "red", "Blue0": "blue"},
+            trainable_policy_ids=("red", "blue"),
+            policy_keys={"red": "red", "blue": "blue"},
+        )
+        demos = {
+            "obs": np.asarray([[1.0], [2.0], [3.0]], dtype=np.float32),
+            "actions": np.asarray([[0.1], [0.2], [0.3]], dtype=np.float32),
+            "rewards": np.asarray([1.0, 2.0, 3.0], dtype=np.float32),
+            "next_obs": np.asarray([[1.1], [2.1], [3.1]], dtype=np.float32),
+            "dones": np.zeros((3,), dtype=np.float32),
+            "agent_ids": np.asarray(["Red0", "Blue0", "Red0"]),
+        }
+
+        by_policy = partition_demonstrations_by_policy(demos, assignment)
+
+        self.assertEqual(by_policy["red"]["rewards"].tolist(), [1.0, 3.0])
+        self.assertEqual(by_policy["blue"]["rewards"].tolist(), [2.0])
+
+    def test_multi_policy_demonstrations_require_agent_ids(self):
+        assignment = PolicyAssignment(
+            mode="agent",
+            policy_ids=("A", "B"),
+            agent_to_policy={"A": "A", "B": "B"},
+            trainable_policy_ids=("A", "B"),
+            policy_keys={"A": "A", "B": "B"},
+        )
+        with self.assertRaisesRegex(ValueError, "requires recordings with agent_ids"):
+            partition_demonstrations_by_policy(
+                {
+                    "obs": np.zeros((1, 1), dtype=np.float32),
+                    "actions": np.zeros((1, 1), dtype=np.float32),
+                },
+                assignment,
+            )
 
 
 class UnifiedEntrypointTests(unittest.TestCase):

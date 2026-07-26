@@ -353,19 +353,22 @@ func get_near_target_speed_penalty() -> float:
 
 
 func get_pose_tracking_reward() -> float:
-	# Dense reward for matching position AND orientation. A pure product gives ZERO orientation
-	# gradient while the arm is still far (position_score ~0), so orientation is only ever shaped at
-	# the very end -- exactly where it is kinematically hardest to fix without disturbing position.
-	# The 6-DOF xArm reliably solves position (min 0.011m) but leaves orientation stuck (~35deg even
-	# when close). So reward each half INDEPENDENTLY (additive) to teach the policy to pre-orient
-	# during the approach, and keep a smaller product term to still reward solving BOTH at once.
+	# Dense pose reward = a broad APPROACH BEACON plus a tight both-tight POSE bonus.
+	# History: a pure product starved orientation while the axis was wrong; a pure additive let the
+	# policy abandon position; a pos-primary form went to ZERO beyond near_target_distance (no
+	# gradient to approach) and pinned the run. Fix: the `approach` term is graded over the whole
+	# workspace so it NEVER zeroes and always pulls the tool toward the target from any distance;
+	# the second term is the fine pose (position primary within near_target, orientation modulating)
+	# and pays out only once genuinely close. Both position AND orientation are needed for full value.
+	var approach := 1.0 - clampf(
+		_target_distance() / maxf(workspace_scale, 0.001), 0.0, 1.0)
 	var position_score := 1.0 - clampf(
 		_target_distance() / maxf(near_target_distance, 0.001), 0.0, 1.0)
 	var orientation_score := 1.0 - clampf(
 		_target_angle_error() / maxf(deg_to_rad(pose_reward_angle_degrees), 0.001),
 		0.0,
 		1.0)
-	return 0.4 * position_score + 0.4 * orientation_score + 0.2 * position_score * orientation_score
+	return 0.3 * approach + 0.7 * position_score * (0.3 + 0.7 * orientation_score)
 
 
 func get_hold_progress_reward() -> float:

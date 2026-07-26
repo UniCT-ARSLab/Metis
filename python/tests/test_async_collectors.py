@@ -180,6 +180,37 @@ class AsyncCollectorTests(unittest.TestCase):
         events = [AsyncStepEvent(0, tuple((idx,) for idx in range(10))) for _ in range(4)]
         self.assertEqual(scheduler.ingest(events), 1)
 
+    def test_scheduler_keeps_multi_policy_update_credits_separate(self):
+        args = argparse.Namespace(
+            async_update_basis="transitions",
+            async_update_every=4,
+            async_updates_per_step=1,
+            async_max_updates_per_env_step=1,
+            async_drain_max_events=8,
+        )
+        scheduler = AsyncEventScheduler(args)
+        events = [
+            AsyncStepEvent(
+                0,
+                tuple(
+                    [("red", index) for index in range(3)]
+                    + [("blue", index) for index in range(2)]
+                ),
+            ),
+            AsyncStepEvent(
+                1,
+                tuple(
+                    [("red", index) for index in range(3, 5)]
+                    + [("blue", index) for index in range(2, 4)]
+                ),
+            ),
+        ]
+
+        updates = scheduler.ingest_by_policy(events, lambda transition: transition[0])
+
+        self.assertEqual(updates, {"blue": 1, "red": 1})
+        self.assertEqual(scheduler._policy_collection_credit, {"blue": 0, "red": 1})
+
     def test_recovery_reset_discards_experience_but_preserves_lifecycle_events(self):
         args = argparse.Namespace(
             async_update_basis="transitions",

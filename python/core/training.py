@@ -522,6 +522,12 @@ class BestCheckpointTracker:
             "--headless",
             "--multi-agent" if self.args.multi_agent else "--no-multi-agent",
         ]
+        if bool(getattr(self.args, "multi_policy", False)):
+            command.extend([
+                "--multi-policy",
+                "--policy-assignment",
+                str(getattr(self.args, "policy_assignment", "auto")),
+            ])
         optional_values = (
             ("--godot-bin", self.args.godot_bin),
             ("--godot-project", self.args.godot_project),
@@ -1236,6 +1242,7 @@ class AsyncEventScheduler:
         )
         self.drain_max_events = int(args.async_drain_max_events)
         self._collection_credit = 0
+        self._policy_collection_credit = {}
         self._deferred = deque()
         self._interval_started = time.monotonic()
         self._interval_steps = 0
@@ -1263,11 +1270,15 @@ class AsyncEventScheduler:
                 self._deferred.append(event)
         return events
 
-    def ingest(self, events):
+    def _record_collection(self, events):
         step_count = len(events)
         transition_count = sum(len(event.transitions) for event in events)
         self._interval_steps += step_count
         self._interval_transitions += transition_count
+        return step_count, transition_count
+
+    def ingest(self, events):
+        step_count, transition_count = self._record_collection(events)
         collected_units = transition_count if self.update_basis == "transitions" else step_count
         self._collection_credit += collected_units
         intervals, self._collection_credit = divmod(self._collection_credit, self.update_every)
@@ -1281,6 +1292,51 @@ class AsyncEventScheduler:
         self._interval_requested_updates += requested_updates
         self._interval_throttled_updates += requested_updates - updates_due
         return updates_due
+
+    def ingest_by_policy(self, events, policy_for_transition):
+        """Return independent update credits for each policy represented in a burst."""
+        self._record_collection(events)
+        collected_by_policy = {}
+        steps_by_policy = {}
+        for event in events:
+            policies_in_step = set()
+            for transition in event.transitions:
+                policy_id = str(policy_for_transition(transition))
+                collected_by_policy[policy_id] = (
+                    collected_by_policy.get(policy_id, 0) + 1
+                )
+                policies_in_step.add(policy_id)
+            for policy_id in policies_in_step:
+                steps_by_policy[policy_id] = steps_by_policy.get(policy_id, 0) + 1
+
+        updates = {}
+        requested_total = 0
+        throttled_total = 0
+        for policy_id in sorted(set(collected_by_policy) | set(steps_by_policy)):
+            collected_units = (
+                collected_by_policy.get(policy_id, 0)
+                if self.update_basis == "transitions"
+                else steps_by_policy.get(policy_id, 0)
+            )
+            credit = self._policy_collection_credit.get(policy_id, 0)
+            credit += collected_units
+            intervals, credit = divmod(credit, self.update_every)
+            self._policy_collection_credit[policy_id] = credit
+            requested = intervals * self.updates_per_interval
+            allowed = requested
+            if self.max_updates_per_env_step > 0:
+                allowed = min(
+                    requested,
+                    steps_by_policy.get(policy_id, 0)
+                    * self.max_updates_per_env_step,
+                )
+            updates[policy_id] = allowed
+            requested_total += requested
+            throttled_total += requested - allowed
+
+        self._interval_requested_updates += requested_total
+        self._interval_throttled_updates += throttled_total
+        return updates
 
     def record_updates(self, count):
         self._interval_updates += int(count)
@@ -1307,6 +1363,7 @@ class AsyncEventScheduler:
             dropped_transitions += dropped["transitions"]
         self._deferred.extend(preserved)
         self._collection_credit = 0
+        self._policy_collection_credit.clear()
         self._interval_started = time.monotonic()
         self._interval_steps = 0
         self._interval_transitions = 0
@@ -1515,12 +1572,19 @@ def maybe_start_dashboard(args, algorithm=None):
     scene = getattr(args, "godot_scene", "") or ""
     scenario = scene.rsplit("/", 1)[-1].removesuffix(".tscn") if scene else "?"
     multi_agent = bool(getattr(args, "multi_agent", False))
+    multi_policy = bool(getattr(args, "multi_policy", False))
     meta = {
         "backend": getattr(args, "backend", "metis"),
         "algorithm": algorithm or getattr(args, "trainer_variant", None) or "?",
         "scenario": scenario,
         "num_envs": int(getattr(args, "num_envs", 0) or 0),
         "multi_agent": multi_agent,
+        "multi_policy": multi_policy,
+        "policy_assignment": (
+            getattr(args, "policy_assignment", None)
+            if multi_policy
+            else None
+        ),
         "agents": None if multi_agent else 1,
         "collector_mode": getattr(args, "collector_mode", None),
         "batch_size": int(getattr(args, "batch_size", 0) or 0),

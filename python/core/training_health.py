@@ -871,7 +871,7 @@ class TensorFlowCheckpointRecovery:
         normalized = str(name).lower()
         if normalized.startswith("critic"):
             role = "critic"
-        elif normalized in {"alpha", "entropy", "temperature"}:
+        elif normalized.startswith(("alpha", "entropy", "temperature")):
             role = "alpha"
         elif normalized.startswith("actor"):
             role = "actor"

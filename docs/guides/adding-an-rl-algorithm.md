@@ -145,6 +145,15 @@ Async support requires explicit answers to these questions:
 5. How are workers, sockets, and Godot processes stopped on `Ctrl+C`?
 6. Are opponent pools and multi-policy assignments actually connected?
 
+Native Metis algorithms are expected to support independent multi-policy collection
+in both modes. Async implementations should use `MultiPolicySnapshot` to publish the
+complete policy group atomically, include `policy_id` in every transition or
+trajectory, and use per-policy update credit through
+`AsyncEventScheduler.ingest_by_policy()`. PPO-style on-policy learners also need a
+generation barrier: never combine trajectories produced by different group versions.
+Off-policy learners keep one replay buffer per policy and may mix older versions only
+inside that policy's replay.
+
 Reject unsupported combinations with a clear error. Silently accepting a flag is
 worse than documenting a limitation.
 

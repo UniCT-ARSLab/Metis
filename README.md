@@ -311,7 +311,7 @@ agents and resets the whole world.
 | Asynchronous collection | yes | no |
 | Historical opponent pool | yes | no |
 | Demonstrations and BC variants | yes | no |
-| Independent multi-policy learning | not yet | no |
+| Independent multi-policy learning | all native trainers, sync or async | no |
 | Deployment artifact | Keras/TFLite/ONNX | SB3/PyTorch `.zip` |
 
 SAC clips the global gradient norm of each critic and the actor to `10.0` by default.
@@ -489,6 +489,28 @@ agents share model parameters while retaining separate observations, rewards,
 terminal states, and diagnostics. Adding agents increases experience collection; it
 does not create one model per agent or select a winner among them.
 
+Use `--multi-policy` when different agents or teams must own different learners.
+Metis then keeps an independent network, optimizer, replay or rollout store, and
+training metrics for every policy. Godot's exported `Agent.policy_id` is the most
+explicit assignment mechanism; `--policy-assignment auto` otherwise falls back to
+`team_id`, then to one policy per agent.
+
+```text
+--multi-agent \
+--multi-policy \
+--policy-assignment auto \
+--collector-mode async
+```
+
+The checkpoint remains atomic: all policies and the episode cursor are restored
+together. Policy bundles are written under `CHECKPOINT_DIR/policies/`, while
+`multi_policy.json` records the `agent_id -> policy_id` mapping. Repeat
+`--train-policy POLICY_ID` on a resumed run to update only selected policies. All
+native trainers support synchronous and asynchronous collection in this mode.
+Demonstration variants route recorder samples by `agent_ids`, so each trainable policy
+must have its own recorded transitions. Parameter sharing remains the simpler and
+usually more sample-efficient baseline for identical, symmetric agents.
+
 On the SB3 adapter, shared agents are vector lanes grouped by Godot process. The
 default `--sb3-multi-agent-partial-done error` is the safe setting for Pong, Tanks, or
 other scenarios where all competitors finish together. `reset-all` is an explicit
@@ -510,8 +532,11 @@ transitions are excluded from the learner batch. DQN supports the opponent pool 
 asynchronous collection. PPO, SAC, and the DDPG/TD3 family currently require a
 synchronous collector when the pool is active.
 
-Parameter sharing is not general multi-policy training. Independent policies with
-separate networks and optimizers still require an explicit trainer extension.
+Parameter sharing, historical opponents, and independent multi-policy learning solve
+different problems. Parameter sharing trains one current model from every compatible
+agent. The opponent pool keeps one learner but controls opponents with frozen older
+snapshots. Independent multi-policy gives each assigned policy its own live learner.
+The opponent pool and independent multi-policy mode cannot currently be combined.
 
 ## Curriculum and demonstrations
 
@@ -609,7 +634,10 @@ Godot.
 ## Current boundaries
 
 - Agents sharing one policy must expose the same observation and action contract.
-- General independent multi-policy training is not implemented yet.
+- Independent multi-policy training requires homogeneous observation and action
+  contracts and the native Metis backend. It supports synchronous or asynchronous
+  collection across all native trainers. Demonstration variants additionally require
+  recorder files containing `agent_ids` for every trainable policy.
 - Asynchronous historical opponent sampling is currently limited to DQN.
 - The optional SB3 adapter is a comparison tool, not a second full Metis runtime. It
   has synchronized collection only, no historical opponent pool, no demonstration/BC

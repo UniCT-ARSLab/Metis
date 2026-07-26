@@ -51,6 +51,7 @@ size = Vector3(0.13, 0.12, 0.24)
 script = ExtResource("1_m16lm")
 target_spawns = [NodePath("Spawns/Marker3D"), NodePath("Spawns/Marker3D2"), NodePath("Spawns/Marker3D3"), NodePath("Spawns/Marker3D4"), NodePath("Spawns/Marker3D5"), NodePath("Spawns/Marker3D6"), NodePath("Spawns/Marker3D7"), NodePath("Spawns/Marker3D8")]
 target_spawns_root = NodePath("Spawns")
+relocate_target_during_training = false
 
 [node name="BridgeServer" type="Node" parent="." unique_id=831052347]
 script = ExtResource("1_jfawp")

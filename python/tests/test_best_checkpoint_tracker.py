@@ -261,14 +261,15 @@ class EveryTrainerDrainsBeforeExitTests(unittest.TestCase):
         filename = "common.py" if trainer == "ddpg" else f"{trainer}.py"
         return (self.TRAINER_DIR / filename).read_text()
 
-    def test_every_trainer_drains_in_both_collector_modes(self):
+    def test_every_trainer_drains_in_every_training_path(self):
         for trainer in self.TRAINERS:
             source = self.trainer_source(trainer)
             drains = source.count("wait_timeout=args.best_final_drain_timeout")
-            # One for the async tail, one before the sync final save_weights.
+            # One each for shared-policy async/sync and independent
+            # multi-policy async/sync tails.
             self.assertEqual(
-                drains, 2,
-                msg=f"algorithms/{trainer}.py has {drains} drain call(s), expected 2",
+                drains, 4,
+                msg=f"algorithms/{trainer}.py has {drains} drain call(s), expected 4",
             )
 
     def test_no_trainer_kept_a_private_copy_of_the_helper(self):

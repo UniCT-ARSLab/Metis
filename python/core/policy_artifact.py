@@ -37,8 +37,9 @@ def _decoder_for_algorithm(algorithm):
     return "tanh_then_scale"
 
 
-def build_policy_metadata(algorithm, env):
-    agent_spec = env._spec_for_agent(env.agent_id)
+def build_policy_metadata(algorithm, env, agent_id=None):
+    selected_agent_id = env.agent_id if agent_id is None else str(agent_id)
+    agent_spec = env._spec_for_agent(selected_agent_id)
     action_metadata = {
         "type": str(env.action_type),
         "size": int(env.action_size),

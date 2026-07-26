@@ -34,6 +34,7 @@ from core.evaluation import (
     summarize_episode_outcome,
     write_evaluation_summary,
 )
+from core.multi_policy import add_multi_policy_arguments
 from core.training import (
     add_dashboard_arguments,
     add_godot_render_argument,
@@ -105,6 +106,7 @@ def parse_args(argv=None):
     parser.add_argument("--env-timeout", type=float, default=30.0)
     parser.add_argument("--agent-id", default=None)
     parser.add_argument("--multi-agent", action=argparse.BooleanOptionalAction, default=False)
+    add_multi_policy_arguments(parser)
     parser.add_argument(
         "--sb3-multi-agent-partial-done",
         choices=["error", "reset-all"],
@@ -182,6 +184,12 @@ def parse_args(argv=None):
 
 
 def validate_args(args):
+    if args.multi_policy:
+        raise ValueError(
+            "The SB3 comparison backend does not support independent --multi-policy "
+            "training. Use --backend metis --multi-agent --multi-policy "
+            "--collector-mode sync."
+        )
     if args.collector_mode != "sync":
         raise ValueError(
             "Stable-Baselines3 collects synchronized VecEnv batches. "

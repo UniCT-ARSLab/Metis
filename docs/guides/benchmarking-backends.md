@@ -152,7 +152,8 @@ fair backend comparison unless Metis is configured to use the same rule.
 Current-policy simultaneous self-play works when both teams share the policy and
 terminate together. Historical opponent pools, independent multi-policy training,
 demonstration prefill, BC variants, and asynchronous collectors remain native Metis
-features.
+features. Independent multi-policy supports synchronous and asynchronous collection
+across all native trainers; it is outside the SB3 comparison adapter.
 
 SB3 saves `.zip` models and `.pkl` replay buffers. Metis saves TensorFlow checkpoints,
 `.npz` replay buffers, and a portable Keras policy bundle. The benchmark evaluates

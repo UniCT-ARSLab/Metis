@@ -410,6 +410,7 @@ func get_spec() -> Dictionary:
 		var agent_spec := {
 			"id": _agent_id(agent),
 			"team_id": _agent_team_id(agent),
+			"policy_id": _agent_policy_id(agent),
 			"obs_dim": _agent_observation_size(agent),
 			"observation_names": _agent_observation_names(agent),
 			"action_names": action_names,
@@ -1049,6 +1050,21 @@ func _agent_team_id(agent:Node) -> Variant:
 	if interface != null and _node_has_property(interface, "team_id"):
 		return interface.get("team_id")
 	return null
+
+
+func _agent_policy_id(agent:Node) -> String:
+	if agent.has_method("get_policy_id"):
+		return str(agent.get_policy_id())
+
+	var interface := _agent_interface(agent)
+	if interface != null and interface.has_method("get_policy_id"):
+		return str(interface.get_policy_id())
+
+	if _node_has_property(agent, "policy_id"):
+		return str(agent.get("policy_id"))
+	if interface != null and _node_has_property(interface, "policy_id"):
+		return str(interface.get("policy_id"))
+	return "shared"
 
 
 func _all_agents_done(channels:Array) -> bool:

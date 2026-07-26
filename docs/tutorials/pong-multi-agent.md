@@ -30,6 +30,11 @@ During ordinary simultaneous self-play, both teams use the current policy. When 
 historical opponent pool is enabled, one side may instead use a frozen earlier snapshot.
 Only transitions from the current learner enter training in those matches.
 
+Metis can also train two genuinely independent policies, one per side. That is useful
+for experiments with asymmetric roles, but it is not the recommended first Pong run:
+the shared policy reuses twice as much relevant experience and avoids one side becoming
+temporarily much stronger than the other.
+
 ## 2. Design an agent-centric contract
 
 Each paddle has three discrete actions:
@@ -258,6 +263,53 @@ not hold a collector forever.
 
 For Pong, keep `--physics-frames-per-step 1` unless you have explicitly tested another
 decision rate. Frame skipping changes how often the paddle can react.
+
+### Optional independent policies
+
+To give each side its own learner, either set a distinct `policy_id` on each `Agent`
+node or assign policies from the existing teams. The latter needs no scene change:
+
+```bash
+python/.venv/bin/python python/train.py \
+  --algorithm dqn \
+  --godot-bin /path/to/Godot \
+  --godot-project godot \
+  --godot-scene res://scenarios/pong/pong_scenario.tscn \
+  --num-envs 4 \
+  --num-episodes 2500 \
+  --max-steps-per-episode 0 \
+  --batch-size 128 \
+  --replay-warmup 8000 \
+  --checkpoint-dir checkpoints/pong_independent_dqn_v1 \
+  --multi-agent \
+  --multi-policy \
+  --policy-assignment team \
+  --collector-mode async \
+  --headless
+```
+
+The resolved policy IDs are `team_0` and `team_1`. Each gets its own Q-network,
+target network, optimizer, epsilon, and replay buffer. They are saved together, not
+selected as competing checkpoint candidates. Async workers receive both networks in
+one versioned snapshot, and each transition is routed back to the matching replay
+buffer. Run the pair with:
+
+```bash
+python/.venv/bin/python python/run.py \
+  --checkpoint-dir checkpoints/pong_independent_dqn_v1 \
+  --godot-bin /path/to/Godot \
+  --godot-project godot \
+  --godot-scene res://scenarios/pong/pong_scenario.tscn \
+  --multi-agent \
+  --multi-policy \
+  --episodes 20 \
+  --execution-mode realtime \
+  --no-headless
+```
+
+Use this as a comparison against the shared-policy baseline. A fair comparison keeps
+the environment seeds and transition budget fixed; counting only episodes gives the
+two setups different amounts of learner data.
 
 ### Optional SB3 comparison
 

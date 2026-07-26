@@ -30,9 +30,10 @@ The policy should not receive the active map index, absolute coordinates, or dir
 enemy transforms. Those shortcuts make training easier but produce a map-specific
 controller.
 
-All four tanks use one shared policy. Team ID is used by the scenario and opponent pool,
-while mirrored or body-local observations give the network a common spatial convention.
-This is parameter sharing, not four independently selected models.
+The baseline gives all four tanks one shared policy. Team ID is used by the scenario
+and opponent pool, while mirrored or body-local observations give the network a common
+spatial convention. This parameter-sharing setup is the best first validation run.
+Metis can also assign one independent policy per team later in the tutorial.
 
 ## 2. Declare the hybrid action space
 
@@ -380,6 +381,26 @@ restore the previous optimizer or create a continuation of the old checkpoint se
 
 An opponent pool reduces strategic forgetting, but it is not independent multi-policy
 training. There is still one learner and one shared model artifact.
+
+### Optional independent team policies
+
+To train red and blue as two live, independent learners, replace the opponent-pool
+flags with:
+
+```text
+--multi-agent
+--multi-policy
+--policy-assignment team
+--collector-mode async
+```
+
+Metis creates `team_0` and `team_1`, each with its own PPO model and optimizer, and
+saves both in one atomic checkpoint. Async rollout generations keep the complete
+policy group frozen until every environment has finished, then update each model only
+from its assigned agents. This mode cannot currently be combined with the historical
+opponent pool. It is useful when teams have genuinely different roles;
+for a symmetric battle, compare it against parameter sharing rather than assuming
+that two networks will learn faster.
 
 ## 12. Evaluate and run
 
