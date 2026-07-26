@@ -840,6 +840,15 @@ def main():
             realtime_deadline = time.monotonic()
             total_reward = 0.0
             steps_taken = 0
+            # Latch success CUMULATIVELY and PER-AGENT across the episode. With
+            # terminate_on_success=false the episode always runs to the step cap, and
+            # target_reached/success events are per-step (true only while the pose is actually held).
+            # Reading just the final step's info (below) therefore misses a reach-and-hold that
+            # completed mid-episode and then drifted -> it printed success=0 while training's
+            # cumulative finish metric showed ~50%. A per-agent boolean latch also handles the
+            # multi-agent case where different agents reach the target at different steps (a scalar
+            # max-over-steps would under-count them).
+            episode_agent_success = []
             if args.multi_agent:
                 total_reward = np.zeros((len(env.agent_ids),), dtype=np.float32)
 
@@ -876,6 +885,12 @@ def main():
                 else:
                     total_reward += float(reward)
 
+                for idx, agent_info in enumerate(episode_agent_infos(info, args.multi_agent)):
+                    while idx >= len(episode_agent_success):
+                        episode_agent_success.append(False)
+                    if agent_succeeded(agent_info):
+                        episode_agent_success[idx] = True
+
                 if args.print_every > 0 and step % args.print_every == 0:
                     if isinstance(action, dict):
                         action_label = action
@@ -900,7 +915,11 @@ def main():
                 if terminated or truncated:
                     break
 
-            success_count, trial_count, terminal_reasons = summarize_episode_outcome(info, args.multi_agent)
+            final_success_count, trial_count, terminal_reasons = summarize_episode_outcome(info, args.multi_agent)
+            # Cumulative latch dominates: an episode counts a per-agent success if that agent's hold
+            # completed at ANY step, not only if it still happened to be on target at the final step.
+            cumulative_success_count = sum(1 for reached in episode_agent_success if reached)
+            success_count = max(cumulative_success_count, final_success_count)
             reward_score = float(np.mean(total_reward)) if args.multi_agent else float(total_reward)
             evaluation_rewards.append(reward_score)
             evaluation_steps.append(steps_taken)

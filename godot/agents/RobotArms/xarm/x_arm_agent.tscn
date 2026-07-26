@@ -20,6 +20,8 @@ height = 0.008
 script = ExtResource("1_xarm_body")
 robot_path = NodePath("xarm")
 controlled_joint_names = PackedStringArray("xarm_6_joint", "xarm_5_joint", "xarm_4_joint", "xarm_3_joint", "xarm_2_joint")
+manual_extra_joint_names = PackedStringArray("grip_left")
+manual_gripper_joint_name = &"grip_left"
 tcp_link_name = "hand_link"
 tcp_local_offset = Vector3(0, 0.1, 0)
 workspace_scale = 0.5
@@ -135,4 +137,4 @@ control_mode = 1
 mesh = SubResource("SphereMesh_s8qwa")
 
 [node name="ToolPose" type="Marker3D" parent="EndEffector"]
-transform = Transform3D(0, 0, 1, 0, 1, 0, -1, 0, 0, 0, 0, 0)
+transform = Transform3D(0.48796886, 0.87242466, 0.027599704, 0.8710325, -0.48874876, 0.049265847, 0.05647006, 3.813489e-08, -0.9984043, -0.003402294, 0.0039249985, -0.0043227915)

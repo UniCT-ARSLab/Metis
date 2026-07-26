@@ -55,8 +55,8 @@ relocate_target_during_training = false
 continuous_target_sampling = false
 target_yaw_randomization_degrees = 0.0
 late_joint_jitter_degrees = 0.0
-hold_curriculum_stage1_until = 999999
-hold_curriculum_stage2_until = 999999
+hold_curriculum_stage1_until = 2400
+hold_curriculum_stage2_until = 3200
 
 [node name="BridgeServer" type="Node" parent="." unique_id=831052347]
 script = ExtResource("1_jfawp")

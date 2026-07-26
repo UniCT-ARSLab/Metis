@@ -130,17 +130,11 @@ the source and its followers to `controlled_joint_names`.
 
 ### The bundled XArm wrist
 
-The physical XArm model is a 5-DOF arm plus gripper. Its last arm rotation is
-`xarm_2_joint`. The following `wrist_roll` joint only mounts `hand_link`, so it is
-declared `fixed` in the bundled URDF. Making both joints revolute creates two
-co-located rotations around the same local axis: the policy can command them in
-opposite directions without producing useful TCP motion.
+The physical wrist rotation is `xarm_2_joint`. The following `wrist_roll` entry is a
+fixed gripper mount with a calibrated `+90 deg` yaw offset; it is not an independent
+motor or policy action.
 
-The fixed mount includes a `+90 deg` yaw offset around the wrist axis. This describes
-the physical orientation of the gripper bracket; it is not a sixth action and does not
-shift the position, zero, or limits of `xarm_2_joint`.
-
-The default XArm reaching scene therefore controls these five joints, in order:
+The default XArm reaching scene controls these five joints, in order:
 
 ```text
 xarm_6_joint
@@ -572,8 +566,11 @@ in the running scenario to take control:
 | Key | Action |
 | --- | --- |
 | `F2` | Enable or disable manual control |
-| `1` to `5` | Select a controlled XArm joint by its action-space index |
+| `1` to `5` | Select one of the five policy-controlled XArm joints |
+| `6` | Select the manual-only `grip_left` actuator |
 | `Q` / `E` | Move the selected joint in the negative or positive direction |
+| `G` | Select the gripper without relying on its numeric index |
+| `C` / `O` | Close or open the gripper directly, regardless of the selected joint |
 | `Shift` + `Q` / `E` | Move at the fine-adjustment speed |
 | `Space` | Stop every joint immediately |
 | `R` | Clear a collision stop and continue from the current pose |
@@ -587,6 +584,12 @@ orientation error, and maximum joint speed. `manual_command_scale` and
 `manual_fine_scale` are exported by `URDFRobotArmAgentBody`, so reduce them in the
 Inspector when validating a real robot's final alignment.
 
+Use `C` and `O` for gripper calibration. These keys always command `grip_left` and
+cannot accidentally rotate `wrist_roll`; alternatively press `G` and then use `Q/E`.
+`grip_left` drives the remaining gripper joints through their URDF mimic relationships.
+It is deliberately manual-only in the reaching scene, so this calibration does not add
+a grasp action to the five-action policy or the 21-value observation vector.
+
 A detected collision still stops the arm. Press `R`, then immediately hold the
 appropriate `Q` or `E` direction to move away from the contact. Metis temporarily
 suppresses collision termination for `manual_recovery_grace_physics_frames` while
@@ -597,6 +600,7 @@ Use `P` when the hand looks correct. The log is enclosed by
 `[METIS_ARM_REFERENCE_BEGIN]` and `[METIS_ARM_REFERENCE_END]` and contains:
 
 - joint positions in radians and degrees, velocities, commands, and URDF limits;
+- manual-only actuator positions and all mimic follower positions;
 - world-space TCP and target positions, quaternions, and local `+X`, `+Y`, `+Z` axes;
 - position error in world and robot-base coordinates;
 - shortest axis-angle orientation error;
@@ -651,12 +655,17 @@ python/.venv/bin/python python/recorder.py \
   --no-headless
 ```
 
-For keyboard recording, select an XArm joint with `1` to `5` and command it with `Q`
-or `E`.
+For keyboard recording, select a policy-controlled XArm joint with `1` to `5` and
+command it with `Q` or `E`.
 The adapter's `apply_manual_action()` returns the normalized vector actually applied,
 so the recorder stores numeric actions rather than the special `"manual"` request.
 Per-joint actions named `joint_0_negative`, `joint_0_positive`, and so on remain
 supported when several joints must be mapped to a custom controller.
+
+Do not move manual-only joint `6` while recording demonstrations for the five-action
+reaching policy: its motion is intentionally absent from that dataset's action vector.
+For a grasping policy, add `grip_left` explicitly to the action and observation
+contract before recording.
 
 Once the dataset covers varied targets and joint configurations, train TD3+BC:
 

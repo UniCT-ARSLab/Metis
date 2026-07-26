@@ -78,6 +78,12 @@ signal target_pose_relocated
 ## Multiplier applied while Shift is held for precise final alignment.
 @export_range(0.01, 1.0, 0.01) var manual_fine_scale := 0.20
 @export_range(0, 8, 1) var manual_selected_joint := 0
+## Additional independent actuators available for calibration but excluded from the
+## policy action and observation contract. Mimic followers must not be listed here.
+@export var manual_extra_joint_names := PackedStringArray()
+## Independent gripper actuator controlled directly with the manual close/open actions.
+## Leave empty when the robot does not have a gripper.
+@export var manual_gripper_joint_name: StringName = &""
 @export var manual_debug_overlay := true
 @export_dir var manual_capture_directory := "user://manual_arm_captures"
 ## Physics frames during which collision termination is suppressed after a manual recovery.
@@ -93,8 +99,10 @@ var _robot: GodotRobot
 var end_effector: Node3D
 var tool_pose: Node3D
 var _joint_names := PackedStringArray()
+var _manual_joint_names := PackedStringArray()
 var _commands: Array[float] = []
 var _previous_action: Array[float] = []
+var _manual_extra_commands: Dictionary[String, float] = {}
 var _pending_reset_offsets: Array[float] = []
 var _robot_collision_shapes: Array[CollisionShape3D] = []
 var _robot_collision_exclusions: Array[RID] = []
@@ -133,6 +141,7 @@ func _ready() -> void:
 		push_error("URDFRobotArmAgentBody: no actuated joints configured.")
 		set_physics_process(false)
 		return
+	_manual_joint_names = _resolve_manual_joint_names()
 
 	_resize_state()
 	_configure_action_size()
@@ -142,7 +151,7 @@ func _ready() -> void:
 	_update_end_effector()
 	_capture_target_pose_transform()
 	manual_selected_joint = clampi(
-		manual_selected_joint, 0, maxi(get_joint_count() - 1, 0))
+		manual_selected_joint, 0, maxi(get_manual_joint_count() - 1, 0))
 	if manual_control:
 		_enable_manual_control()
 
@@ -202,11 +211,24 @@ func apply_manual_action() -> Array:
 			legacy_axis += Input.get_action_strength(positive)
 		values[index] = legacy_axis
 
-	if get_joint_count() > 0:
-		var selected_axis := Input.get_axis(
+	var selected_axis := 0.0
+	var selected_name := ""
+	var selected_policy_index := -1
+	if get_manual_joint_count() > 0:
+		selected_name = _manual_joint_names[manual_selected_joint]
+		selected_policy_index = _joint_names.find(selected_name)
+		selected_axis = Input.get_axis(
 			"robot_joint_negative", "robot_joint_positive")
-		if not is_zero_approx(selected_axis):
-			values[manual_selected_joint] = selected_axis
+		if not is_zero_approx(selected_axis) and selected_policy_index >= 0:
+			values[selected_policy_index] = selected_axis
+	var gripper_axis := 0.0
+	if not manual_gripper_joint_name.is_empty():
+		gripper_axis = Input.get_axis(
+			"robot_gripper_close", "robot_gripper_open")
+		var gripper_policy_index := _joint_names.find(
+			String(manual_gripper_joint_name))
+		if not is_zero_approx(gripper_axis) and gripper_policy_index >= 0:
+			values[gripper_policy_index] = gripper_axis
 
 	var scale := manual_command_scale
 	if Input.is_key_pressed(KEY_SHIFT):
@@ -214,6 +236,22 @@ func apply_manual_action() -> Array:
 	for index in range(values.size()):
 		values[index] = clampf(float(values[index]) * scale, -1.0, 1.0)
 	var applied: Array = apply_action(values)
+	for joint_name in _manual_joint_names:
+		if _joint_names.has(joint_name):
+			continue
+		var command := 0.0
+		if (
+			joint_name == String(manual_gripper_joint_name)
+			and not is_zero_approx(gripper_axis)
+		):
+			command = clampf(gripper_axis * scale, -1.0, 1.0)
+			command = _limit_aware_named_command(joint_name, command)
+		elif joint_name == selected_name:
+			command = clampf(selected_axis * scale, -1.0, 1.0)
+			command = _limit_aware_named_command(joint_name, command)
+		_manual_extra_commands[joint_name] = command
+		_robot.set_joint_target_velocity(
+			joint_name, command * _joint_max_speed_for_name(joint_name))
 	manual_control = true
 	return applied
 
@@ -236,12 +274,14 @@ func _unhandled_key_input(event: InputEvent) -> void:
 
 	if keycode >= KEY_1 and keycode <= KEY_9:
 		var joint_index := int(keycode) - int(KEY_1)
-		if joint_index < get_joint_count():
+		if joint_index < get_manual_joint_count():
 			_select_manual_joint(joint_index)
 			get_viewport().set_input_as_handled()
 		return
 
 	match keycode:
+		KEY_G:
+			_select_manual_gripper()
 		KEY_SPACE:
 			_stop_manual_motion()
 		KEY_HOME:
@@ -291,12 +331,20 @@ func _disable_manual_control() -> void:
 
 
 func _select_manual_joint(index: int) -> void:
-	if get_joint_count() <= 0:
+	if get_manual_joint_count() <= 0:
 		return
-	manual_selected_joint = clampi(index, 0, get_joint_count() - 1)
+	manual_selected_joint = clampi(index, 0, get_manual_joint_count() - 1)
 	_stop_manual_motion()
 	_update_manual_overlay()
 	_print_selected_manual_joint()
+
+
+func _select_manual_gripper() -> void:
+	if manual_gripper_joint_name.is_empty():
+		return
+	var index := _manual_joint_names.find(String(manual_gripper_joint_name))
+	if index >= 0:
+		_select_manual_joint(index)
 
 
 func _stop_manual_motion() -> void:
@@ -305,6 +353,10 @@ func _stop_manual_motion() -> void:
 	for index in range(_commands.size()):
 		_commands[index] = 0.0
 		_previous_action[index] = 0.0
+	for joint_name in _manual_extra_commands:
+		_manual_extra_commands[joint_name] = 0.0
+		if _robot:
+			_robot.set_joint_target_velocity(joint_name, 0.0)
 
 
 func _reset_manual_home() -> void:
@@ -337,16 +389,17 @@ func resume_manual_from_current_pose() -> void:
 func _print_manual_help() -> void:
 	print(
 		"[METIS ARM MANUAL] F2 toggle | 1-%d select joint | " %
-		mini(get_joint_count(), 9)
-		+ "Q/E move -/+ | Shift fine | Space stop | R recover current pose | "
+		mini(get_manual_joint_count(), 9)
+		+ "Q/E move -/+ | G select gripper | C/O close/open gripper | "
+		+ "Shift fine | Space stop | R recover current pose | "
 		+ "Home reset | "
 		+ "P pose log | F9 screenshot + JSON")
 
 
 func _print_selected_manual_joint() -> void:
-	if not _robot or get_joint_count() <= 0:
+	if not _robot or get_manual_joint_count() <= 0:
 		return
-	var joint_name := _joint_names[manual_selected_joint]
+	var joint_name := _manual_joint_names[manual_selected_joint]
 	var joint := _robot.urdf.get_joint(joint_name) if _robot.urdf else null
 	var limit_text := "unbounded"
 	if joint and joint.type == "revolute" and joint.limit:
@@ -357,7 +410,7 @@ func _print_selected_manual_joint() -> void:
 		"[METIS ARM MANUAL] Selected joint %d/%d: %s position=%.3f rad (%.2f deg) "
 		% [
 			manual_selected_joint + 1,
-			get_joint_count(),
+			get_manual_joint_count(),
 			joint_name,
 			_robot.get_joint_position(joint_name),
 			rad_to_deg(_robot.get_joint_position(joint_name))]
@@ -396,20 +449,20 @@ func _update_manual_overlay() -> void:
 		_hide_manual_overlay()
 		return
 	_ensure_manual_overlay()
-	if not _manual_overlay_label or not _robot or get_joint_count() <= 0:
+	if not _manual_overlay_label or not _robot or get_manual_joint_count() <= 0:
 		return
 
-	var joint_name := _joint_names[manual_selected_joint]
+	var joint_name := _manual_joint_names[manual_selected_joint]
 	var positions: Array[String] = []
-	for name in _joint_names:
+	for name in _manual_joint_names:
 		positions.append("%.1f" % rad_to_deg(_robot.get_joint_position(name)))
 	_manual_overlay_label.text = (
 		"MANUAL  J%d/%d  %s  command=%+.2f  state=%s\n"
 		% [
 			manual_selected_joint + 1,
-			get_joint_count(),
+			get_manual_joint_count(),
 			joint_name,
-			_commands[manual_selected_joint],
+			_manual_command_for_joint(joint_name),
 			(
 				"RECOVERY"
 				if _manual_collision_grace_frames > 0
@@ -468,18 +521,22 @@ func get_manual_pose_diagnostics() -> Dictionary:
 	var desired_pose := _target_pose_node()
 	var current_pose := _tool_pose_node()
 	var joints: Array[Dictionary] = []
+	var mimic_joints: Array[Dictionary] = []
 	if _robot:
-		for index in range(get_joint_count()):
-			var joint_name := _joint_names[index]
+		for index in range(get_manual_joint_count()):
+			var joint_name := _manual_joint_names[index]
 			var joint := _robot.urdf.get_joint(joint_name) if _robot.urdf else null
+			var policy_index := _joint_names.find(joint_name)
 			var joint_data := {
 				"index": index,
+				"policy_index": policy_index,
+				"policy_controlled": policy_index >= 0,
 				"name": joint_name,
 				"position_rad": _robot.get_joint_position(joint_name),
 				"position_deg": rad_to_deg(_robot.get_joint_position(joint_name)),
 				"velocity_rad_s": _robot.get_joint_velocity(joint_name),
-				"command_normalized": _commands[index],
-				"max_velocity_rad_s": _joint_max_speed(index),
+				"command_normalized": _manual_command_for_joint(joint_name),
+				"max_velocity_rad_s": _joint_max_speed_for_name(joint_name),
 			}
 			if joint and joint.type == "revolute" and joint.limit:
 				joint_data["lower_rad"] = minf(joint.limit.lower, joint.limit.upper)
@@ -489,6 +546,17 @@ func get_manual_pose_diagnostics() -> Dictionary:
 				joint_data["upper_deg"] = rad_to_deg(
 					maxf(joint.limit.lower, joint.limit.upper))
 			joints.append(joint_data)
+		for mimic in _robot.urdf.get_mimic_joints():
+			mimic_joints.append({
+				"name": mimic.name,
+				"source": mimic.mimic_joint,
+				"multiplier": mimic.mimic_multiplier,
+				"offset": mimic.mimic_offset,
+				"position_rad": _robot.get_joint_position(mimic.name),
+				"position_deg": rad_to_deg(
+					_robot.get_joint_position(mimic.name)),
+				"velocity_rad_s": _robot.get_joint_velocity(mimic.name),
+			})
 
 	var position_error_world := Vector3.ZERO
 	var position_error_base := Vector3.ZERO
@@ -503,10 +571,13 @@ func get_manual_pose_diagnostics() -> Dictionary:
 		"agent": str(name),
 		"manual_selected_joint": manual_selected_joint,
 		"manual_selected_joint_name": (
-			_joint_names[manual_selected_joint]
-			if get_joint_count() > 0
+			_manual_joint_names[manual_selected_joint]
+			if get_manual_joint_count() > 0
 			else ""),
+		"policy_action_size": get_joint_count(),
+		"manual_joint_names": Array(_manual_joint_names),
 		"joints": joints,
+		"mimic_joints": mimic_joints,
 		"tool_pose_global": (
 			_transform_diagnostics(current_pose.global_transform)
 			if current_pose
@@ -655,6 +726,14 @@ func get_joint_count() -> int:
 
 func get_controlled_joint_names() -> PackedStringArray:
 	return _joint_names.duplicate()
+
+
+func get_manual_control_joint_names() -> PackedStringArray:
+	return _manual_joint_names.duplicate()
+
+
+func get_manual_joint_count() -> int:
+	return _manual_joint_names.size()
 
 
 func get_joint_position_observation() -> Array:
@@ -829,6 +908,22 @@ func _resolve_controlled_joint_names() -> PackedStringArray:
 	return result
 
 
+func _resolve_manual_joint_names() -> PackedStringArray:
+	var result := _joint_names.duplicate()
+	var available := _robot.get_actuated_joint_names()
+	for joint_name in manual_extra_joint_names:
+		if result.has(joint_name):
+			continue
+		if available.has(joint_name):
+			result.append(joint_name)
+			_manual_extra_commands[joint_name] = 0.0
+		else:
+			push_warning(
+				"URDFRobotArmAgentBody: manual joint '%s' is missing, fixed, or mimic." %
+				joint_name)
+	return result
+
+
 func _resize_state() -> void:
 	_commands.resize(get_joint_count())
 	_previous_action.resize(get_joint_count())
@@ -861,7 +956,11 @@ func _build_home_positions(include_offsets := false) -> Dictionary:
 func _joint_max_speed(index: int) -> float:
 	if index < 0 or index >= get_joint_count():
 		return maxf(default_joint_speed, 0.000001)
-	var joint := _robot.urdf.get_joint(_joint_names[index])
+	return _joint_max_speed_for_name(_joint_names[index])
+
+
+func _joint_max_speed_for_name(joint_name: String) -> float:
+	var joint := _robot.urdf.get_joint(joint_name)
 	if joint and joint.limit and joint.limit.velocity > 0.0:
 		return joint.limit.velocity
 	return maxf(default_joint_speed, 0.000001)
@@ -869,14 +968,17 @@ func _joint_max_speed(index: int) -> float:
 
 func _limit_aware_command(index: int, command: float) -> float:
 	if (
-		is_zero_approx(command)
-		or index < 0
+		index < 0
 		or index >= get_joint_count()
-		or not _robot
-		or not _robot.urdf
 	):
 		return command
-	var joint := _robot.urdf.get_joint(_joint_names[index])
+	return _limit_aware_named_command(_joint_names[index], command)
+
+
+func _limit_aware_named_command(joint_name: String, command: float) -> float:
+	if is_zero_approx(command) or not _robot or not _robot.urdf:
+		return command
+	var joint := _robot.urdf.get_joint(joint_name)
 	if not joint or joint.type != "revolute" or not joint.limit:
 		return command
 
@@ -886,7 +988,7 @@ func _limit_aware_command(index: int, command: float) -> float:
 	if span <= 0.0:
 		return 0.0
 
-	var position := clampf(_robot.get_joint_position(_joint_names[index]), lower, upper)
+	var position := clampf(_robot.get_joint_position(joint_name), lower, upper)
 	var distance_to_limit := (
 		position - lower
 		if command < 0.0
@@ -898,6 +1000,13 @@ func _limit_aware_command(index: int, command: float) -> float:
 	if slowdown_margin <= 0.000001:
 		return command
 	return command * clampf(distance_to_limit / slowdown_margin, 0.0, 1.0)
+
+
+func _manual_command_for_joint(joint_name: String) -> float:
+	var policy_index := _joint_names.find(joint_name)
+	if policy_index >= 0:
+		return _commands[policy_index]
+	return float(_manual_extra_commands.get(joint_name, 0.0))
 
 
 func _update_end_effector() -> void:

@@ -24,6 +24,8 @@ func _validate_parsed_xarm(robot: URDFRobot) -> bool:
 	var actuated := robot.get_actuated_joint_names()
 	var mimics := robot.get_mimic_joints()
 	var grip_right := robot.get_joint("grip_right")
+	var finger_left := robot.get_joint("finger_left")
+	var finger_right := robot.get_joint("finger_right")
 	var wrist_mount := robot.get_joint("wrist_roll")
 	var passed := actuated.size() == 6 and mimics.size() == 5
 	passed = passed and not actuated.has("wrist_roll")
@@ -37,6 +39,12 @@ func _validate_parsed_xarm(robot: URDFRobot) -> bool:
 	passed = passed and grip_right.mimic_joint == "grip_left"
 	passed = passed and is_equal_approx(grip_right.mimic_multiplier, -1.0)
 	passed = passed and is_equal_approx(grip_right.mimic_offset, 0.0)
+	passed = passed and finger_left != null and finger_left.limit != null
+	passed = passed and finger_left.limit.lower <= 0.0
+	passed = passed and finger_left.limit.upper >= 1.57
+	passed = passed and finger_right != null and finger_right.limit != null
+	passed = passed and finger_right.limit.lower <= -1.57
+	passed = passed and finger_right.limit.upper >= 0.0
 	passed = passed and robot.validate_mimic_joints().is_empty()
 	if not passed:
 		push_error(

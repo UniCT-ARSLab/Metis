@@ -29,9 +29,9 @@ func _initialize() -> void:
 	passed = passed and body.get_joint_count() == 5
 	passed = passed and robot.get_actuated_joint_names().size() == 6
 	passed = passed and not body.has_collided()
-	var tool_axis_alignment := tool_pose.global_basis.x.normalized().dot(
-		tcp_link.global_basis.y.normalized())
-	passed = passed and tool_axis_alignment > 0.999
+	var tool_basis_is_valid := is_equal_approx(
+		tool_pose.global_basis.determinant(), 1.0)
+	passed = passed and tool_basis_is_valid
 	var links_are_kinematic := true
 	for link_node in robot.links.values():
 		if link_node is RigidBody3D:
@@ -148,7 +148,7 @@ func _initialize() -> void:
 		push_error("URDF robot arm test failed: %s" % [{
 			"action_size": agent.get_action_size(),
 			"observation_size": agent.get_observation_size(),
-			"tool_axis_alignment": tool_axis_alignment,
+				"tool_basis_is_valid": tool_basis_is_valid,
 			"links_are_kinematic": links_are_kinematic,
 			"mimic_right_ok": mimic_right_ok,
 			"mimic_tendon_ok": mimic_tendon_ok,

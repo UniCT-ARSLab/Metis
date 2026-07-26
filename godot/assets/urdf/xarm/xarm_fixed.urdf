@@ -1,5 +1,4 @@
 
-
   <?xml version="1.0" ?>
 <robot name="xarm">
     <!-- Joint limits are consumed by both physics-motor and kinematic control. -->
@@ -295,18 +294,12 @@
         <child link="xarm_2_link" />
     </joint>
 
-    <!--
-      xarm_2_joint is the physical wrist rotation on this 5-DOF XArm.
-      hand_link is rigidly mounted to xarm_2_link; making this connector
-      revolute would add a second, co-located rotation around the same axis.
-      The gripper bracket has a fixed +90 degree mounting offset around that
-      axis, matching the positive direction of xarm_2_joint.
-      Keep the joint name stable so existing imported-node references survive.
-    -->
+    <!-- The physical wrist rotation is xarm_2_joint. The hand bracket is
+         rigidly mounted at the calibrated +90 degree offset. -->
     <joint name="wrist_roll" type="fixed">
         <parent link="xarm_2_link"/>
         <child link="hand_link"/>
-        <origin xyz="0 0 0" rpy="0 0 1.57079632679"/>
+        <origin xyz="0 0 0.0" rpy="0 0 1.57079632679"/>
     </joint>
 
   <joint name="grip_left" type="revolute">
@@ -345,12 +338,14 @@
   </joint>
 
 
-   <joint name="finger_left" type="revolute">
+  <joint name="finger_left" type="revolute">
     <parent link="grip_left_link"/>
     <child link="finger_left_link"/>
     <origin xyz="0.0045 -0.0005 0.029" rpy="1.57 0 0"/>
     <axis xyz="-1 0 0"/>
-    <limit lower="-1.57" upper="0" effort="1000" velocity="0.5"/>
+    <!-- grip_left closes in the negative direction; this opposite mimic
+         counter-rotates the distal finger to preserve the four-bar linkage. -->
+    <limit lower="0" upper="1.57" effort="1000" velocity="0.5"/>
     <mimic joint="grip_left" multiplier="-1"/>
   </joint>
   
@@ -359,7 +354,7 @@
     <child link="finger_right_link"/>
     <origin xyz="0.0064 0.0001 0.0295" rpy="1.57 0 0"/>
     <axis xyz="-1 0 0"/>
-    <limit lower="0" upper="1.57" effort="1000" velocity="0.5"/>
+    <limit lower="-1.57" upper="0" effort="1000" velocity="0.5"/>
     <mimic joint="grip_left"/>
   </joint>
   
