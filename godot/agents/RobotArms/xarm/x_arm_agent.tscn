@@ -24,6 +24,8 @@ tcp_link_name = "hand_link"
 tcp_local_offset = Vector3(0, 0.1, 0)
 workspace_scale = 0.5
 success_distance = 0.02
+success_angle_degrees = 12.0
+terminate_on_success = false
 
 [node name="Agent" type="Node" parent="." unique_id=56391476]
 script = ExtResource("2_ffe62")
@@ -56,6 +58,11 @@ method_name = &"get_joint_velocity_observation"
 script = ExtResource("7_method")
 observation_name = "target_error_base"
 method_name = &"get_target_error_observation"
+
+[node name="TargetOrientationError" type="Node" parent="Agent/ObservationSystem"]
+script = ExtResource("7_method")
+observation_name = "target_orientation_error"
+method_name = &"get_target_orientation_error_observation"
 
 [node name="PreviousAction" type="Node" parent="Agent/ObservationSystem" unique_id=1324850492]
 script = ExtResource("7_method")
@@ -94,10 +101,17 @@ weight = 0.05
 method_name = &"get_near_target_speed_penalty"
 node_caller = NodePath("../../..")
 
+[node name="PoseTracking" type="Node" parent="Agent/RewardSystem" node_paths=PackedStringArray("node_caller")]
+script = ExtResource("8_function_reward")
+term_name = "pose_tracking"
+weight = 0.3
+method_name = &"get_pose_tracking_reward"
+node_caller = NodePath("../../..")
+
 [node name="HoldProgress" type="Node" parent="Agent/RewardSystem" unique_id=700000003 node_paths=PackedStringArray("node_caller")]
 script = ExtResource("8_function_reward")
 term_name = "hold_progress"
-weight = 0.15
+weight = 0.25
 method_name = &"get_hold_progress_reward"
 node_caller = NodePath("../../..")
 
@@ -119,3 +133,6 @@ control_mode = 1
 
 [node name="MeshInstance3D" type="MeshInstance3D" parent="EndEffector" unique_id=1017964205]
 mesh = SubResource("SphereMesh_s8qwa")
+
+[node name="ToolPose" type="Marker3D" parent="EndEffector"]
+transform = Transform3D(0, 0, 1, 0, 1, 0, -1, 0, 0, 0, 0, 0)

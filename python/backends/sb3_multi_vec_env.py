@@ -149,6 +149,7 @@ class MetisSB3MultiAgentVecEnv(VecEnv):
             "training_episode": episode,
             "max_steps": self.max_steps,
             "physics_frames_per_step": self.physics_frames_per_step,
+            "training_mode": True,
         }
         progress_max = self._curriculum_progress_max(episode)
         if progress_max is not None:

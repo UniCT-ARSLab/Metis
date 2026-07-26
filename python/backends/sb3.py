@@ -471,6 +471,7 @@ def evaluate_model(model, env, action_codec, args, training_episode):
             training_episode=training_episode,
             max_steps=max_steps,
             physics_frames_per_step=args.physics_frames_per_step,
+            training_mode=False,
         )
         obs, _ = env.reset(seed=args.evaluation_seed + episode)
         total_reward = 0.0

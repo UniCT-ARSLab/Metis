@@ -443,6 +443,7 @@ def run_async_dqn(
             training_episode=episode,
             max_steps=args.max_steps_per_episode,
             physics_frames_per_step=args.physics_frames_per_step,
+            training_mode=True,
         )
         obs, info = env.reset(seed=args.episode_seed_multiplier * episode + worker_id)
         # Each worker draws its own opponent into a model private to it, so concurrent
@@ -1177,6 +1178,7 @@ def main():
                     training_episode=episode,
                     max_steps=args.max_steps_per_episode,
                     physics_frames_per_step=args.physics_frames_per_step,
+                    training_mode=True,
                 )
                 obs, info = env.reset(seed=args.episode_seed_multiplier * episode + env_idx)
                 if args.multi_agent:

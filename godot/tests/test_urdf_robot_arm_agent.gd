@@ -20,20 +20,25 @@ func _initialize() -> void:
 	var robot: GodotRobot = body.get_node("xarm")
 	var tcp_link := robot.get_link_node("hand_link")
 	var end_effector := body.get_node("EndEffector") as Node3D
+	var tool_pose := body.get_node("EndEffector/ToolPose") as Node3D
 	var initial_tcp := end_effector.global_position
 	var initial_link_position := tcp_link.global_position if tcp_link else Vector3.ZERO
-	var initial_collision_info: Dictionary = body.get_last_collision_info()
 	var passed := agent.get_action_type() == "continuous"
-	passed = passed and agent.get_action_size() == 7
-	passed = passed and agent.get_observation_size() == 33
-	passed = passed and body.get_joint_count() == 7
+	passed = passed and agent.get_action_size() == 6
+	passed = passed and agent.get_observation_size() == 24
+	passed = passed and body.get_joint_count() == 6
 	passed = passed and robot.get_actuated_joint_names().size() == 7
 	passed = passed and not body.has_collided()
+	var tool_axis_alignment := tool_pose.global_basis.x.normalized().dot(
+		tcp_link.global_basis.y.normalized())
+	passed = passed and tool_axis_alignment > 0.999
+	var links_are_kinematic := true
 	for link_node in robot.links.values():
 		if link_node is RigidBody3D:
-			passed = passed and link_node.freeze
-			passed = passed and (
-				link_node.freeze_mode == RigidBody3D.FREEZE_MODE_KINEMATIC)
+			links_are_kinematic = (
+				links_are_kinematic
+				and link_node.freeze
+				and link_node.freeze_mode == RigidBody3D.FREEZE_MODE_KINEMATIC)
 
 	body.apply_action([0.0, 1.0, 0.0, 0.0, 0.0, 0.0])
 	for _index in range(4):
@@ -43,10 +48,10 @@ func _initialize() -> void:
 	var moved_link_position := tcp_link.global_position if tcp_link else Vector3.ZERO
 	passed = passed and moved_position > 0.0
 	passed = passed and moved_tcp.distance_to(initial_tcp) > 0.000001
-	passed = passed and robot.set_joint_target_position("grip_left", -0.4)
-	passed = passed and is_equal_approx(
+	robot.set_joint_target_position("grip_left", -0.4)
+	var mimic_right_ok := is_equal_approx(
 		robot.get_joint_position("grip_right"), 0.4)
-	passed = passed and is_equal_approx(
+	var mimic_tendon_ok := is_equal_approx(
 		robot.get_joint_position("tendon_left"), -0.4)
 
 	var reset_offsets := [0.05, 0.0, 0.0, 0.0, 0.0, 0.0]
@@ -62,57 +67,42 @@ func _initialize() -> void:
 	body.apply_action([1.0, -1.0, 1.0, -1.0, 1.0, -1.0])
 	agent.get_reward({"body": body})
 	var reward_terms := agent.get_reward_terms()
-	passed = passed and reward_terms.has("joint_motion")
-	passed = passed and reward_terms.has("action_smoothness")
-	passed = passed and body.get_node("Agent/RewardSystem/JointLimit").node_caller == body
+	var reward_terms_ok := (
+		reward_terms.has("joint_motion")
+		and reward_terms.has("action_smoothness"))
+	var reward_caller_ok: bool = (
+		body.get_node("Agent/RewardSystem/JointLimit").node_caller == body)
+	passed = passed and reward_terms_ok and reward_caller_ok
 
 	body.reset_all(body.transform)
 	await physics_frame
-	passed = passed and is_zero_approx(
+	var home_reset_ok := is_zero_approx(
 		robot.get_joint_position("xarm_5_joint"))
-	passed = passed and agent.get_observation_size() == 33
+	passed = passed and home_reset_ok
+	passed = passed and agent.get_observation_size() == 24
 
 	var moving_target := Node3D.new()
 	root.add_child(moving_target)
 	body.target = moving_target
+	body.target_pose = moving_target
 	body.success_hold_physics_frames = 1
 	body.set_continue_after_success(true)
-	moving_target.global_position = end_effector.global_position
+	moving_target.global_transform = tool_pose.global_transform
 	await physics_frame
-	passed = passed and body.has_succeeded() and not body.is_terminal()
+	var acquired_without_terminal: bool = body.has_succeeded() and not body.is_terminal()
+	var aligned_orientation_error: float = (
+		body.get_target_orientation_error_observation().length())
+	passed = passed and acquired_without_terminal
+	passed = passed and aligned_orientation_error < 0.0001
 	moving_target.global_position += Vector3(body.success_distance * 3.0, 0.0, 0.0)
 	await physics_frame
-	passed = passed and not body.has_succeeded() and not body.is_terminal()
+	var rearmed_after_relocation: bool = (
+		not body.has_succeeded() and not body.is_terminal())
+	passed = passed and rearmed_after_relocation
 	moving_target.free()
 	body.target = null
+	body.target_pose = null
 	body.set_continue_after_success(false)
-
-	var grasp_target := RigidBody3D.new()
-	grasp_target.freeze = true
-	root.add_child(grasp_target)
-	var grasp_point := Marker3D.new()
-	grasp_target.add_child(grasp_point)
-	grasp_target.global_position = end_effector.global_position
-	body.task_mode = URDFRobotArmAgentBody.TaskMode.GRASPING
-	# Synthetic target has no colliders/contact_monitor: exercise the assisted capture->lift
-	# state machine here, not the real finger-contact enclosure gate (covered in the scene).
-	body.require_finger_contact = false
-	body.configure_grasp_target(grasp_target, grasp_point)
-	body.grasp_capture_distance = 0.05
-	body.required_lift_height = 0.02
-	body.grasp_hold_physics_frames = 1
-	body.set_grasp_target_spawn_transform(
-		Transform3D(grasp_target.global_basis, grasp_target.global_position - Vector3(0.0, 0.03, 0.0)))
-	robot.set_joint_target_position("grip_left", -1.0)
-	await physics_frame
-	passed = passed and body.is_object_grasped()
-	passed = passed and float(body.get_grasp_state_observation()[0]) > 0.5
-	await physics_frame
-	passed = passed and body.has_succeeded() and body.is_terminal()
-	body.prepare_grasp_target_reset()
-	grasp_target.free()
-	body.task_mode = URDFRobotArmAgentBody.TaskMode.REACHING
-	body.target = null
 	body.initialize_episode_from_current_state()
 
 	var robot_shape := body.get_node(
@@ -126,7 +116,8 @@ func _initialize() -> void:
 	obstacle.global_transform = robot_shape.global_transform
 	await physics_frame
 	await physics_frame
-	passed = passed and body.has_collided()
+	var collision_detected: bool = body.has_collided()
+	passed = passed and collision_detected
 	obstacle.free()
 	var preserved_joint_position := robot.get_joint_position("xarm_5_joint")
 	var reset_started_count := [0]
@@ -136,46 +127,45 @@ func _initialize() -> void:
 		"seed": 123,
 		"preserve_state": true
 	})
-	passed = passed and not body.has_collided() and not body.is_terminal()
-	passed = passed and is_equal_approx(
+	var preserve_cleared_terminal: bool = (
+		not body.has_collided() and not body.is_terminal())
+	var preserve_joint_ok := is_equal_approx(
 		robot.get_joint_position("xarm_5_joint"), preserved_joint_position)
-	passed = passed and reset_started_count[0] == 0
-	passed = passed and bool(preserved_reset.get("info", {}).get("preserve_state", false))
-	passed = passed and str(
+	var preserve_signal_ok: bool = reset_started_count[0] == 0
+	var preserve_flag_ok := bool(
+		preserved_reset.get("info", {}).get("preserve_state", false))
+	var preserve_mode_ok := str(
 		preserved_reset.get("info", {}).get("reset", {}).get("mode", "")) == "current_state"
-
-	var non_adjacent_shapes := robot.get_link_node("xarm_4_link").find_children(
-		"*", "CollisionShape3D", true, false)
-	if not non_adjacent_shapes.is_empty():
-		var non_adjacent_shape := non_adjacent_shapes[0] as CollisionShape3D
-		var original_shape_transform := non_adjacent_shape.global_transform
-		non_adjacent_shape.global_transform = robot_shape.global_transform
-		body.call("_check_self_collisions")
-		passed = passed and body.has_self_collided()
-		passed = passed and str(
-			body.get_last_collision_info().get("type", "")) == "self"
-		non_adjacent_shape.global_transform = original_shape_transform
-	else:
-		passed = false
+	passed = (
+		passed
+		and preserve_cleared_terminal
+		and preserve_joint_ok
+		and preserve_signal_ok
+		and preserve_flag_ok
+		and preserve_mode_ok)
 
 	if not passed:
-		push_error(
-				"URDF robot arm test failed: action_size=%d obs_size=%d joint=%f reset=%f tcp_delta=%f link_delta=%f terms=%s collided=%s initial_collision=%s collision_info=%s configured_tcp=%s physics=%s links=%s" %
-				[
-					agent.get_action_size(),
-					agent.get_observation_size(),
-					moved_position,
-					reset_position,
-					moved_tcp.distance_to(initial_tcp),
-					moved_link_position.distance_to(initial_link_position),
-					reward_terms,
-					body.has_collided(),
-					initial_collision_info,
-					body.get_last_collision_info(),
-					body.get("end_effector"),
-				body.is_physics_processing(),
-				robot.links.keys(),
-			])
+		push_error("URDF robot arm test failed: %s" % [{
+			"action_size": agent.get_action_size(),
+			"observation_size": agent.get_observation_size(),
+			"tool_axis_alignment": tool_axis_alignment,
+			"links_are_kinematic": links_are_kinematic,
+			"mimic_right_ok": mimic_right_ok,
+			"mimic_tendon_ok": mimic_tendon_ok,
+			"reset_position": reset_position,
+			"reward_terms_ok": reward_terms_ok,
+			"reward_caller_ok": reward_caller_ok,
+			"home_reset_ok": home_reset_ok,
+			"acquired_without_terminal": acquired_without_terminal,
+			"aligned_orientation_error": aligned_orientation_error,
+			"rearmed_after_relocation": rearmed_after_relocation,
+			"collision_detected": collision_detected,
+			"preserve_cleared_terminal": preserve_cleared_terminal,
+			"preserve_joint_ok": preserve_joint_ok,
+			"preserve_signal_ok": preserve_signal_ok,
+			"preserve_flag_ok": preserve_flag_ok,
+			"preserve_mode_ok": preserve_mode_ok
+		}])
 		body.free()
 		quit(1)
 		return

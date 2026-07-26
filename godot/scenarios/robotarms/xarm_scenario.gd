@@ -13,39 +13,85 @@ extends Node3D
 ## a wall or to the physical edge of the robot workspace.
 @export var target_sampling_inset := Vector3.ZERO
 @export var late_joint_jitter_degrees := 10.0
+@export_category("Continuous Pose Tracking")
+@export var continuous_pose_tracking := true
+## Random yaw teaches the policy that the target is a pose, not only a point. The target's local
+## +X axis remains the canonical approach direction.
+@export var target_yaw_randomization_start_episode := 800
+@export_range(0.0, 180.0, 1.0) var target_yaw_randomization_degrees := 30.0
+## Once static reach-and-hold is established, move the target after a random dwell without
+## resetting the robot. This creates reach -> hold -> reacquire transitions in the replay.
+@export var relocate_target_during_training := true
+@export var target_relocation_start_episode := 1500
+@export_range(1, 1000, 1) var target_relocation_delay_steps_min := 45
+@export_range(1, 1000, 1) var target_relocation_delay_steps_max := 120
+@export var minimum_target_relocation_distance := 0.04
 ## Reach-and-HOLD curriculum breakpoints (absolute training episode). The hold requirement tightens
-## in stages: a longer hold at a lower stillness threshold. Defaults assume resuming a reach policy
-## around episode 5400. Stages: <stage1 -> 10 frames / 0.30, <stage2 -> 20 / 0.20, else 30 / 0.15.
-@export var hold_curriculum_stage1_until := 5900
-@export var hold_curriculum_stage2_until := 6600
+## in stages: a longer hold at a lower stillness threshold.
+@export var hold_curriculum_stage1_until := 1000
+@export var hold_curriculum_stage2_until := 2200
 
 @onready var controller: ScenarioController = $ScenarioController
 # Both robot backends implement the same contract without sharing a GDScript base class.
 @onready var arm = $RobotArm
 @onready var target: Node3D = $Target
+@onready var target_pose: Node3D = $Target/GraspPose
 @onready var goal_event = $ScenarioController/ScenarioEventSystem/GoalReached
 @onready var collision_event = $ScenarioController/ScenarioEventSystem/Collision
 
 var _training_episode := 0
+var _training_mode := false
 var _goal_terminal_reason := "target_reached"
+var _episode_rng := RandomNumberGenerator.new()
+var _target_pool_size := 1
+var _target_relocation_step := -1
+var _last_relocation_check_step := -1
 
 
 func _ready() -> void:
-	_goal_terminal_reason = str(goal_event.terminal_reason)
+	var configured_terminal_reason := str(goal_event.terminal_reason)
+	if not configured_terminal_reason.is_empty():
+		_goal_terminal_reason = configured_terminal_reason
 	arm.target = target
+	arm.target_pose = target_pose
 	arm.target_reached.connect(_on_target_reached)
+	arm.target_pose_relocated.connect(_on_target_pose_relocated)
 	arm.obstacle_collision.connect(_on_obstacle_collision)
 	controller.scenario_configured.connect(_on_scenario_configured)
 	controller.episode_reset_started.connect(_on_episode_reset_started)
+	_apply_continuous_pose_tracking(continuous_pose_tracking)
+
+
+func _physics_process(_delta: float) -> void:
+	if (
+		not _training_mode
+		or not relocate_target_during_training
+		or _training_episode < target_relocation_start_episode
+		or _target_relocation_step < 0
+	):
+		return
+	var current_step := controller.step_count
+	if current_step == _last_relocation_check_step:
+		return
+	_last_relocation_check_step = current_step
+	if current_step >= _target_relocation_step:
+		_relocate_target()
 
 
 func _on_scenario_configured(config:Dictionary) -> void:
 	_training_episode = int(config.get("training_episode", _training_episode))
+	_training_mode = bool(config.get("training_mode", controller.training_mode))
 	var continue_after_success := bool(config.get(
 		"continue_after_success", controller.continue_after_success))
+	_apply_continuous_pose_tracking(
+		continue_after_success or continuous_pose_tracking)
+
+
+func _apply_continuous_pose_tracking(enabled: bool) -> void:
+	controller.continue_after_success = enabled
 	if arm.has_method("set_continue_after_success"):
-		arm.set_continue_after_success(continue_after_success)
-	goal_event.terminal_reason = "" if continue_after_success else _goal_terminal_reason
+		arm.set_continue_after_success(enabled)
+	goal_event.terminal_reason = "" if enabled else _goal_terminal_reason
 
 
 func _target_spawn_pool() -> Array[Marker3D]:
@@ -68,10 +114,11 @@ func _on_episode_reset_started(_seed:int) -> void:
 	if spawn_pool.is_empty():
 		push_error("RobotArmReachingScenario requires at least one TargetSpawn")
 		return
-	var rng := RandomNumberGenerator.new()
-	rng.seed = _seed
+	_episode_rng.seed = _seed
+	_target_relocation_step = -1
+	_last_relocation_check_step = -1
 
-	var target_pool_size := spawn_pool.size()
+	_target_pool_size = spawn_pool.size()
 	var joint_jitter_degrees := 0.0
 
 	# Curriculum on the success radius. Coarse first (easy to hit + earn the +30 goal), then
@@ -80,38 +127,78 @@ func _on_episode_reset_started(_seed:int) -> void:
 	# onto the target; the dense ProximityScenarioReward pulls it through the final approach.
 	# workspace_scale=0.5.
 	if _training_episode < 300:
-		target_pool_size = maxi(1, mini(easy_target_count, spawn_pool.size()))
+		_target_pool_size = maxi(1, mini(easy_target_count, spawn_pool.size()))
 		arm.success_distance = 0.08
+		arm.success_angle_degrees = 35.0
 	elif _training_episode < 800:
 		arm.success_distance = 0.06
+		arm.success_angle_degrees = 25.0
 	elif _training_episode < 1500:
 		joint_jitter_degrees = 2.0
 		arm.success_distance = 0.05
+		arm.success_angle_degrees = 18.0
 	else:
 		joint_jitter_degrees = late_joint_jitter_degrees
 		arm.success_distance = 0.04
+		arm.success_angle_degrees = 12.0
 
 	# Reach-and-HOLD curriculum: require a progressively LONGER hold at a TIGHTER stillness threshold.
 	# The reach (success_distance) is already at its tightest by this episode range; this teaches the
-	# arm to STOP and stay, not just touch. 10 frames / 0.30 rad/s -> 20 / 0.20 -> 30 / 0.15.
+	# arm to STOP and stay, not just touch. At 60 Hz the final 120 frames represent two seconds.
 	if _training_episode < hold_curriculum_stage1_until:
-		arm.success_hold_physics_frames = 10
+		arm.success_hold_physics_frames = 20
 		arm.success_max_joint_speed = 0.30
 	elif _training_episode < hold_curriculum_stage2_until:
-		arm.success_hold_physics_frames = 20
+		arm.success_hold_physics_frames = 60
 		arm.success_max_joint_speed = 0.20
 	else:
-		arm.success_hold_physics_frames = 30
-		arm.success_max_joint_speed = 0.15
+		arm.success_hold_physics_frames = 120
+		arm.success_max_joint_speed = 0.12
 
-	var target_index := rng.randi_range(0, maxi(target_pool_size - 1, 0))
-	target.global_transform = spawn_pool[target_index].global_transform
+	target.global_transform = _sample_target_transform(_episode_rng, spawn_pool)
+	arm.set_reset_joint_offsets(
+		_sample_joint_offsets(_episode_rng, joint_jitter_degrees))
+
+
+func _sample_target_transform(
+		rng: RandomNumberGenerator,
+		spawn_pool: Array[Marker3D]) -> Transform3D:
+	var target_index := rng.randi_range(
+		0,
+		maxi(mini(_target_pool_size, spawn_pool.size()) - 1, 0))
+	var result := spawn_pool[target_index].global_transform
 	if (
 		continuous_target_sampling
 		and _training_episode >= continuous_target_sampling_start_episode
 	):
-		target.global_position = _sample_target_position(rng, spawn_pool)
-	arm.set_reset_joint_offsets(_sample_joint_offsets(rng, joint_jitter_degrees))
+		result.origin = _sample_target_position(rng, spawn_pool)
+	if (
+		target_yaw_randomization_degrees > 0.0
+		and _training_episode >= target_yaw_randomization_start_episode
+	):
+		var yaw := deg_to_rad(rng.randf_range(
+			-target_yaw_randomization_degrees,
+			target_yaw_randomization_degrees))
+		result.basis = Basis(Vector3.UP, yaw) * result.basis
+	return result
+
+
+func _relocate_target() -> void:
+	var spawn_pool := _target_spawn_pool()
+	if spawn_pool.is_empty():
+		_target_relocation_step = -1
+		return
+	var candidate := target.global_transform
+	for _attempt in range(8):
+		candidate = _sample_target_transform(_episode_rng, spawn_pool)
+		if (
+			candidate.origin.distance_to(target.global_position)
+			>= maxf(minimum_target_relocation_distance, 0.0)
+		):
+			break
+	target.global_transform = candidate
+	_target_relocation_step = -1
+	arm.notify_target_pose_relocated()
 
 
 func _sample_target_position(
@@ -149,6 +236,24 @@ func _sample_joint_offsets(rng:RandomNumberGenerator, max_degrees:float) -> Arra
 
 func _on_target_reached() -> void:
 	goal_event.trigger(str(arm.name))
+	if (
+		_training_mode
+		and relocate_target_during_training
+		and _training_episode >= target_relocation_start_episode
+	):
+		var minimum_delay := mini(
+			target_relocation_delay_steps_min,
+			target_relocation_delay_steps_max)
+		var maximum_delay := maxi(
+			target_relocation_delay_steps_min,
+			target_relocation_delay_steps_max)
+		_target_relocation_step = (
+			controller.step_count
+			+ _episode_rng.randi_range(minimum_delay, maximum_delay))
+
+
+func _on_target_pose_relocated() -> void:
+	controller.rebase_agent_tracking(arm)
 
 
 func _on_obstacle_collision() -> void:

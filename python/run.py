@@ -556,6 +556,7 @@ def main():
         scenario_config = {
             "max_steps": env_max_steps,
             "training_episode": training_episode,
+            "training_mode": False,
         }
         if args.continue_after_success:
             scenario_config.update(

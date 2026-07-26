@@ -3,6 +3,7 @@ class_name URDFRobotArmAgentBody
 
 signal target_reached
 signal obstacle_collision
+signal target_pose_relocated
 
 @export_category("URDF Robot")
 @export var robot_path: NodePath = NodePath("urdf")
@@ -18,14 +19,21 @@ signal obstacle_collision
 @export var tcp_link_name := ""
 @export var tcp_local_offset := Vector3.ZERO
 @export var end_effector_path: NodePath = NodePath("EndEffector")
+## Optional calibrated frame below EndEffector. Its transform maps the URDF hand axes to the
+## canonical grasp axes used by the target pose.
+@export var tool_pose_path: NodePath = NodePath("EndEffector/ToolPose")
 
 @export_category("Task")
 @export var target: Node3D
+## Optional desired pose, normally a Marker3D below target. Falls back to target itself.
+@export var target_pose: Node3D
 @export var workspace_scale := 1.0
 @export var success_distance := 0.05
+@export_range(0.1, 180.0, 0.1) var success_angle_degrees := 12.0
 @export var success_hold_physics_frames := 30
 @export var terminate_on_success := true
 @export_range(1.0, 10.0, 0.1) var success_rearm_distance_multiplier := 1.5
+@export_range(1.0, 10.0, 0.1) var success_rearm_angle_multiplier := 1.5
 ## Reach-and-HOLD: success also requires the arm to be nearly still (maximum |joint speed| below
 ## the threshold), not just within distance. Without this, the arm can sweep THROUGH the target
 ## and "succeed" transiently, so it never learns to stop/hold (CAPS keeps a constant velocity
@@ -35,8 +43,16 @@ signal obstacle_collision
 ## Reach-and-HOLD shaping: the "near target" zone (metres) where the hold reward/penalty terms
 ## activate. Away from the target they are zero so the fast reach stays unpenalised.
 @export var near_target_distance := 0.10
+## Orientation range over which pose tracking shaping fades to zero.
+@export_range(1.0, 180.0, 0.1) var pose_reward_angle_degrees := 60.0
+## Relative contribution of orientation to get_progress().
+@export_range(0.0, 1.0, 0.01) var orientation_progress_weight := 0.25
 ## Joint speed (rad/s) at which the stillness reward decays to zero.
 @export var hold_stillness_speed_reference := 0.5
+## A target transform change larger than either threshold starts a new acquisition without
+## requiring an episode reset. Small rigid-body jitter is ignored.
+@export var target_relocation_position_epsilon := 0.001
+@export_range(0.0, 30.0, 0.1) var target_relocation_angle_epsilon_degrees := 1.0
 
 @export_category("Safety")
 @export var safety_volumes: Array[Area3D] = []
@@ -53,6 +69,7 @@ signal obstacle_collision
 
 var _robot: GodotRobot
 var end_effector: Node3D
+var tool_pose: Node3D
 var _joint_names := PackedStringArray()
 var _commands: Array[float] = []
 var _previous_action: Array[float] = []
@@ -64,11 +81,16 @@ var _succeeded := false
 var _collided := false
 var _success_frames := 0
 var _training_active := true
+var _last_target_pose_transform := Transform3D.IDENTITY
+var _has_last_target_pose_transform := false
 
 
 func _ready() -> void:
 	_robot = get_node_or_null(robot_path) as GodotRobot
 	end_effector = get_node_or_null(end_effector_path) as Node3D
+	tool_pose = get_node_or_null(tool_pose_path) as Node3D
+	if not tool_pose:
+		tool_pose = end_effector
 	if not _robot:
 		push_error("URDFRobotArmAgentBody: GodotRobot not found at '%s'." % robot_path)
 		set_physics_process(false)
@@ -92,6 +114,7 @@ func _ready() -> void:
 	_cache_robot_collision_geometry()
 	_robot.reset_joint_positions(_build_home_positions())
 	_update_end_effector()
+	_capture_target_pose_transform()
 
 
 func _physics_process(_delta: float) -> void:
@@ -100,6 +123,7 @@ func _physics_process(_delta: float) -> void:
 	if manual_control and not _terminal:
 		apply_manual_action()
 	_update_end_effector()
+	_detect_target_pose_relocation()
 	_check_environment_collisions()
 	_update_success_state()
 
@@ -149,12 +173,14 @@ func reset_all(original_transform: Variant, reset_rewards := true) -> void:
 	_succeeded = false
 	_collided = false
 	_success_frames = 0
+	_has_last_target_pose_transform = false
 	for index in range(get_joint_count()):
 		_commands[index] = 0.0
 		_previous_action[index] = 0.0
 	_robot.reset_joint_positions(_build_home_positions(true))
 	_pending_reset_offsets.clear()
 	_update_end_effector()
+	_capture_target_pose_transform()
 
 	if has_method("reset_physics_interpolation"):
 		reset_physics_interpolation()
@@ -169,12 +195,14 @@ func initialize_episode_from_current_state() -> void:
 	_succeeded = false
 	_collided = false
 	_success_frames = 0
+	_has_last_target_pose_transform = false
 	set_training_active(true)
 	for index in range(get_joint_count()):
 		_commands[index] = 0.0
 		_previous_action[index] = 0.0
 	_robot.stop_all_joints()
 	_update_end_effector()
+	_capture_target_pose_transform()
 	agent.reset_observation_sources()
 
 
@@ -214,8 +242,11 @@ func set_continue_after_success(enabled: bool) -> void:
 
 
 func get_progress() -> float:
-	return 1.0 - clampf(
+	var position_progress := 1.0 - clampf(
 		_target_distance() / maxf(workspace_scale, 0.001), 0.0, 1.0)
+	var orientation_progress := 1.0 - clampf(_target_angle_error() / PI, 0.0, 1.0)
+	var orientation_weight := clampf(orientation_progress_weight, 0.0, 1.0)
+	return lerpf(position_progress, orientation_progress, orientation_weight)
 
 
 func get_joint_count() -> int:
@@ -254,15 +285,23 @@ func get_joint_velocity_observation() -> Array:
 
 
 func get_target_error_observation() -> Vector3:
-	if not target or not end_effector:
+	var desired_pose := _target_pose_node()
+	var current_pose := _tool_pose_node()
+	if not desired_pose or not current_pose:
 		return Vector3.ZERO
-	var error_world := target.global_position - end_effector.global_position
+	var error_world := desired_pose.global_position - current_pose.global_position
 	var error_base := global_transform.basis.inverse() * error_world
 	var _scale := maxf(workspace_scale, 0.001)
 	return Vector3(
 		clampf(error_base.x / _scale, -1.0, 1.0),
 		clampf(error_base.y / _scale, -1.0, 1.0),
 		clampf(error_base.z / _scale, -1.0, 1.0))
+
+
+func get_target_orientation_error_observation() -> Vector3:
+	# Shortest axis-angle error in the current tool frame, normalised so PI radians has length 1.
+	# Zero therefore represents the desired orientation without quaternion sign ambiguity.
+	return _target_orientation_error_vector()
 
 
 func get_previous_action_observation() -> Array:
@@ -298,7 +337,7 @@ func get_hold_stillness_reward() -> float:
 	# Immobility reward, active ONLY within near_target_distance: rewards a low max joint speed so
 	# the arm learns to SETTLE on the target instead of sweeping through it. Zero away from the
 	# target, so the fast reach is never penalised.
-	if _target_distance() > near_target_distance:
+	if not _is_near_target_pose():
 		return 0.0
 	return clampf(
 		1.0 - _max_joint_speed() / maxf(hold_stillness_speed_reference, 0.001), 0.0, 1.0)
@@ -308,9 +347,25 @@ func get_near_target_speed_penalty() -> float:
 	# Penalty proportional to MAX joint speed, active ONLY near the target. Drives joint velocity
 	# toward zero precisely where holding matters, without slowing the reach far away. Returns a
 	# negative term (scaled by the component weight).
-	if _target_distance() > near_target_distance:
+	if not _is_near_target_pose():
 		return 0.0
 	return -_max_joint_speed()
+
+
+func get_pose_tracking_reward() -> float:
+	# Dense reward for matching position AND orientation. A pure product gives ZERO orientation
+	# gradient while the arm is still far (position_score ~0), so orientation is only ever shaped at
+	# the very end -- exactly where it is kinematically hardest to fix without disturbing position.
+	# The 6-DOF xArm reliably solves position (min 0.011m) but leaves orientation stuck (~35deg even
+	# when close). So reward each half INDEPENDENTLY (additive) to teach the policy to pre-orient
+	# during the approach, and keep a smaller product term to still reward solving BOTH at once.
+	var position_score := 1.0 - clampf(
+		_target_distance() / maxf(near_target_distance, 0.001), 0.0, 1.0)
+	var orientation_score := 1.0 - clampf(
+		_target_angle_error() / maxf(deg_to_rad(pose_reward_angle_degrees), 0.001),
+		0.0,
+		1.0)
+	return 0.4 * position_score + 0.4 * orientation_score + 0.2 * position_score * orientation_score
 
 
 func get_hold_progress_reward() -> float:
@@ -334,7 +389,20 @@ func get_hold_frames() -> int:
 func get_debug_metrics() -> Dictionary:
 	# Generic per-step diagnostics surfaced to the trainer logs (merged into the step info by
 	# ScenarioController when the body exposes this method).
-	return {"max_joint_speed": _max_joint_speed(), "hold_frames": _success_frames}
+	return {
+		"position_error_m": _target_distance(),
+		"orientation_error_deg": rad_to_deg(_target_angle_error()),
+		"max_joint_speed": _max_joint_speed(),
+		"hold_frames": _success_frames,
+		"pose_held": _is_pose_held(),
+		"target_acquired": _succeeded
+	}
+
+
+func notify_target_pose_relocated() -> void:
+	_begin_new_target_acquisition()
+	_capture_target_pose_transform()
+	target_pose_relocated.emit()
 
 
 func get_control_input(input_name: String) -> float:
@@ -445,19 +513,32 @@ func _update_end_effector() -> void:
 
 
 func _update_success_state() -> void:
-	if _terminal or not target or not end_effector:
+	if _terminal or not _target_pose_node() or not _tool_pose_node():
 		return
 	var distance := _target_distance()
-	if _succeeded:
-		if (
-			not terminate_on_success
-			and distance > success_distance * success_rearm_distance_multiplier
-		):
-			_succeeded = false
-			_success_frames = 0
-		return
+	var angle := _target_angle_error()
 	var still := (not success_require_still) or (_max_joint_speed() <= success_max_joint_speed)
-	if distance <= success_distance and still:
+	var within_success := (
+		distance <= success_distance
+		and angle <= deg_to_rad(success_angle_degrees)
+		and still
+	)
+	if _succeeded:
+		var inside_rearm_zone := (
+			distance <= success_distance * success_rearm_distance_multiplier
+			and angle <= (
+				deg_to_rad(success_angle_degrees)
+				* success_rearm_angle_multiplier)
+		)
+		if terminate_on_success or inside_rearm_zone:
+			_success_frames = (
+				success_hold_physics_frames
+				if within_success
+				else 0)
+			return
+		_begin_new_target_acquisition()
+
+	if within_success:
 		_success_frames += 1
 	else:
 		_success_frames = 0
@@ -468,6 +549,44 @@ func _update_success_state() -> void:
 		_terminal = true
 		_robot.stop_all_joints()
 	target_reached.emit()
+
+
+func _detect_target_pose_relocation() -> void:
+	var desired_pose := _target_pose_node()
+	if not desired_pose:
+		_has_last_target_pose_transform = false
+		return
+	if not _has_last_target_pose_transform:
+		_capture_target_pose_transform()
+		return
+
+	var current_transform := desired_pose.global_transform
+	var position_changed := (
+		current_transform.origin.distance_to(_last_target_pose_transform.origin)
+		> maxf(target_relocation_position_epsilon, 0.0)
+	)
+	var angle_changed := (
+		_basis_angle_between(
+			_last_target_pose_transform.basis,
+			current_transform.basis)
+		> deg_to_rad(maxf(target_relocation_angle_epsilon_degrees, 0.0))
+	)
+	if position_changed or angle_changed:
+		notify_target_pose_relocated()
+
+
+func _capture_target_pose_transform() -> void:
+	var desired_pose := _target_pose_node()
+	if not desired_pose:
+		_has_last_target_pose_transform = false
+		return
+	_last_target_pose_transform = desired_pose.global_transform
+	_has_last_target_pose_transform = true
+
+
+func _begin_new_target_acquisition() -> void:
+	_succeeded = false
+	_success_frames = 0
 
 
 func _connect_safety_volumes() -> void:
@@ -558,9 +677,78 @@ func _register_collision() -> void:
 
 
 func _target_distance() -> float:
-	if not target or not end_effector:
+	var desired_pose := _target_pose_node()
+	var current_pose := _tool_pose_node()
+	if not desired_pose or not current_pose:
 		return workspace_scale
-	return end_effector.global_position.distance_to(target.global_position)
+	return current_pose.global_position.distance_to(desired_pose.global_position)
+
+
+func _target_angle_error() -> float:
+	return _target_orientation_error_vector().length() * PI
+
+
+func _target_orientation_error_vector() -> Vector3:
+	var desired_pose := _target_pose_node()
+	var current_pose := _tool_pose_node()
+	if not desired_pose or not current_pose:
+		return Vector3.ZERO
+
+	var current_basis := current_pose.global_basis.orthonormalized()
+	var desired_basis := desired_pose.global_basis.orthonormalized()
+	var relative_rotation := (
+		current_basis.inverse() * desired_basis
+	).get_rotation_quaternion().normalized()
+	if relative_rotation.w < 0.0:
+		relative_rotation = Quaternion(
+			-relative_rotation.x,
+			-relative_rotation.y,
+			-relative_rotation.z,
+			-relative_rotation.w)
+
+	var vector_part := Vector3(
+		relative_rotation.x,
+		relative_rotation.y,
+		relative_rotation.z)
+	var sin_half_angle := vector_part.length()
+	if sin_half_angle <= 0.000001:
+		return Vector3.ZERO
+	var angle := 2.0 * atan2(
+		sin_half_angle,
+		clampf(relative_rotation.w, -1.0, 1.0))
+	return vector_part / sin_half_angle * (angle / PI)
+
+
+func _basis_angle_between(first: Basis, second: Basis) -> float:
+	var relative_rotation := (
+		first.orthonormalized().inverse() * second.orthonormalized()
+	).get_rotation_quaternion().normalized()
+	return 2.0 * acos(clampf(absf(relative_rotation.w), 0.0, 1.0))
+
+
+func _is_near_target_pose() -> bool:
+	return (
+		_target_distance() <= near_target_distance
+		and _target_angle_error() <= deg_to_rad(pose_reward_angle_degrees)
+	)
+
+
+func _is_pose_held() -> bool:
+	return (
+		_target_distance() <= success_distance
+		and _target_angle_error() <= deg_to_rad(success_angle_degrees)
+		and (
+			not success_require_still
+			or _max_joint_speed() <= success_max_joint_speed)
+	)
+
+
+func _tool_pose_node() -> Node3D:
+	return tool_pose if tool_pose else end_effector
+
+
+func _target_pose_node() -> Node3D:
+	return target_pose if target_pose else target
 
 
 func _max_joint_speed() -> float:

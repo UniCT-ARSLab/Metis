@@ -476,6 +476,12 @@ def update_episode_diagnostics(state, agent_info, agent_idx=None):
         if hold_frames is not None:
             state["hold_frames_peak"] = max(
                 int(state.get("hold_frames_peak", 0)), int(hold_frames))
+        position_error = agent_info.get("position_error_m")
+        if position_error is not None:
+            state["position_error_last"] = float(position_error)
+        orientation_error = agent_info.get("orientation_error_deg")
+        if orientation_error is not None:
+            state["orientation_error_last"] = float(orientation_error)
         return
 
     state["max_track_progress"][agent_idx] = max(float(state["max_track_progress"][agent_idx]), progress)
@@ -487,6 +493,23 @@ def update_episode_diagnostics(state, agent_info, agent_idx=None):
     if progress_stalled and not state["stalled_seen"][agent_idx]:
         state["stalled_count"][agent_idx] += 1
         state["stalled_seen"][agent_idx] = True
+    diagnostic_shape = np.asarray(state["max_track_progress"]).shape
+    for info_key, state_key in (
+        ("max_joint_speed", "max_joint_speed_last"),
+        ("position_error_m", "position_error_last"),
+        ("orientation_error_deg", "orientation_error_last"),
+    ):
+        value = agent_info.get(info_key)
+        if value is None:
+            continue
+        values = state.setdefault(
+            state_key, np.zeros(diagnostic_shape, dtype=np.float32))
+        values[agent_idx] = float(value)
+    hold_frames = agent_info.get("hold_frames")
+    if hold_frames is not None:
+        values = state.setdefault(
+            "hold_frames_peak", np.zeros(diagnostic_shape, dtype=np.int32))
+        values[agent_idx] = max(int(values[agent_idx]), int(hold_frames))
 
 
 def summarize_episode_diagnostics(env_states, multi_agent):
@@ -503,9 +526,17 @@ def summarize_episode_diagnostics(env_states, multi_agent):
             "collisions": int(sum(np.sum(values) for values in collision_arrays)),
             "stalls": int(sum(np.sum(values) for values in stalled_arrays)),
             "max_joint_speed": float(np.mean([
-                state.get("max_joint_speed_last", 0.0) for state in env_states])),
+                np.mean(state.get("max_joint_speed_last", 0.0))
+                for state in env_states])),
             "hold_frames": int(max(
-                (int(state.get("hold_frames_peak", 0)) for state in env_states), default=0)),
+                (int(np.max(state.get("hold_frames_peak", 0)))
+                 for state in env_states), default=0)),
+            "position_error_m": float(np.mean([
+                np.mean(state.get("position_error_last", 0.0))
+                for state in env_states])),
+            "orientation_error_deg": float(np.mean([
+                np.mean(state.get("orientation_error_last", 0.0))
+                for state in env_states])),
         }
 
     return {
@@ -518,6 +549,10 @@ def summarize_episode_diagnostics(env_states, multi_agent):
             state.get("max_joint_speed_last", 0.0) for state in env_states])),
         "hold_frames": int(max(
             (int(state.get("hold_frames_peak", 0)) for state in env_states), default=0)),
+        "position_error_m": float(np.mean([
+            state.get("position_error_last", 0.0) for state in env_states])),
+        "orientation_error_deg": float(np.mean([
+            state.get("orientation_error_last", 0.0) for state in env_states])),
     }
 
 
@@ -588,6 +623,7 @@ def create_continuous_async_worker(
             "training_episode": episode,
             "max_steps": args.max_steps_per_episode,
             "physics_frames_per_step": args.physics_frames_per_step,
+            "training_mode": True,
         }
         if reset_progress_max is not None:
             scenario_config.update(reset_progress_min=0.0, reset_progress_max=reset_progress_max)
@@ -2062,6 +2098,7 @@ def main(trainer_variant):
                     "training_episode": episode,
                     "max_steps": args.max_steps_per_episode,
                     "physics_frames_per_step": args.physics_frames_per_step,
+                    "training_mode": True,
                 }
                 if reset_progress_max is not None:
                     scenario_config.update(reset_progress_min=0.0, reset_progress_max=reset_progress_max)

@@ -26,6 +26,7 @@ signal scenario_configured(config:Dictionary)
 @export_range(1, 16, 1) var physics_frames_per_step := 1
 @export var manage_agent_cameras := true
 @export var continue_after_success := false
+@export var training_mode := false
 
 @export_category("Training Optimization")
 @export var auto_optimize_in_headless := true
@@ -287,6 +288,8 @@ func configure(config:Dictionary) -> Dictionary:
 		manage_agent_cameras = bool(config["manage_agent_cameras"])
 	if config.has("continue_after_success"):
 		continue_after_success = bool(config["continue_after_success"])
+	if config.has("training_mode"):
+		training_mode = bool(config["training_mode"])
 	if _scenario_reward_system != null:
 		_apply_config_to_node_tree(_scenario_reward_system, config)
 	_update_current_agent_camera()
@@ -307,7 +310,8 @@ func configure(config:Dictionary) -> Dictionary:
 		"recording_agent_id": recording_agent_id,
 		"disable_replication_in_recording": disable_replication_in_recording,
 		"manage_agent_cameras": manage_agent_cameras,
-		"continue_after_success": continue_after_success
+		"continue_after_success": continue_after_success,
+		"training_mode": training_mode
 	}
 
 
@@ -455,6 +459,19 @@ func get_progress(agent:Node, context:Dictionary = {}) -> float:
 	if agent.has_method("get_progress"):
 		return float(agent.get_progress())
 	return 0.0
+
+
+func rebase_agent_tracking(agent:Node) -> void:
+	# An exogenous goal change is not backward movement by the agent. Rebase progress deltas,
+	# stall tracking, and one-shot goal rewards while preserving the physical episode and the
+	# agent-local action history.
+	if not agent:
+		return
+	var context := _build_scenario_context(agent)
+	if _progress_provider != null and _progress_provider.has_method("reset_agent"):
+		_progress_provider.reset_agent(agent, context)
+	if _scenario_reward_system != null and _scenario_reward_system.has_method("reset_agent"):
+		_scenario_reward_system.reset_agent(_agent_id(agent), context)
 
 
 func _get_agent_action_space(agent:Node) -> Dictionary:

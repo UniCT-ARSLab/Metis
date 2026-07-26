@@ -61,7 +61,7 @@ metadata/_custom_type_script = "uid://d38lybllmy6tq"
 script = ExtResource("2_dw0os")
 controlled_agents = [NodePath("../RobotArm")]
 physics_frames_per_step = 3
-continue_after_success = false
+continue_after_success = true
 metadata/_custom_type_script = "uid://cun4ha1fidr8n"
 
 [node name="ProgressProvider" type="Node" parent="ScenarioController" unique_id=1761560080]
@@ -75,7 +75,6 @@ metadata/_custom_type_script = "uid://b47ph323gt6gl"
 [node name="GoalReached" type="Node" parent="ScenarioController/ScenarioEventSystem" unique_id=80227875]
 script = ExtResource("6_pdjfy")
 event_name = "target_reached"
-terminal_reason = "target_reached"
 metadata/_custom_type_script = "uid://botsx3bwjduj2"
 
 [node name="Collision" type="Node" parent="ScenarioController/ScenarioEventSystem" unique_id=735569373]
@@ -143,14 +142,17 @@ shape = SubResource("BoxShape3D_m16lm")
 [node name="Camera3D" type="Camera3D" parent="Environment" unique_id=1342671084]
 transform = Transform3D(0.8937797, -0.21330594, 0.3945358, 0, 0.8796661, 0.4755918, -0.44850636, -0.42507428, 0.78622764, 0.28993553, 0.49669093, 0.39805388)
 
-[node name="RobotArm" parent="." unique_id=118315022 node_paths=PackedStringArray("target") instance=ExtResource("3_nsb5c")]
+[node name="RobotArm" parent="." unique_id=118315022 node_paths=PackedStringArray("target", "target_pose") instance=ExtResource("3_nsb5c")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.0006389916, 0)
 target = NodePath("../Target")
+target_pose = NodePath("../Target/GraspPose")
 
 [node name="Target" type="MeshInstance3D" parent="." unique_id=1913792666]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.21230404, 0.13049985, 0.016337678)
 mesh = SubResource("SphereMesh_jfawp")
 surface_material_override/0 = SubResource("StandardMaterial3D_w0qjo")
+
+[node name="GraspPose" type="Marker3D" parent="Target"]
 
 [node name="Workcell" type="Node3D" parent="." unique_id=637885706]
 

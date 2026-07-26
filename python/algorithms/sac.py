@@ -972,6 +972,7 @@ def run_async_sac(
                 ("outcome", [
                     ("reward", f"{reward_stats['mean']:.3f} [{reward_stats['min']:.3f}, {reward_stats['max']:.3f}]"),
                     ("progress", f"mean:{diagnostics['progress_mean']:.3f} max:{diagnostics['progress_max']:.3f}"),
+                    ("pose_error", f"position:{diagnostics.get('position_error_m', 0.0):.4f}m orientation:{diagnostics.get('orientation_error_deg', 0.0):.1f}deg"),
                     ("hold", f"speed:{diagnostics.get('max_joint_speed', 0.0):.3f} frames:{diagnostics.get('hold_frames', 0)}"),
                 ]),
                 ("agents", [
@@ -1386,6 +1387,7 @@ def main():
                     "training_episode": episode,
                     "max_steps": args.max_steps_per_episode,
                     "physics_frames_per_step": args.physics_frames_per_step,
+                    "training_mode": True,
                 }
                 if reset_progress_max is not None:
                     scenario_config.update(reset_progress_min=0.0, reset_progress_max=reset_progress_max)
@@ -1653,6 +1655,7 @@ def main():
                 ("outcome", [
                     ("reward", f"{reward_stats['mean']:.3f} [{reward_stats['min']:.3f}, {reward_stats['max']:.3f}]"),
                     ("progress", f"mean:{diagnostics['progress_mean']:.3f} max:{diagnostics['progress_max']:.3f}"),
+                    ("pose_error", f"position:{diagnostics.get('position_error_m', 0.0):.4f}m orientation:{diagnostics.get('orientation_error_deg', 0.0):.1f}deg"),
                     ("hold", f"speed:{diagnostics.get('max_joint_speed', 0.0):.3f} frames:{diagnostics.get('hold_frames', 0)}"),
                 ]),
                 ("agents", [
