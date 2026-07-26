@@ -231,10 +231,14 @@ Agent
 │   ├── JointPositions (MethodObservationSource)
 │   ├── JointVelocities (MethodObservationSource)
 │   ├── TargetError (MethodObservationSource)
+│   ├── TargetOrientationError (MethodObservationSource)
 │   └── PreviousAction (MethodObservationSource)
 └── RewardSystem
     ├── JointMotion (FunctionRewardComponent)
     ├── JointLimit (FunctionRewardComponent)
+    ├── PoseTracking (FunctionRewardComponent)
+    ├── HoldStillness (FunctionRewardComponent)
+    ├── HoldProgress (FunctionRewardComponent)
     ├── Smoothness (ActionSmoothnessPenaltyReward)
     └── Time (StepPenaltyReward)
 ```
@@ -249,14 +253,18 @@ joint_velocity_1
 joint_velocity_(N-1)
 ```
 
-The local terms should remain small:
+The local terms should remain balanced:
 
 - joint motion penalizes unnecessary total command effort;
 - joint limit penalizes the outer ten percent of revolute travel;
+- pose tracking combines position and orientation near the target;
+- hold stillness and hold progress activate only in the tight target region;
 - smoothness penalizes abrupt command changes;
 - time makes shorter successful trajectories preferable.
 
-Task outcome and collision rewards belong to the scenario.
+Task outcome, progress, and collision rewards belong to the scenario. Keep motion and
+smoothness penalties small until reaching works; strong early regularization can make
+the stationary policy more attractive than exploring the workspace.
 
 ## 8. Build a reaching scenario
 
@@ -297,10 +305,12 @@ arm.self_collision.connect(
 	func(): self_collision_event.trigger(str(arm.name)))
 ```
 
-`get_progress()` returns one minus normalized TCP-to-target distance. A
-`ProgressDeltaScenarioReward` then rewards actual improvement rather than mere
-proximity. Require the TCP to remain within `success_distance` for several physics
-frames before emitting success; this prevents high-speed fly-throughs.
+The bundled `get_progress()` combines normalized TCP position progress with target
+orientation progress. `orientation_progress_weight` controls the mix and keeps position
+dominant. A `ProgressDeltaScenarioReward` rewards actual improvement rather than mere
+proximity. Require the TCP to satisfy position, orientation, and joint-speed gates for
+several consecutive physics frames before emitting success; this prevents high-speed
+fly-throughs and orientation-only shortcuts.
 
 Suggested outcome scale:
 
@@ -313,23 +323,32 @@ Suggested outcome scale:
 
 The exact scale is task-dependent. Inspect individual terms before changing them.
 
-## 9. Train the included XArm grasp task
+## 9. Extend pose reaching into grasping
 
-The supplied XArm scene extends reaching into assisted grasping. Its target is a
-`RigidBody3D` with a child `GraspPoint`:
+The checked-in XArm policy is a pose-reaching task. It controls five arm joints, while
+`grip_left` is manual-only and the target is a visual `MeshInstance3D`. This is
+intentional: solve and validate position, orientation, and hold before adding contact
+and grasp sequencing.
+
+A grasping variant can replace the visual target with a `RigidBody3D` and a child
+`GraspPose`:
 
 ```text
 Target (RigidBody3D, group: graspable)
 ├── Mesh
 ├── CollisionShape3D
-└── GraspPoint (Marker3D)
+└── GraspPose (Marker3D)
 ```
 
-`RobotArm.target` points to `GraspPoint`, while `grasp_target_body` points to `Target`.
-The target is intentionally absent from `robot_obstacle`; finger contact must be legal.
+Point `RobotArm.target_pose` to `GraspPose`. Decide explicitly which contacts are legal:
+the object should normally be excluded from the environment-collision terminal mask,
+while the table and fixtures remain obstacles.
 
-The XArm URDF exposes six independent actuators: five arm joints and the `grip_left`
-source joint. Mimic joints drive the remaining gripper mechanism.
+The XArm URDF exposes five arm actuators plus the independent `grip_left` source joint.
+Mimic joints drive the remaining gripper mechanism. To train grasping, move `grip_left`
+from the manual-only list into the policy-controlled joint list and let the
+`ContinuousAction` resize from five to six values. This is a new action contract and
+cannot reuse a five-action replay buffer.
 
 Its observation vector is:
 
@@ -345,20 +364,22 @@ Its observation vector is:
 ```
 
 Grasp state contains normalized gripper closure, whether the object is attached, and
-normalized lift height.
+normalized lift height. These observation sources and the corresponding contact state
+must be implemented by the grasping variant; they are not part of the current
+21-observation reaching scene.
 
-With `assisted_grasp=true`, the object is captured only when:
+If you choose to implement an assisted grasp, capture the object only when:
 
 - the TCP is within `grasp_capture_distance`;
 - gripper closure exceeds `grasp_close_threshold`;
 - object speed is below `max_grasp_target_speed`.
 
-The relative TCP-to-object transform is then held kinematically. Success requires the
-object to remain above `required_lift_height` for `grasp_hold_physics_frames`. Assisted
-grasp is useful for learning approach, closure, and lift sequencing. It is not a model
-of frictional grasp stability.
+The relative TCP-to-object transform may then be held kinematically. Success should
+require the object to remain above `required_lift_height` for
+`grasp_hold_physics_frames`. Assisted grasp is useful for learning approach, closure,
+and lift sequencing. It is not a model of frictional grasp stability.
 
-Current scenario rewards are:
+A grasping reward set can include:
 
 | Term | Value |
 |---|---:|
@@ -370,8 +391,9 @@ Current scenario rewards are:
 | self collision | `-30` |
 | progress stall | `-5` |
 
-Local terms also penalize target disturbance before capture and closing the gripper
-while it is still far away.
+Local terms can also penalize target disturbance before capture and closing the gripper
+while it is still far away. Add these terms only with the six-action grasp contract;
+they do not belong to the current reaching baseline.
 
 ## 10. Detect environment and self collisions
 
@@ -406,50 +428,80 @@ contact, not hide a poor collision model.
 Use `get_last_collision_info()` while debugging to see whether the event came from an
 environment pair or a self-collision pair.
 
-## 11. Reset the rigid target atomically
+## 11. Reset the target deterministically
 
 The scenario discovers every `Marker3D` below `target_spawns_root`. Adding another
-marker automatically adds a candidate spawn.
+marker automatically adds a candidate spawn. When `target_spawns_root` is assigned, its
+children take precedence over the serialized `target_spawns` array. The current XArm
+scene therefore uses all 25 marker children under `Spawns`, even though the fallback
+array contains fewer entries.
 
-In the reaching example, those markers delimit a training volume. After the introductory
-curriculum, `continuous_target_sampling` draws coordinates throughout the axis-aligned
-volume instead of selecting only exact marker positions. This reduces memorization and
-makes held-out positions inside the declared workspace meaningful. Moving the target
-outside that volume is still out-of-distribution and must be covered by additional
-markers or a deliberately expanded workspace.
+With `continuous_target_sampling=false`, reset selects only exact marker transforms.
+This is a useful first task: it proves that joint control, target observations,
+orientation, and hold behavior work. It does not prove spatial generalization. A policy
+can become very reliable on the marker coordinates and still behave poorly when the
+target is dragged between them.
 
-At reset it:
+With `continuous_target_sampling=true`, the markers instead delimit an axis-aligned
+training volume. Once `continuous_target_sampling_start_episode` is reached, reset draws
+coordinates throughout that volume. This reduces memorization and makes held-out
+positions inside the declared workspace meaningful. The sampler changes directly from
+marker selection to the whole box; it does not gradually increase its radius. For a
+difficult arm, first add a denser marker grid or introduce continuous sampling in a
+separate fine-tuning run.
 
-1. detaches any assisted grasp;
-2. freezes the target body;
-3. clears linear and angular velocity;
-4. applies the selected marker transform;
-5. resets physics interpolation;
-6. stores the new spawn transform for lift and disturbance checks;
-7. keeps the target frozen while the arm returns to its home pose;
-8. samples joint-home offsets, excluding the gripper;
-9. unfreezes and wakes the target after `episode_reset_completed`.
+Inspect the complete box before enabling it. The corners of an axis-aligned box can be
+unreachable even when every marker is reachable. Use `target_sampling_inset` to remove
+unsafe margins, or move the delimiting markers so every sampled pose belongs to the
+validated robot workspace. A target outside this volume remains out-of-distribution.
 
-Moving a live `RigidBody3D` without clearing velocity or freezing it can make the old
-physics state reappear on the next tick. Unfreezing it before the kinematic arm has
-finished resetting can also create a collision before the policy's first action. Keep
-this reset sequence intact.
+At reset, the reaching scenario seeds its episode RNG, selects or samples the target
+transform, applies the curriculum thresholds, and supplies joint-home offsets to the
+arm. Equal seeds therefore produce equal target poses and initial offsets.
 
-The built-in curriculum is:
+If the target is later changed to a `RigidBody3D`, extend this sequence atomically:
 
-| Episode | Target set | Joint jitter | Capture distance | Lift height |
+1. detach any assisted grasp;
+2. freeze the target body;
+3. clear linear and angular velocity;
+4. apply the sampled transform;
+5. reset physics interpolation;
+6. keep it frozen while the arm returns to its home pose;
+7. unfreeze and wake it only after reset completes.
+
+Moving a live rigid body without clearing velocity or freezing it can make the old
+physics state reappear on the next tick. Unfreezing it before the kinematic arm finishes
+resetting can also create a collision before the policy's first action.
+
+The reaching curriculum in `xarm_scenario.gd` is:
+
+| Episode | Position distribution | Joint jitter | Distance | Orientation |
 |---:|---|---:|---:|---:|
-| `<3000` | first easy markers | `0 deg` | `0.060` | `0.020` |
-| `3000-5999` | first two easy groups | `0 deg` | `0.050` | `0.030` |
-| `6000-8999` | all markers | `2 deg` | `0.040` | `0.040` |
-| `9000+` | all markers | `5 deg` | `0.032` | `0.050` |
+| `<300` | first `easy_target_count` markers | `0 deg` | `0.080 m` | `35 deg` |
+| `300-799` | all marker transforms | `0 deg` | `0.060 m` | `25 deg` |
+| `800-1499` | markers or continuous volume | `2 deg` | `0.050 m` | `18 deg` |
+| `1500+` | markers or continuous volume | `late_joint_jitter_degrees` | `0.040 m` | `12 deg` |
 
-The early stages also allow a lower lift hold time, a slightly faster object at capture,
-and more pre-grasp displacement. These tolerances tighten at each transition. Stage
-boundaries are exported by `xarm_scenario.gd`, so a harder robot can remain in an early
-stage longer without changing Python.
+Continuous positions and random target yaw are applied only when their corresponding
+options are enabled. They both have independent start episodes.
 
-Keep a separate set of target poses out of training for evaluation.
+The hold requirement has a second curriculum:
+
+| Stage | Required physics frames | Maximum joint speed |
+|---|---:|---:|
+| before `hold_curriculum_stage1_until` | `20` | `0.30 rad/s` |
+| before `hold_curriculum_stage2_until` | `60` | `0.20 rad/s` |
+| final | `120` | `0.12 rad/s` |
+
+The exported stage boundaries can be overridden by the scene. The checked-in
+`XarmScenario.tscn` is deliberately configured as a controlled static-pose experiment:
+continuous position sampling, target relocation, yaw randomization, and late joint
+jitter are disabled. Its hold boundaries are also extended. Treat those overrides as an
+experiment configuration, not as the general defaults described by the script.
+
+Keep target poses and reset seeds out of training for final evaluation. A fixed
+evaluation seed set is useful for comparing checkpoints, while a second unseen seed set
+is needed to estimate generalization.
 
 ## 12. Validate before training
 
@@ -467,23 +519,39 @@ python/.venv/bin/python python/tools/random_rollout.py \
 
 Check the contract and mechanics:
 
-1. `action_type=continuous`, `action_size=7`, and `obs_dim=33`.
+1. The current XArm reaching policy reports `action_type=continuous`, `action_size=5`,
+   and `obs_dim=21`.
 2. Every action index moves the intended independent joint with the intended sign.
 3. Mimic fingers follow their source but are not separate actions.
 4. A non-base link touching the floor emits `collision`.
 5. Two non-ignored links touching emit `self_collision`.
 6. The resting base and internal gripper do not produce false positives.
-7. Pushing the object away before grasp emits `object_dropped`.
-8. Proximity alone is not success; the object must be grasped and lifted.
-9. Equal reset seeds select equal target poses and joint jitter.
-10. Reset leaves no stale velocity, contact, or reward state.
+7. Position alone is not success: orientation, joint speed, and consecutive hold frames
+   must also pass their gates.
+8. Equal reset seeds select equal target poses and joint jitter.
+9. Reset leaves no stale velocity, contact, or reward state.
 
 Also test constant motion on one joint at a time. This catches most ordering and sign
 errors before the learner begins compensating for them.
 
+The observation size follows the current contract:
+
+```text
+N joint positions
++ N joint velocities
++ 3 target-position error
++ 3 target-orientation error
++ N previous actions
+= 3N + 6
+```
+
+For the five controlled XArm joints, this is `21`. The gripper remains a manual-only
+actuator in the reaching policy. Adding grasp control changes both the action contract
+and the observation contract and requires a new model.
+
 ## 13. Train a SAC baseline
 
-Start the included grasping task from a fresh directory:
+Start the included pose-reaching task from a fresh directory:
 
 ```bash
 python/.venv/bin/python python/train.py \
@@ -491,32 +559,107 @@ python/.venv/bin/python python/train.py \
   --godot-bin /path/to/Godot \
   --godot-project godot \
   --godot-scene res://scenarios/robotarms/XarmScenario.tscn \
-  --num-envs 4 \
-  --num-episodes 12000 \
-  --max-steps-per-episode 500 \
-  --batch-size 128 \
-  --replay-warmup 15000 \
+  --num-envs 8 \
+  --num-episodes 8000 \
+  --max-steps-per-episode 300 \
+  --physics-frames-per-step 3 \
+  --batch-size 256 \
+  --replay-warmup 20000 \
   --random-exploration-episodes 40 \
-  --action-smoothing 0.10 \
+  --min-alpha 0.02 \
+  --no-caps \
+  --grad-clip-adaptive \
+  --grad-clip-norm 10 \
+  --best-metric success_rate \
+  --best-evaluation-every 100 \
+  --best-evaluation-episodes 20 \
   --collector-mode async \
-  --checkpoint-dir checkpoints/xarm_grasp_sac_v2 \
+  --checkpoint-every 50 \
+  --checkpoint-dir checkpoints/xarm_pose_sac_v1 \
   --headless
 ```
 
-Do not add `--multi-agent`: each environment contains one arm. Four environments already
-collect four independent trajectories.
+Do not add `--multi-agent`: each environment contains one arm. Eight environments already
+collect eight independent trajectories.
 
 Monitor more than reward:
 
-- grasp and lift success rates;
+- frozen and online success rates;
+- TCP position and orientation errors;
+- achieved hold frames and maximum joint speed;
 - environment and self-collision rates;
-- object-drop rate;
 - progress and episode length;
 - joint-limit and action-smoothness terms;
-- success on held-out target markers.
+- success on held-out marker coordinates and continuous target positions.
 
-A policy that approaches the target but never closes the gripper can accumulate dense
-progress without solving the task.
+A policy can score well by approaching the target without satisfying orientation and
+hold gates. It can also solve every discrete marker while failing between them.
+
+### Match frozen evaluation to the curriculum
+
+`--best-evaluation-training-episode` fixes the Godot curriculum used by every frozen
+evaluation. This makes checkpoint comparisons reproducible, but the chosen episode must
+represent the stage you intend to measure.
+
+For example, if the scene keeps the easy hold stage until episode 2400, evaluating with
+`--best-evaluation-training-episode 2200` still tests 20 hold frames and the relaxed
+speed limit even after live training has moved to the 60-frame stage. The dashboard may
+then report an excellent best policy without measuring the current task.
+
+When the option is omitted, Metis evaluates at `--num-episodes`, which normally selects
+the final curriculum. For staged experiments, use a separate run directory and a fixed
+evaluation episode for each stage. Never compare success percentages produced under
+different thresholds as though they measured the same task.
+
+The evaluator uses the same seed sequence for every checkpoint. After selecting a best
+checkpoint, run a larger held-out test with a different seed:
+
+```bash
+python/.venv/bin/python python/run.py \
+  --algorithm sac \
+  --load-from checkpoint \
+  --checkpoint-path checkpoints/xarm_pose_sac_v1/best/ckpt-N \
+  --godot-bin /path/to/Godot \
+  --godot-project godot \
+  --godot-scene res://scenarios/robotarms/XarmScenario.tscn \
+  --episodes 100 \
+  --max-steps 300 \
+  --training-episode 3200 \
+  --seed 30000 \
+  --headless
+```
+
+With `continue_after_success=true`, evaluation latches success when the pose first
+passes every gate. This proves acquisition and the configured minimum hold, not
+indefinite retention. Also inspect the final pose error, time spent inside the success
+region, and whether the arm drifts away after the first success.
+
+### Promote discrete reaching to continuous tracking
+
+Do not enable every source of variation at once. Use separate checkpoint directories
+and promote a policy only after its frozen evaluation is stable:
+
+1. **Discrete static poses:** exact markers, fixed target orientation, no relocation,
+   and no initial joint jitter.
+2. **Continuous static positions:** enable `continuous_target_sampling`, keep relocation
+   and yaw randomization disabled, and verify the complete marker-defined volume.
+3. **Initial-state robustness:** increase `late_joint_jitter_degrees` gradually.
+4. **Continuous target orientation:** increase target yaw from a small range before
+   asking for the complete required range.
+5. **Reacquisition:** enable `relocate_target_during_training` only after static
+   continuous positions are reliable.
+6. **Long hold:** tighten from 20 to 60 and finally 120 physics frames, while lowering
+   the accepted joint speed.
+
+Resume from the best checkpoint of the previous stage with a lower actor learning rate
+and critic warmup. Keep the reward definition unchanged during the transition so a
+performance change can be attributed to the new state distribution. Old replay can
+help preserve the previous skill during a modest expansion, but a replay filled only
+with marker trajectories will initially dominate a radically larger workspace.
+
+Moving a target by hand at runtime is a useful visual test, but it is not equivalent to
+training target relocation. Until the policy has seen reach-hold-reacquire transitions,
+good behavior at the original coordinates says little about a new target pose.
 
 ### Optional SB3 comparison
 
@@ -537,7 +680,7 @@ python/.venv-sb3/bin/python python/train.py \
   --buffer-size 500000 \
   --collector-mode sync \
   --evaluation-episodes 50 \
-  --checkpoint-dir checkpoints/xarm_grasp_sb3_sac_v1 \
+  --checkpoint-dir checkpoints/xarm_pose_sb3_sac_v1 \
   --headless
 ```
 
@@ -760,7 +903,9 @@ Normal evaluation resets after every terminal outcome:
 
 ```bash
 python/.venv/bin/python python/run.py \
-  --policy-path checkpoints/xarm_grasp_sac_v2 \
+  --algorithm sac \
+  --load-from checkpoint \
+  --checkpoint-path checkpoints/xarm_pose_sac_v1/best/ckpt-N \
   --godot-bin /path/to/Godot \
   --godot-project godot \
   --godot-scene res://scenarios/robotarms/XarmScenario.tscn \
@@ -775,10 +920,12 @@ running, the body and scenario must support `continue_after_success`. Then use:
 
 ```bash
 python/.venv/bin/python python/run.py \
-  --policy-path checkpoints/robot_arm_reaching_v1 \
+  --algorithm sac \
+  --load-from checkpoint \
+  --checkpoint-path checkpoints/xarm_pose_sac_v1/best/ckpt-N \
   --godot-bin /path/to/Godot \
   --godot-project godot \
-  --godot-scene res://scenarios/robotarms/RobotArmReachingScenario.tscn \
+  --godot-scene res://scenarios/robotarms/XarmScenario.tscn \
   --continue-after-success \
   --infinite \
   --no-time-limit \

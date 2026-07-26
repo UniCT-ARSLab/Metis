@@ -9,6 +9,14 @@ extends Node3D
 ## Marker3D nodes instead of memorizing a finite set of target coordinates.
 @export var continuous_target_sampling := true
 @export var continuous_target_sampling_start_episode := 800
+## Spatial curriculum: rather than jumping straight to the full marker volume, sample within a radius
+## around a discrete marker that GROWS from spatial_curriculum_start_radius (tight, essentially on the
+## markers) to the full per-axis half-extent, linearly between the two episodes below. Keeps early
+## continuous targets close to the learned discrete poses, then widens to cover the whole volume.
+## Leave full<=start to disable (samples the full volume immediately, the original behaviour).
+@export var spatial_curriculum_start_episode := 0
+@export var spatial_curriculum_full_episode := 0
+@export var spatial_curriculum_start_radius := 0.01
 ## Shrinks the marker-defined volume on each axis. Useful when the outer markers sit too close to
 ## a wall or to the physical edge of the robot workspace.
 @export var target_sampling_inset := Vector3.ZERO
@@ -139,7 +147,7 @@ func _on_episode_reset_started(_seed:int) -> void:
 		arm.success_angle_degrees = 18.0
 	else:
 		joint_jitter_degrees = late_joint_jitter_degrees
-		arm.success_distance = 0.04
+		arm.success_distance = 0.02
 		arm.success_angle_degrees = 12.0
 
 	# Reach-and-HOLD curriculum: require a progressively LONGER hold at a TIGHTER stillness threshold.
@@ -171,7 +179,7 @@ func _sample_target_transform(
 		continuous_target_sampling
 		and _training_episode >= continuous_target_sampling_start_episode
 	):
-		result.origin = _sample_target_position(rng, spawn_pool)
+		result.origin = _sample_target_position(rng, spawn_pool, result.origin)
 	if (
 		target_yaw_randomization_degrees > 0.0
 		and _training_episode >= target_yaw_randomization_start_episode
@@ -203,7 +211,8 @@ func _relocate_target() -> void:
 
 func _sample_target_position(
 		rng: RandomNumberGenerator,
-		spawn_pool: Array[Marker3D]) -> Vector3:
+		spawn_pool: Array[Marker3D],
+		anchor: Vector3) -> Vector3:
 	var lower := spawn_pool[0].global_position
 	var upper := lower
 	for marker in spawn_pool:
@@ -220,10 +229,24 @@ func _sample_target_position(
 		lower[axis] += axis_inset
 		upper[axis] -= axis_inset
 
-	return Vector3(
-		rng.randf_range(lower.x, upper.x),
-		rng.randf_range(lower.y, upper.y),
-		rng.randf_range(lower.z, upper.z))
+	# Spatial curriculum: sample within a GROWING radius around the anchor marker instead of the
+	# full volume at once. frac ramps 0->1 across [start, full]; the per-axis radius lerps from the
+	# tight start radius (targets essentially on the learned markers) to the axis half-extent (full
+	# volume). Clamped to the marker AABB so the target never leaves the workspace or drops below the
+	# table (lower.y sits above it). full<=start disables the ramp (frac=1 -> full volume at once).
+	var frac := 1.0
+	if spatial_curriculum_full_episode > spatial_curriculum_start_episode:
+		frac = clampf(
+			float(_training_episode - spatial_curriculum_start_episode)
+			/ float(spatial_curriculum_full_episode - spatial_curriculum_start_episode),
+			0.0, 1.0)
+	var out_position := Vector3()
+	for axis in range(3):
+		var half_extent := (upper[axis] - lower[axis]) * 0.5
+		var radius := lerpf(spatial_curriculum_start_radius, half_extent, frac)
+		var sampled := anchor[axis] + rng.randf_range(-radius, radius)
+		out_position[axis] = clampf(sampled, lower[axis], upper[axis])
+	return out_position
 
 
 func _sample_joint_offsets(rng:RandomNumberGenerator, max_degrees:float) -> Array[float]:
