@@ -295,13 +295,19 @@
         <child link="xarm_2_link" />
     </joint>
 
-     <joint name="wrist_roll" type="revolute">
+    <!--
+      xarm_2_joint is the physical wrist rotation on this 5-DOF XArm.
+      hand_link is rigidly mounted to xarm_2_link; making this connector
+      revolute would add a second, co-located rotation around the same axis.
+      The gripper bracket has a fixed +90 degree mounting offset around that
+      axis, matching the positive direction of xarm_2_joint.
+      Keep the joint name stable so existing imported-node references survive.
+    -->
+    <joint name="wrist_roll" type="fixed">
         <parent link="xarm_2_link"/>
         <child link="hand_link"/>
-        <origin xyz="0 0 0.0"/>
-        <axis xyz="0 0 1"/>
-        <limit lower="-1.57" upper="1.57" effort="1000" velocity="0.5"/>
-  </joint>
+        <origin xyz="0 0 0" rpy="0 0 1.57079632679"/>
+    </joint>
 
   <joint name="grip_left" type="revolute">
     <parent link="hand_link"/>

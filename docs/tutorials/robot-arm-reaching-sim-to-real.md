@@ -128,6 +128,31 @@ when the source joint moves. Validate parsing and runtime synchronization with:
 If the importer reports a mimic cycle or unknown source, fix the URDF. Do not add both
 the source and its followers to `controlled_joint_names`.
 
+### The bundled XArm wrist
+
+The physical XArm model is a 5-DOF arm plus gripper. Its last arm rotation is
+`xarm_2_joint`. The following `wrist_roll` joint only mounts `hand_link`, so it is
+declared `fixed` in the bundled URDF. Making both joints revolute creates two
+co-located rotations around the same local axis: the policy can command them in
+opposite directions without producing useful TCP motion.
+
+The fixed mount includes a `+90 deg` yaw offset around the wrist axis. This describes
+the physical orientation of the gripper bracket; it is not a sixth action and does not
+shift the position, zero, or limits of `xarm_2_joint`.
+
+The default XArm reaching scene therefore controls these five joints, in order:
+
+```text
+xarm_6_joint
+xarm_5_joint
+xarm_4_joint
+xarm_3_joint
+xarm_2_joint
+```
+
+`grip_left` is a separate actuator for tasks that explicitly train the gripper; its
+mimic followers must never be added as policy actions.
+
 ## 5. Use a `Skeleton3D` when appropriate
 
 A robot imported as a skinned mesh can use a `Skeleton3D` instead of a chain of
@@ -175,13 +200,23 @@ obs_dim          3N+3
 action_size         N
 ```
 
+For pose tracking, add the three-value target orientation error used by the bundled
+XArm scene:
+
+```text
+target_orientation_error   3
+----------------------------
+pose_obs_dim             3N+6
+```
+
 Examples:
 
-| Controlled joints | Action size | Reaching observations |
-|---:|---:|---:|
-| 3 | 3 | 12 |
-| 7 | 7 | 24 |
-| 8 | 8 | 27 |
+| Controlled joints | Action size | Position-only observations | Pose observations |
+|---:|---:|---:|---:|
+| 3 | 3 | 12 | 15 |
+| 5 | 5 | 18 | 21 |
+| 7 | 7 | 24 | 27 |
+| 8 | 8 | 27 | 30 |
 
 Joint positions are normalized from URDF limits to `[-1, 1]`; velocities are divided
 by their joint speed limits. `target_error` is expressed in the robot base frame and
@@ -299,20 +334,20 @@ Target (RigidBody3D, group: graspable)
 `RobotArm.target` points to `GraspPoint`, while `grasp_target_body` points to `Target`.
 The target is intentionally absent from `robot_obstacle`; finger contact must be legal.
 
-The XArm controls seven independent joints: six arm joints and the `grip_left` source
-joint. Mimic joints drive the remaining gripper mechanism.
+The XArm URDF exposes six independent actuators: five arm joints and the `grip_left`
+source joint. Mimic joints drive the remaining gripper mechanism.
 
 Its observation vector is:
 
 ```text
-7 joint positions
-7 joint velocities
+6 joint positions
+6 joint velocities
 3 target error values
-7 previous actions
+6 previous actions
 6 target linear/angular velocity values
 3 grasp-state values
 ------------------
-33 observations
+30 observations
 ```
 
 Grasp state contains normalized gripper closure, whether the object is attached, and
@@ -517,7 +552,80 @@ does not use the Metis async collector and does not support the demonstration-aw
 `td3_bc`, `ddpg_bc`, or `ddpgfd` trainers described below. Keep the physics, seeds,
 transition budget, and evaluation poses equal when comparing results.
 
-## 14. Use planners and demonstrations
+## 14. Validate a target pose manually
+
+Before changing a reward or starting another long run, place the arm in a pose that you
+consider correct. This is a direct way to verify the TCP frame, target frame, joint
+limits, success thresholds, and the numbers reported to Python.
+
+Run the scenario from the Godot editor, or start it directly:
+
+```bash
+/path/to/Godot \
+  --path godot \
+  res://scenarios/robotarms/XarmScenario.tscn
+```
+
+The URDF arm adapter keeps manual control disabled during normal training. Press `F2`
+in the running scenario to take control:
+
+| Key | Action |
+| --- | --- |
+| `F2` | Enable or disable manual control |
+| `1` to `5` | Select a controlled XArm joint by its action-space index |
+| `Q` / `E` | Move the selected joint in the negative or positive direction |
+| `Shift` + `Q` / `E` | Move at the fine-adjustment speed |
+| `Space` | Stop every joint immediately |
+| `R` | Clear a collision stop and continue from the current pose |
+| `Home` | Restore the configured home joint positions |
+| `P` | Print the complete pose diagnostics to the Godot output |
+| `F9` | Save a screenshot and matching JSON diagnostics |
+| `H` | Print the controls again |
+
+The overlay shows the selected URDF joint, every joint angle, TCP-to-target distance,
+orientation error, and maximum joint speed. `manual_command_scale` and
+`manual_fine_scale` are exported by `URDFRobotArmAgentBody`, so reduce them in the
+Inspector when validating a real robot's final alignment.
+
+A detected collision still stops the arm. Press `R`, then immediately hold the
+appropriate `Q` or `E` direction to move away from the contact. Metis temporarily
+suppresses collision termination for `manual_recovery_grace_physics_frames` while
+keeping the URDF joint limits active. If the geometry remains trapped or the correct
+escape direction is unclear, press `Home` instead.
+
+Use `P` when the hand looks correct. The log is enclosed by
+`[METIS_ARM_REFERENCE_BEGIN]` and `[METIS_ARM_REFERENCE_END]` and contains:
+
+- joint positions in radians and degrees, velocities, commands, and URDF limits;
+- world-space TCP and target positions, quaternions, and local `+X`, `+Y`, `+Z` axes;
+- position error in world and robot-base coordinates;
+- shortest axis-angle orientation error;
+- raw pose, hold, motion, and joint-limit reward terms;
+- the active distance, orientation, speed, and hold thresholds.
+
+`F9` writes the same data beside a PNG under
+`user://manual_arm_captures`. Godot prints both absolute paths. Keeping the image and
+JSON together makes it possible to answer two different questions: whether the pose
+looks mechanically correct, and whether Metis describes that pose as correct.
+
+For a valid reference pose, expect all of the following:
+
+1. the TCP marker is at the intended grasp point;
+2. the logged tool and target axes express the intended approach direction;
+3. `position_error_m` and `orientation_error_deg` are below the active success limits;
+4. releasing the keys brings `max_joint_speed_rad_s` below its success limit;
+5. no joint lies outside the limits recorded in the JSON.
+
+If the pose looks right but the orientation error is close to `90` or `180` degrees,
+calibrate `EndEffector/ToolPose`; do not teach the policy to compensate for an incorrect
+frame. If the numbers look right but the mesh looks wrong, inspect the URDF visual
+origins and the imported skeleton or link transforms.
+
+The selected-joint controls coexist with the older `joint_0_negative`,
+`joint_0_positive`, and similar Input Map actions. The latter remain useful for
+dedicated control panels and custom demonstration devices.
+
+## 15. Use planners and demonstrations
 
 A static known workcell is also a motion-planning problem. Use a collision-aware planner
 as a baseline and as a source of demonstrations. For each trajectory:
@@ -543,8 +651,12 @@ python/.venv/bin/python python/recorder.py \
   --no-headless
 ```
 
-Add `joint_0_negative`, `joint_0_positive`, and so on to the Input Map. The adapter's
-`apply_manual_action()` uses these names and returns the applied vector to the recorder.
+For keyboard recording, select an XArm joint with `1` to `5` and command it with `Q`
+or `E`.
+The adapter's `apply_manual_action()` returns the normalized vector actually applied,
+so the recorder stores numeric actions rather than the special `"manual"` request.
+Per-joint actions named `joint_0_negative`, `joint_0_positive`, and so on remain
+supported when several joints must be mapped to a custom controller.
 
 Once the dataset covers varied targets and joint configurations, train TD3+BC:
 
@@ -573,7 +685,7 @@ The dataset's observation order and action size must match the live scene exactl
 [Manual demonstrations](../guides/manual-demonstrations.md) for validation and resume
 behavior.
 
-## 15. Cartesian control with IK
+## 16. Cartesian control with IK
 
 IK can make reaching easier by reducing the policy output to:
 
@@ -633,7 +745,7 @@ For grasping, position-only IK may be insufficient because the gripper orientati
 matters. Add orientation error and angular TCP commands only after the positional task
 is stable, then increase the action and observation dimensions explicitly.
 
-## 16. Run and inspect the policy
+## 17. Run and inspect the policy
 
 Normal evaluation resets after every terminal outcome:
 
@@ -671,7 +783,7 @@ python/.venv/bin/python python/run.py \
 make an unsafe collision valid. A real controller should stop and require an explicit
 safety recovery after contact.
 
-## 17. Randomize only measured uncertainty
+## 18. Randomize only measured uncertainty
 
 After the nominal task works, vary:
 
@@ -688,7 +800,7 @@ workcell has several known configurations, include a configuration descriptor or
 geometry query in the observation. Otherwise the policy sees identical inputs for
 states that require different safe paths.
 
-## 18. Export and deploy
+## 19. Export and deploy
 
 The trained Keras model maps a numeric vector to normalized actions. It does not contain
 the Godot sensors, joint ordering, frame transforms, scaling, IK solver, or safety
@@ -725,7 +837,7 @@ Move to hardware in stages:
 Promote a policy using separate thresholds for success, collision, minimum clearance,
 joint-limit margin, and execution time. Mean reward alone is not a deployment metric.
 
-## 19. When Godot is the wrong physics engine
+## 20. When Godot is the wrong physics engine
 
 Godot is a useful environment for joint-position or velocity tasks, known geometry,
 and arcade or assisted grasp logic. Consider MuJoCo, robosuite, or another robotics
@@ -740,7 +852,7 @@ simulator when the result depends on:
 Metis can still organize the policy contract and training workflow, but the simulator
 must be credible for the behavior being transferred.
 
-## 20. Recommended order of work
+## 21. Recommended order of work
 
 1. Import one robot and verify joint order, sign, limits, and mimic behavior.
 2. Calibrate base, TCP, collision shapes, and the fixed workcell.

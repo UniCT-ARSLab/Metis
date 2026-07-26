@@ -9,10 +9,8 @@ func as_node3d(
 		parent_node: Node3D,
 		owner_node: Node3D) -> GodotRobot:
 	var start_time = Time.get_ticks_msec()
+	source_path = URDFUtils.normalize_file_path(source_path)
 	var robot: URDFRobot = parse(source_path)
-	if source_path.begins_with("uid://"):
-		var id = ResourceUID.text_to_id(source_path)
-		source_path = ResourceUID.get_id_path(id)
 	print("parsing " + source_path)
 	if not robot:
 		push_error("No URDFRobot given")
@@ -32,6 +30,7 @@ func as_node3d(
 	return robot_node
 
 func parse(source_path: String) -> URDFRobot:
+	source_path = URDFUtils.normalize_file_path(source_path)
 	var parser = XMLParser.new()
 	var err = parser.open(source_path)
 	if err != OK:

@@ -4,13 +4,17 @@ extends Node3D
 # making it easier to modify/extend the robot
 
 @export_group("URDF File")
-@export_file("*.urdf", "*.xml") var urdf_file_path: String
+@export_file("*.urdf", "*.xml") var urdf_file_path: String:
+	set(value):
+		urdf_file_path = URDFUtils.normalize_file_path(value)
 
 @export_tool_button("Reload robot", "Godot") var _load_urdf_button = _load_urdf
 
 @export_group("Package Directory")
 # Change "package://robot_description/meshes/..." to "res://urdf/..."
-@export_dir var package_folder: String = "res://"
+@export_dir var package_folder: String = "res://":
+	set(value):
+		package_folder = URDFUtils.normalize_file_path(value)
 
 @export_group("Transform")
 @export var _position: Vector3 = Vector3(0, 0, 0)

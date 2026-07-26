@@ -12,5 +12,5 @@ dest_files=["res://.godot/imported/xarm_fixed.urdf-7462e43693d07f5ced660376fd9ae
 
 [params]
 
-package_folder="/home/fedyfausto/Lavoro/GodotAgents/godot-gymnasium-keras-marl/godot/assets/urdf"
+package_folder="res://assets/urdf"
 scale=1.0

@@ -52,6 +52,11 @@ script = ExtResource("1_m16lm")
 target_spawns = [NodePath("Spawns/Marker3D"), NodePath("Spawns/Marker3D2"), NodePath("Spawns/Marker3D3"), NodePath("Spawns/Marker3D4"), NodePath("Spawns/Marker3D5"), NodePath("Spawns/Marker3D6"), NodePath("Spawns/Marker3D7"), NodePath("Spawns/Marker3D8")]
 target_spawns_root = NodePath("Spawns")
 relocate_target_during_training = false
+continuous_target_sampling = false
+target_yaw_randomization_degrees = 0.0
+late_joint_jitter_degrees = 0.0
+hold_curriculum_stage1_until = 999999
+hold_curriculum_stage2_until = 999999
 
 [node name="BridgeServer" type="Node" parent="." unique_id=831052347]
 script = ExtResource("1_jfawp")

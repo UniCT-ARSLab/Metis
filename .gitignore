@@ -4,6 +4,7 @@
 .claude
 checkpoints
 .runtime/
+.research/
 
 *.h5
 *.log

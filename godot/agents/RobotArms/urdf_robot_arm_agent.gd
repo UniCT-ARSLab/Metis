@@ -42,10 +42,20 @@ signal target_pose_relocated
 @export var success_max_joint_speed := 0.15
 ## Reach-and-HOLD shaping: the "near target" zone (metres) where the hold reward/penalty terms
 ## activate. Away from the target they are zero so the fast reach stays unpenalised.
-@export var near_target_distance := 0.10
+@export var near_target_distance := 0.20
+## SEPARATE, much tighter distance that gates the stillness rewards (hold_stillness + near-target
+## speed penalty). Sharing near_target_distance let the arm collect ~0.1/step for stopping at 19cm
+## without ever reaching the 4cm success threshold -- a "barely enter the zone and camp still"
+## exploit. Stillness must only pay right at the target; pose shaping (near_target_distance) may
+## start much further out. Tie to success_distance-ish.
+@export var hold_activation_distance := 0.06
 ## Orientation range over which pose tracking shaping fades to zero.
 @export_range(1.0, 180.0, 0.1) var pose_reward_angle_degrees := 60.0
 ## Relative contribution of orientation to get_progress().
+## Progress (drives the telescoping ProgressDelta approach reward) mixes position + orientation.
+## Empirically THIS is what makes the arm learn orientation: it gives the orientation error a
+## dense approach signal over the full range from far away. Setting it to 0 (position-only) killed
+## orientation learning (arm nailed position, left orientation ~140deg). Position stays dominant.
 @export_range(0.0, 1.0, 0.01) var orientation_progress_weight := 0.25
 ## Joint speed (rad/s) at which the stillness reward decays to zero.
 @export var hold_stillness_speed_reference := 0.5
@@ -61,8 +71,20 @@ signal target_pose_relocated
 @export_flags_3d_physics var environment_collision_mask := 0xFFFFFFFF
 @export_range(1, 64, 1) var max_collision_results_per_shape := 8
 
-@export_category("Control")
+@export_category("Manual Control")
 @export var manual_control := false
+## Normalized velocity applied while using the selected-joint keyboard controls.
+@export_range(0.01, 1.0, 0.01) var manual_command_scale := 0.20
+## Multiplier applied while Shift is held for precise final alignment.
+@export_range(0.01, 1.0, 0.01) var manual_fine_scale := 0.20
+@export_range(0, 8, 1) var manual_selected_joint := 0
+@export var manual_debug_overlay := true
+@export_dir var manual_capture_directory := "user://manual_arm_captures"
+## Physics frames during which collision termination is suppressed after a manual recovery.
+## This lets the operator move the arm out of an already-overlapping configuration.
+@export_range(1, 300, 1) var manual_recovery_grace_physics_frames := 60
+
+@export_category("Control")
 @export var auto_configure_action_size := true
 
 @onready var agent: Agent = $Agent
@@ -83,6 +105,10 @@ var _success_frames := 0
 var _training_active := true
 var _last_target_pose_transform := Transform3D.IDENTITY
 var _has_last_target_pose_transform := false
+var _manual_overlay_layer: CanvasLayer
+var _manual_overlay_label: Label
+var _manual_overlay_elapsed := 0.0
+var _manual_collision_grace_frames := 0
 
 
 func _ready() -> void:
@@ -115,9 +141,20 @@ func _ready() -> void:
 	_robot.reset_joint_positions(_build_home_positions())
 	_update_end_effector()
 	_capture_target_pose_transform()
+	manual_selected_joint = clampi(
+		manual_selected_joint, 0, maxi(get_joint_count() - 1, 0))
+	if manual_control:
+		_enable_manual_control()
 
 
-func _physics_process(_delta: float) -> void:
+func _physics_process(delta: float) -> void:
+	if _manual_collision_grace_frames > 0:
+		_manual_collision_grace_frames -= 1
+	if manual_control:
+		_manual_overlay_elapsed += delta
+		if _manual_overlay_elapsed >= 0.10:
+			_manual_overlay_elapsed = 0.0
+			_update_manual_overlay()
 	if not _training_active:
 		return
 	if manual_control and not _terminal:
@@ -135,6 +172,8 @@ func apply_action(action: Variant) -> Variant:
 	):
 		return apply_manual_action()
 
+	if manual_control:
+		_hide_manual_overlay()
 	manual_control = false
 	var values := agent.decode_continuous_action(action)
 	for index in range(get_joint_count()):
@@ -156,12 +195,373 @@ func apply_manual_action() -> Array:
 	for index in range(get_joint_count()):
 		var negative := StringName("joint_%d_negative" % index)
 		var positive := StringName("joint_%d_positive" % index)
-		values[index] = (
-			Input.get_action_strength(positive)
-			- Input.get_action_strength(negative))
+		var legacy_axis := 0.0
+		if InputMap.has_action(negative):
+			legacy_axis -= Input.get_action_strength(negative)
+		if InputMap.has_action(positive):
+			legacy_axis += Input.get_action_strength(positive)
+		values[index] = legacy_axis
+
+	if get_joint_count() > 0:
+		var selected_axis := Input.get_axis(
+			"robot_joint_negative", "robot_joint_positive")
+		if not is_zero_approx(selected_axis):
+			values[manual_selected_joint] = selected_axis
+
+	var scale := manual_command_scale
+	if Input.is_key_pressed(KEY_SHIFT):
+		scale *= manual_fine_scale
+	for index in range(values.size()):
+		values[index] = clampf(float(values[index]) * scale, -1.0, 1.0)
 	var applied: Array = apply_action(values)
 	manual_control = true
 	return applied
+
+
+func _unhandled_key_input(event: InputEvent) -> void:
+	if not event is InputEventKey or not event.pressed or event.echo:
+		return
+	var key_event := event as InputEventKey
+	var keycode := (
+		key_event.physical_keycode
+		if key_event.physical_keycode != KEY_NONE
+		else key_event.keycode)
+
+	if keycode == KEY_F2:
+		set_manual_control_enabled(not manual_control)
+		get_viewport().set_input_as_handled()
+		return
+	if not manual_control:
+		return
+
+	if keycode >= KEY_1 and keycode <= KEY_9:
+		var joint_index := int(keycode) - int(KEY_1)
+		if joint_index < get_joint_count():
+			_select_manual_joint(joint_index)
+			get_viewport().set_input_as_handled()
+		return
+
+	match keycode:
+		KEY_SPACE:
+			_stop_manual_motion()
+		KEY_HOME:
+			_reset_manual_home()
+		KEY_R:
+			resume_manual_from_current_pose()
+		KEY_P:
+			print_manual_pose_diagnostics()
+		KEY_F9:
+			capture_manual_reference()
+		KEY_H:
+			_print_manual_help()
+		_:
+			return
+	get_viewport().set_input_as_handled()
+
+
+func set_manual_control_enabled(enabled: bool) -> void:
+	if enabled:
+		_enable_manual_control()
+	else:
+		_disable_manual_control()
+
+
+func _enable_manual_control() -> void:
+	var was_blocked := _terminal or _collided
+	manual_control = true
+	set_training_active(true)
+	_terminal = false
+	_collided = false
+	_succeeded = false
+	_success_frames = 0
+	if was_blocked:
+		_manual_collision_grace_frames = manual_recovery_grace_physics_frames
+	_stop_manual_motion()
+	_ensure_manual_overlay()
+	_update_manual_overlay()
+	_print_manual_help()
+	_print_selected_manual_joint()
+
+
+func _disable_manual_control() -> void:
+	_stop_manual_motion()
+	manual_control = false
+	_hide_manual_overlay()
+	print("[METIS ARM MANUAL] Disabled.")
+
+
+func _select_manual_joint(index: int) -> void:
+	if get_joint_count() <= 0:
+		return
+	manual_selected_joint = clampi(index, 0, get_joint_count() - 1)
+	_stop_manual_motion()
+	_update_manual_overlay()
+	_print_selected_manual_joint()
+
+
+func _stop_manual_motion() -> void:
+	if _robot:
+		_robot.stop_all_joints()
+	for index in range(_commands.size()):
+		_commands[index] = 0.0
+		_previous_action[index] = 0.0
+
+
+func _reset_manual_home() -> void:
+	_pending_reset_offsets.clear()
+	reset_all(transform, false)
+	manual_control = true
+	_manual_collision_grace_frames = 0
+	_update_manual_overlay()
+	print("[METIS ARM MANUAL] Reset to the configured home joint positions.")
+
+
+func resume_manual_from_current_pose() -> void:
+	_terminal = false
+	_collided = false
+	_succeeded = false
+	_success_frames = 0
+	_training_active = true
+	_manual_collision_grace_frames = manual_recovery_grace_physics_frames
+	_stop_manual_motion()
+	_update_end_effector()
+	_capture_target_pose_transform()
+	agent.reset_observation_sources()
+	_update_manual_overlay()
+	print(
+		"[METIS ARM MANUAL] Resumed from the current pose with %d collision-grace "
+		% manual_recovery_grace_physics_frames
+		+ "physics frames. Hold Q/E immediately to move out of contact.")
+
+
+func _print_manual_help() -> void:
+	print(
+		"[METIS ARM MANUAL] F2 toggle | 1-%d select joint | " %
+		mini(get_joint_count(), 9)
+		+ "Q/E move -/+ | Shift fine | Space stop | R recover current pose | "
+		+ "Home reset | "
+		+ "P pose log | F9 screenshot + JSON")
+
+
+func _print_selected_manual_joint() -> void:
+	if not _robot or get_joint_count() <= 0:
+		return
+	var joint_name := _joint_names[manual_selected_joint]
+	var joint := _robot.urdf.get_joint(joint_name) if _robot.urdf else null
+	var limit_text := "unbounded"
+	if joint and joint.type == "revolute" and joint.limit:
+		limit_text = "[%.2f, %.2f] deg" % [
+			rad_to_deg(minf(joint.limit.lower, joint.limit.upper)),
+			rad_to_deg(maxf(joint.limit.lower, joint.limit.upper))]
+	print(
+		"[METIS ARM MANUAL] Selected joint %d/%d: %s position=%.3f rad (%.2f deg) "
+		% [
+			manual_selected_joint + 1,
+			get_joint_count(),
+			joint_name,
+			_robot.get_joint_position(joint_name),
+			rad_to_deg(_robot.get_joint_position(joint_name))]
+		+ "limits=%s" % limit_text)
+
+
+func _ensure_manual_overlay() -> void:
+	if not manual_debug_overlay:
+		return
+	if not _manual_overlay_layer:
+		_manual_overlay_layer = CanvasLayer.new()
+		_manual_overlay_layer.name = "ManualArmDiagnostics"
+		_manual_overlay_layer.layer = 100
+		add_child(_manual_overlay_layer)
+	if not _manual_overlay_label:
+		_manual_overlay_label = Label.new()
+		_manual_overlay_label.position = Vector2(16.0, 16.0)
+		_manual_overlay_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_manual_overlay_label.add_theme_font_size_override("font_size", 18)
+		_manual_overlay_label.add_theme_color_override(
+			"font_color", Color(0.92, 0.96, 1.0))
+		_manual_overlay_label.add_theme_color_override(
+			"font_outline_color", Color(0.02, 0.03, 0.04, 0.95))
+		_manual_overlay_label.add_theme_constant_override("outline_size", 6)
+		_manual_overlay_layer.add_child(_manual_overlay_label)
+	_manual_overlay_layer.visible = true
+
+
+func _hide_manual_overlay() -> void:
+	if _manual_overlay_layer:
+		_manual_overlay_layer.visible = false
+
+
+func _update_manual_overlay() -> void:
+	if not manual_control or not manual_debug_overlay:
+		_hide_manual_overlay()
+		return
+	_ensure_manual_overlay()
+	if not _manual_overlay_label or not _robot or get_joint_count() <= 0:
+		return
+
+	var joint_name := _joint_names[manual_selected_joint]
+	var positions: Array[String] = []
+	for name in _joint_names:
+		positions.append("%.1f" % rad_to_deg(_robot.get_joint_position(name)))
+	_manual_overlay_label.text = (
+		"MANUAL  J%d/%d  %s  command=%+.2f  state=%s\n"
+		% [
+			manual_selected_joint + 1,
+			get_joint_count(),
+			joint_name,
+			_commands[manual_selected_joint],
+			(
+				"RECOVERY"
+				if _manual_collision_grace_frames > 0
+				else ("BLOCKED" if _terminal else "READY"))]
+		+ "target error  %.4f m  %.2f deg  speed %.3f rad/s\n"
+		% [_target_distance(), rad_to_deg(_target_angle_error()), _max_joint_speed()]
+		+ "joints deg  [%s]" % ", ".join(positions))
+
+
+func print_manual_pose_diagnostics() -> void:
+	var diagnostics := get_manual_pose_diagnostics()
+	print("[METIS_ARM_REFERENCE_BEGIN]")
+	print(JSON.stringify(diagnostics, "\t", true, true))
+	print("[METIS_ARM_REFERENCE_END]")
+
+
+func capture_manual_reference() -> void:
+	var diagnostics := get_manual_pose_diagnostics()
+	var stamp := Time.get_datetime_string_from_system().replace(":", "-")
+	var directory := manual_capture_directory.trim_suffix("/")
+	var absolute_directory := ProjectSettings.globalize_path(directory)
+	var directory_error := DirAccess.make_dir_recursive_absolute(absolute_directory)
+	if directory_error != OK:
+		push_error(
+			"URDFRobotArmAgentBody: cannot create capture directory '%s' (error %d)." %
+				[absolute_directory, directory_error])
+		return
+
+	var base_path := directory.path_join("arm_reference_%s" % stamp)
+	var json_path := base_path + ".json"
+	var json_file := FileAccess.open(json_path, FileAccess.WRITE)
+	if not json_file:
+		push_error(
+			"URDFRobotArmAgentBody: cannot write '%s' (error %d)." %
+				[json_path, FileAccess.get_open_error()])
+		return
+	json_file.store_string(JSON.stringify(diagnostics, "\t", true, true))
+	json_file.close()
+
+	await RenderingServer.frame_post_draw
+	var screenshot := get_viewport().get_texture().get_image()
+	var png_path := base_path + ".png"
+	var screenshot_error := screenshot.save_png(png_path)
+	if screenshot_error != OK:
+		push_error(
+			"URDFRobotArmAgentBody: cannot save screenshot '%s' (error %d)." %
+				[png_path, screenshot_error])
+		return
+	print(
+		"[METIS ARM MANUAL] Reference captured: %s | %s" %
+			[ProjectSettings.globalize_path(png_path),
+			ProjectSettings.globalize_path(json_path)])
+
+
+func get_manual_pose_diagnostics() -> Dictionary:
+	var desired_pose := _target_pose_node()
+	var current_pose := _tool_pose_node()
+	var joints: Array[Dictionary] = []
+	if _robot:
+		for index in range(get_joint_count()):
+			var joint_name := _joint_names[index]
+			var joint := _robot.urdf.get_joint(joint_name) if _robot.urdf else null
+			var joint_data := {
+				"index": index,
+				"name": joint_name,
+				"position_rad": _robot.get_joint_position(joint_name),
+				"position_deg": rad_to_deg(_robot.get_joint_position(joint_name)),
+				"velocity_rad_s": _robot.get_joint_velocity(joint_name),
+				"command_normalized": _commands[index],
+				"max_velocity_rad_s": _joint_max_speed(index),
+			}
+			if joint and joint.type == "revolute" and joint.limit:
+				joint_data["lower_rad"] = minf(joint.limit.lower, joint.limit.upper)
+				joint_data["upper_rad"] = maxf(joint.limit.lower, joint.limit.upper)
+				joint_data["lower_deg"] = rad_to_deg(
+					minf(joint.limit.lower, joint.limit.upper))
+				joint_data["upper_deg"] = rad_to_deg(
+					maxf(joint.limit.lower, joint.limit.upper))
+			joints.append(joint_data)
+
+	var position_error_world := Vector3.ZERO
+	var position_error_base := Vector3.ZERO
+	if desired_pose and current_pose:
+		position_error_world = (
+			desired_pose.global_position - current_pose.global_position)
+		position_error_base = (
+			global_transform.basis.inverse() * position_error_world)
+
+	return {
+		"timestamp": Time.get_datetime_string_from_system(),
+		"agent": str(name),
+		"manual_selected_joint": manual_selected_joint,
+		"manual_selected_joint_name": (
+			_joint_names[manual_selected_joint]
+			if get_joint_count() > 0
+			else ""),
+		"joints": joints,
+		"tool_pose_global": (
+			_transform_diagnostics(current_pose.global_transform)
+			if current_pose
+			else {}),
+		"target_pose_global": (
+			_transform_diagnostics(desired_pose.global_transform)
+			if desired_pose
+			else {}),
+		"position_error_world": _vector3_diagnostics(position_error_world),
+		"position_error_base": _vector3_diagnostics(position_error_base),
+		"position_error_m": _target_distance(),
+		"orientation_error_axis_angle_normalized": _vector3_diagnostics(
+			_target_orientation_error_vector()),
+		"orientation_error_deg": rad_to_deg(_target_angle_error()),
+		"max_joint_speed_rad_s": _max_joint_speed(),
+		"hold_frames": _success_frames,
+		"pose_held": _is_pose_held(),
+		"target_acquired": _succeeded,
+		"terminal": _terminal,
+		"collided": _collided,
+		"manual_collision_grace_frames": _manual_collision_grace_frames,
+		"reward_terms_raw": {
+			"pose_tracking": get_pose_tracking_reward(),
+			"hold_stillness": get_hold_stillness_reward(),
+			"hold_progress": get_hold_progress_reward(),
+			"near_target_speed": get_near_target_speed_penalty(),
+			"joint_motion": get_joint_motion_penalty(),
+			"joint_limit": get_joint_limit_penalty(),
+		},
+		"success_thresholds": {
+			"distance_m": success_distance,
+			"orientation_deg": success_angle_degrees,
+			"hold_physics_frames": success_hold_physics_frames,
+			"max_joint_speed_rad_s": success_max_joint_speed,
+		},
+		"tool_pose_path": str(tool_pose_path),
+		"target_pose_path": str(target_pose.get_path()) if target_pose else "",
+	}
+
+
+func _transform_diagnostics(value: Transform3D) -> Dictionary:
+	var basis := value.basis.orthonormalized()
+	var rotation := basis.get_rotation_quaternion().normalized()
+	return {
+		"position": _vector3_diagnostics(value.origin),
+		"quaternion_xyzw": [
+			rotation.x, rotation.y, rotation.z, rotation.w],
+		"axis_x": _vector3_diagnostics(basis.x),
+		"axis_y": _vector3_diagnostics(basis.y),
+		"axis_z": _vector3_diagnostics(basis.z),
+	}
+
+
+func _vector3_diagnostics(value: Vector3) -> Array[float]:
+	return [value.x, value.y, value.z]
 
 
 func reset_all(original_transform: Variant, reset_rewards := true) -> void:
@@ -353,22 +753,17 @@ func get_near_target_speed_penalty() -> float:
 
 
 func get_pose_tracking_reward() -> float:
-	# Dense pose reward = a broad APPROACH BEACON plus a tight both-tight POSE bonus.
-	# History: a pure product starved orientation while the axis was wrong; a pure additive let the
-	# policy abandon position; a pos-primary form went to ZERO beyond near_target_distance (no
-	# gradient to approach) and pinned the run. Fix: the `approach` term is graded over the whole
-	# workspace so it NEVER zeroes and always pulls the tool toward the target from any distance;
-	# the second term is the fine pose (position primary within near_target, orientation modulating)
-	# and pays out only once genuinely close. Both position AND orientation are needed for full value.
-	var approach := 1.0 - clampf(
-		_target_distance() / maxf(workspace_scale, 0.001), 0.0, 1.0)
+	# Orientation is GATED by proximity (multiplied by position_score), so orienting-while-far pays
+	# NOTHING -- an earlier additive `0.4*orient` was paid every step even at 23cm, so the policy
+	# learned the profitable INCOMPLETE strategy of orienting far and never approaching. The FAR
+	# orientation-learning signal instead comes from orientation_progress_weight (improvement-based
+	# via ProgressDelta -> no camp-and-collect). position_score is graded over near_target_distance
+	# (now 0.20m) so it is DENSE well beyond 10cm and its monotone pull always favours getting closer
+	# over camping. Full value needs BOTH position tight AND orientation aligned (joint).
 	var position_score := 1.0 - clampf(
 		_target_distance() / maxf(near_target_distance, 0.001), 0.0, 1.0)
-	var orientation_score := 1.0 - clampf(
-		_target_angle_error() / maxf(deg_to_rad(pose_reward_angle_degrees), 0.001),
-		0.0,
-		1.0)
-	return 0.3 * approach + 0.7 * position_score * (0.3 + 0.7 * orientation_score)
+	var orientation_full := 1.0 - clampf(_target_angle_error() / PI, 0.0, 1.0)
+	return position_score * (0.3 + 0.7 * orientation_full)
 
 
 func get_hold_progress_reward() -> float:
@@ -637,6 +1032,7 @@ func _collect_collision_shapes(node: Node) -> void:
 func _check_environment_collisions() -> void:
 	if (
 		_terminal
+		or (manual_control and _manual_collision_grace_frames > 0)
 		or not auto_detect_environment_collisions
 		or _robot_collision_shapes.is_empty()
 		or not is_inside_tree()
@@ -730,8 +1126,11 @@ func _basis_angle_between(first: Basis, second: Basis) -> float:
 
 
 func _is_near_target_pose() -> bool:
+	# Gates the STILLNESS rewards (hold_stillness + near-target speed penalty). Uses the tight
+	# hold_activation_distance, NOT the wide pose-shaping near_target_distance, so the arm cannot get
+	# paid for freezing far from the target -- stillness only matters right at the goal.
 	return (
-		_target_distance() <= near_target_distance
+		_target_distance() <= hold_activation_distance
 		and _target_angle_error() <= deg_to_rad(pose_reward_angle_degrees)
 	)
 

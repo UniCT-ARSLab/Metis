@@ -89,6 +89,9 @@ func set_joint_target_velocity(joint_name: String, target_velocity: float) -> bo
 	if joint_data.is_mimic():
 		push_warning("URDF mimic joint '%s' cannot be commanded directly." % joint_name)
 		return false
+	if joint_data.type not in ["revolute", "continuous"]:
+		push_warning("URDF fixed joint '%s' cannot be commanded." % joint_name)
+		return false
 	var velocity := _clamp_joint_velocity(joint_data, target_velocity)
 	_joint_velocity_targets[joint_name] = velocity
 	if control_mode == ControlMode.KINEMATIC:
@@ -114,6 +117,9 @@ func set_joint_target_position(
 		return false
 	if joint_data.is_mimic():
 		push_warning("URDF mimic joint '%s' cannot be commanded directly." % joint_name)
+		return false
+	if joint_data.type not in ["revolute", "continuous"]:
+		push_warning("URDF fixed joint '%s' cannot be commanded." % joint_name)
 		return false
 	var position := _clamp_joint_position(joint_data, target_position)
 	_joint_positions[joint_name] = position

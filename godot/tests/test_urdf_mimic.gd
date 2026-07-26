@@ -24,7 +24,13 @@ func _validate_parsed_xarm(robot: URDFRobot) -> bool:
 	var actuated := robot.get_actuated_joint_names()
 	var mimics := robot.get_mimic_joints()
 	var grip_right := robot.get_joint("grip_right")
-	var passed := actuated.size() == 7 and mimics.size() == 5
+	var wrist_mount := robot.get_joint("wrist_roll")
+	var passed := actuated.size() == 6 and mimics.size() == 5
+	passed = passed and not actuated.has("wrist_roll")
+	passed = passed and wrist_mount != null
+	passed = passed and wrist_mount.type == "fixed"
+	passed = passed and wrist_mount.origin_rpy.is_equal_approx(
+		Vector3(0.0, PI / 2.0, 0.0))
 	passed = passed and actuated.has("grip_left")
 	passed = passed and not actuated.has("grip_right")
 	passed = passed and grip_right != null

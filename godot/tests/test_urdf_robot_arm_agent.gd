@@ -24,10 +24,10 @@ func _initialize() -> void:
 	var initial_tcp := end_effector.global_position
 	var initial_link_position := tcp_link.global_position if tcp_link else Vector3.ZERO
 	var passed := agent.get_action_type() == "continuous"
-	passed = passed and agent.get_action_size() == 6
-	passed = passed and agent.get_observation_size() == 24
-	passed = passed and body.get_joint_count() == 6
-	passed = passed and robot.get_actuated_joint_names().size() == 7
+	passed = passed and agent.get_action_size() == 5
+	passed = passed and agent.get_observation_size() == 21
+	passed = passed and body.get_joint_count() == 5
+	passed = passed and robot.get_actuated_joint_names().size() == 6
 	passed = passed and not body.has_collided()
 	var tool_axis_alignment := tool_pose.global_basis.x.normalized().dot(
 		tcp_link.global_basis.y.normalized())
@@ -40,7 +40,7 @@ func _initialize() -> void:
 				and link_node.freeze
 				and link_node.freeze_mode == RigidBody3D.FREEZE_MODE_KINEMATIC)
 
-	body.apply_action([0.0, 1.0, 0.0, 0.0, 0.0, 0.0])
+	body.apply_action([0.0, 1.0, 0.0, 0.0, 0.0])
 	for _index in range(4):
 		await physics_frame
 	var moved_position := robot.get_joint_position("xarm_5_joint")
@@ -54,7 +54,7 @@ func _initialize() -> void:
 	var mimic_tendon_ok := is_equal_approx(
 		robot.get_joint_position("tendon_left"), -0.4)
 
-	var reset_offsets := [0.05, 0.0, 0.0, 0.0, 0.0, 0.0]
+	var reset_offsets := [0.05, 0.0, 0.0, 0.0, 0.0]
 	body.set_reset_joint_offsets(reset_offsets)
 	body.reset_all(body.transform)
 	await physics_frame
@@ -62,9 +62,9 @@ func _initialize() -> void:
 	passed = passed and is_equal_approx(reset_position, 0.05)
 
 	agent.reset_reward({"body": body})
-	body.apply_action([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+	body.apply_action([0.0, 0.0, 0.0, 0.0, 0.0])
 	agent.get_reward({"body": body})
-	body.apply_action([1.0, -1.0, 1.0, -1.0, 1.0, -1.0])
+	body.apply_action([1.0, -1.0, 1.0, -1.0, 1.0])
 	agent.get_reward({"body": body})
 	var reward_terms := agent.get_reward_terms()
 	var reward_terms_ok := (
@@ -79,7 +79,7 @@ func _initialize() -> void:
 	var home_reset_ok := is_zero_approx(
 		robot.get_joint_position("xarm_5_joint"))
 	passed = passed and home_reset_ok
-	passed = passed and agent.get_observation_size() == 24
+	passed = passed and agent.get_observation_size() == 21
 
 	var moving_target := Node3D.new()
 	root.add_child(moving_target)

@@ -59,7 +59,7 @@ func update_joint(
 			axis_func, Generic6DOFJoint3D.PARAM_LINEAR_LOWER_LIMIT, 0.0)
 		self.call(
 			axis_func, Generic6DOFJoint3D.PARAM_LINEAR_UPPER_LIMIT, 0.0)
-	for axis_func in ["set_param_x", "set_param_y"]:
+	for axis_func in ["set_param_x", "set_param_y", "set_param_z"]:
 		self.call(
 			axis_func, Generic6DOFJoint3D.PARAM_ANGULAR_LOWER_LIMIT, 0.0)
 		self.call(
@@ -81,8 +81,9 @@ func update_joint(
 		self.set_param_z(
 			Generic6DOFJoint3D.PARAM_ANGULAR_UPPER_LIMIT, 0.0)
 
+	var is_movable := joint.type in ["revolute", "continuous"]
 	self.set_flag_z(
-		Generic6DOFJoint3D.FLAG_ENABLE_MOTOR, true)
+		Generic6DOFJoint3D.FLAG_ENABLE_MOTOR, is_movable)
 	self.set_param_z(
 		Generic6DOFJoint3D.PARAM_ANGULAR_MOTOR_TARGET_VELOCITY, 0.0)
 

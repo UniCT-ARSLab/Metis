@@ -6,11 +6,10 @@ static func _clean_path(
 		package_path: String,
 		options: Dictionary,
 		source_path: String) -> String:
-	var clean_path = package_path.replace("package://", "")
-	if options.has("package_folder"):
-		return options["package_folder"].path_join(clean_path)
-	# Fallback: try to find it relative to the URDF file
-	return source_path.get_base_dir().path_join(clean_path)
+	return URDFUtils.resolve_reference_path(
+		package_path,
+		source_path,
+		str(options.get("package_folder", "")))
 
 static func load_resource(
 		path: String, opts: Dictionary, source_path: String) -> Resource:
