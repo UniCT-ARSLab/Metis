@@ -148,7 +148,11 @@ func _on_episode_reset_started(_seed:int) -> void:
 	else:
 		joint_jitter_degrees = late_joint_jitter_degrees
 		arm.success_distance = 0.02
-		arm.success_angle_degrees = 12.0
+		# Relaxed from 12deg: with wrist_roll fixed (5 effective DOF) the arm reaches an arbitrary
+		# full-volume position at <2cm ~86% of the time but can only orient within 12deg ~36% (it is
+		# ~90% within 20deg). 12deg was a hard KINEMATIC ceiling on arbitrary poses, not a training
+		# gap; 20deg is within reach across the volume and is tight enough for a parallel-jaw grasp.
+		arm.success_angle_degrees = 20.0
 
 	# Reach-and-HOLD curriculum: require a progressively LONGER hold at a TIGHTER stillness threshold.
 	# The reach (success_distance) is already at its tightest by this episode range; this teaches the
