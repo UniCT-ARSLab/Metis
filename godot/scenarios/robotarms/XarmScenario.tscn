@@ -11,7 +11,7 @@
 [ext_resource type="Script" uid="uid://bmmjchpjospjo" path="res://scripts/agent/scenario_reward_components/ProgressDeltaScenarioReward.gd" id="8_ywys0"]
 [ext_resource type="Script" uid="uid://5rg0xs5vr24r" path="res://scripts/agent/scenario_reward_components/ProgressStallScenarioReward.gd" id="9_qy6q5"]
 [ext_resource type="Script" uid="uid://b0mpnu83er6il" path="res://scripts/agent/scenario_reward_components/EventScenarioReward.gd" id="10_ts88v"]
-[ext_resource type="Script" path="res://scripts/agent/scenario_reward_components/ProximityScenarioReward.gd" id="11_ttprox"]
+[ext_resource type="Script" uid="uid://cftry1v3ck1xm" path="res://scripts/agent/scenario_reward_components/ProximityScenarioReward.gd" id="11_ttprox"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_ko6j8"]
 sky_horizon_color = Color(0.66224277, 0.6717428, 0.6867428, 1)
@@ -51,14 +51,12 @@ size = Vector3(0.13, 0.12, 0.24)
 script = ExtResource("1_m16lm")
 target_spawns = [NodePath("Spawns/Marker3D"), NodePath("Spawns/Marker3D2"), NodePath("Spawns/Marker3D3"), NodePath("Spawns/Marker3D4"), NodePath("Spawns/Marker3D5"), NodePath("Spawns/Marker3D6"), NodePath("Spawns/Marker3D7"), NodePath("Spawns/Marker3D8")]
 target_spawns_root = NodePath("Spawns")
-relocate_target_during_training = false
-continuous_target_sampling = true
 continuous_target_sampling_start_episode = 3600
 spatial_curriculum_start_episode = 3600
 spatial_curriculum_full_episode = 6000
-spatial_curriculum_start_radius = 0.01
-target_yaw_randomization_degrees = 0.0
 late_joint_jitter_degrees = 0.0
+target_yaw_randomization_degrees = 0.0
+relocate_target_during_training = false
 hold_curriculum_stage1_until = 2400
 hold_curriculum_stage2_until = 3200
 
@@ -125,11 +123,8 @@ metadata/_custom_type_script = "uid://b0mpnu83er6il"
 
 [node name="Proximity" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=35669900]
 script = ExtResource("11_ttprox")
-weight = 0.1
-proximity_scale = 1.0
-proximity_threshold = 0.8
-proximity_power = 2.0
 term_name = "proximity"
+weight = 0.1
 
 [node name="Environment" type="Node3D" parent="." unique_id=2095345585]
 
@@ -158,11 +153,11 @@ target = NodePath("../Target")
 target_pose = NodePath("../Target/GraspPose")
 
 [node name="Target" type="MeshInstance3D" parent="." unique_id=1913792666]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.21230404, 0.13049985, 0.016337678)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.31774482, 0.19755316, -0.012032464)
 mesh = SubResource("SphereMesh_jfawp")
 surface_material_override/0 = SubResource("StandardMaterial3D_w0qjo")
 
-[node name="GraspPose" type="Marker3D" parent="Target"]
+[node name="GraspPose" type="Marker3D" parent="Target" unique_id=1111347321]
 
 [node name="Workcell" type="Node3D" parent="." unique_id=637885706]
 
