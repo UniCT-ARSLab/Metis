@@ -227,8 +227,10 @@ func get_ball_velocity_observation() -> Vector2:
 	return (Vector2(local.x, local.z) / 15.0).limit_length(1.0)
 
 
-func get_goal_direction_observation(opponent: bool) -> Vector2:
-	var goal := opponent_goal if opponent else own_goal
+# `which` is "opponent" or "own". MethodObservationSource binds a STRING argument
+# (bind_string_arg), so the same method serves both goal nodes.
+func get_goal_direction_observation(which: String) -> Vector2:
+	var goal := opponent_goal if which == "opponent" else own_goal
 	if goal == null:
 		return Vector2.ZERO
 	var local := global_transform.basis.inverse() * (goal.global_position - global_position)
@@ -236,8 +238,8 @@ func get_goal_direction_observation(opponent: bool) -> Vector2:
 	return flat.normalized() if flat.length() > 0.0001 else Vector2.ZERO
 
 
-func get_goal_distance_observation(opponent: bool) -> float:
-	var goal := opponent_goal if opponent else own_goal
+func get_goal_distance_observation(which: String) -> float:
+	var goal := opponent_goal if which == "opponent" else own_goal
 	if goal == null:
 		return 0.0
 	return clampf(global_position.distance_to(goal.global_position) / distance_scale, 0.0, 1.0)
@@ -249,10 +251,73 @@ func get_ball_in_range_observation() -> float:
 
 func get_kick_ready_observation() -> float:
 	return 1.0 if _cooldown_left <= 0.0 else 0.0
+
+
+# Previous input (echoes last decoded action so the policy sees its own command history).
+func get_move_input_observation() -> float:
+	return _move_input
+
+
+func get_rotation_input_observation() -> float:
+	return _rotation_input
+
+
+func get_kick_input_observation() -> float:
+	return _kick_input
+
+
+# TeamRaycastObservationSource calls this to classify rays as ally vs enemy.
+func get_team_id() -> int:
+	return team_id
 ```
 
-Bind the Boolean argument on the goal observation nodes so the same methods can serve
-both goals. Use `TeamRaycastObservationSource` for ally and enemy channels.
+`BodySpeed` and `TeamVision` are the only observations NOT produced by these methods:
+`BodySpeedObservationSource` derives the two body-motion values from the CharacterBody3D
+`velocity`, and `TeamRaycastObservationSource` reads the `VisionSensors` raycasts.
+
+### Wire each observation node
+
+Every `MethodObservationSource` needs `observation_name`, `method_name`, and — for the
+goals — `bind_string_arg`. Leave `source_path` empty so it resolves to the player body.
+The full mapping to the 24-value contract:
+
+| Node | Source type | Config | Size |
+| --- | --- | --- | ---: |
+| `BodySpeed` | `BodySpeedObservationSource` | `speed_scale = 20.0` (forward + absolute) | 2 |
+| `MoveInput` | `MethodObservationSource` | `method_name = get_move_input_observation` | 1 |
+| `RotationInput` | `MethodObservationSource` | `method_name = get_rotation_input_observation` | 1 |
+| `KickInput` | `MethodObservationSource` | `method_name = get_kick_input_observation` | 1 |
+| `BallPosition` | `MethodObservationSource` | `method_name = get_ball_relative_position_observation` | 2 |
+| `BallVelocity` | `MethodObservationSource` | `method_name = get_ball_velocity_observation` | 2 |
+| `OpponentGoalDirection` | `MethodObservationSource` | `method_name = get_goal_direction_observation`, `bind_string_arg = "opponent"` | 2 |
+| `OpponentGoalDistance` | `MethodObservationSource` | `method_name = get_goal_distance_observation`, `bind_string_arg = "opponent"` | 1 |
+| `OwnGoalDirection` | `MethodObservationSource` | `method_name = get_goal_direction_observation`, `bind_string_arg = "own"` | 2 |
+| `OwnGoalDistance` | `MethodObservationSource` | `method_name = get_goal_distance_observation`, `bind_string_arg = "own"` | 1 |
+| `BallInRange` | `MethodObservationSource` | `method_name = get_ball_in_range_observation` | 1 |
+| `KickReady` | `MethodObservationSource` | `method_name = get_kick_ready_observation` | 1 |
+| `TeamVision` | `TeamRaycastObservationSource` | see below | 7 |
+
+`TeamVision` (`TeamRaycastObservationSource`) config:
+
+```text
+team_method_name            = "get_team_id"
+enemy_visible_observation_name = "enemy_visible"          # 1 value
+enemy_signal_observations = {                              # 3 values
+    "enemy_left":   NodePath("../../VisionSensors/VisionLeft"),
+    "enemy_center": NodePath("../../VisionSensors/VisionCenter"),
+    "enemy_right":  NodePath("../../VisionSensors/VisionRight"),
+}
+ally_signal_observations  = {                              # 3 values
+    "ally_left":    NodePath("../../VisionSensors/VisionLeft"),
+    "ally_center":  NodePath("../../VisionSensors/VisionCenter"),
+    "ally_right":   NodePath("../../VisionSensors/VisionRight"),
+}
+```
+
+The three raycasts are shared between the enemy and ally channels; the source reports a
+hit on a channel only when the ray strikes a player whose team matches that channel.
+Observation order follows node order in `ObservationSystem`, so keep the nodes in the
+same order as the contract table (2 + 1 + 1 + 1 + 2 + 2 + 2 + 1 + 2 + 1 + 1 + 1 + 7 = 24).
 
 ## 7. Configure the ball and field
 

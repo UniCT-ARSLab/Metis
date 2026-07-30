@@ -425,8 +425,16 @@ their imported collision volumes overlap in mechanically valid poses. Treat ever
 exception as calibration data. An ignore list should document an expected mechanical
 contact, not hide a poor collision model.
 
-Use `get_last_collision_info()` while debugging to see whether the event came from an
-environment pair or a self-collision pair.
+Use `get_last_collision_details()` while debugging to see whether the event came from
+an environment query, a self-body query, a safety volume, or an explicit report.
+Enable `collision_debug` to print the querying link, collision shape, collider path,
+physics frame, and whether the arm had already reached the target. Keep
+`self_collision_debug` for the narrower self-body calibration trace.
+
+The trainer reports collision timing as `before/at/after` success. In a continuous
+tracking task, `finish=1 collision=1` can mean that the arm reached and held the pose
+correctly, then hit the workcell later in the same episode. It does not by itself prove
+that the target pose is colliding.
 
 ## 11. Reset the target deterministically
 
@@ -445,10 +453,10 @@ target is dragged between them.
 With `continuous_target_sampling=true`, the markers instead delimit an axis-aligned
 training volume. Once `continuous_target_sampling_start_episode` is reached, reset draws
 coordinates throughout that volume. This reduces memorization and makes held-out
-positions inside the declared workspace meaningful. The sampler changes directly from
-marker selection to the whole box; it does not gradually increase its radius. For a
-difficult arm, first add a denser marker grid or introduce continuous sampling in a
-separate fine-tuning run.
+positions inside the declared workspace meaningful. When
+`spatial_curriculum_full_episode` is greater than
+`spatial_curriculum_start_episode`, the sampling radius grows gradually from
+`spatial_curriculum_start_radius` to the complete volume.
 
 Inspect the complete box before enabling it. The corners of an axis-aligned box can be
 unreachable even when every marker is reachable. Use `target_sampling_inset` to remove
