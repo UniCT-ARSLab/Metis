@@ -1,8 +1,19 @@
-# Godot URDF add-on
+# Metis Godot development project
 
-Metis includes a copy of the Godot URDF add-on for Godot 4.6. It parses URDF files with
-Godot's native `XMLParser` and generates visual meshes, collision bodies, joints, and a
-`GodotRobot` runtime controller.
+This project contains the Metis example agents, scenarios, and Godot regression
+tests. It consumes the canonical add-on directly from `addons/metis`; no separate copy
+is generated for local development.
+
+Enable only `addons/metis/plugin.cfg` in the project settings. The plugin registers
+the RL runtime, Inspector helpers, URDF importer and dock, STL loader, and Python
+runtime setup window.
+
+## URDF support
+
+Metis includes a maintained copy of the Godot URDF add-on for Godot 4.6 under
+`addons/metis/integrations/urdf`. It parses URDF files with Godot's native `XMLParser`
+and generates visual meshes, collision bodies, joints, and a `GodotRobot` runtime
+controller.
 
 ## Importing a robot
 
@@ -53,10 +64,14 @@ Generated collision shapes are children of `RigidBody3D` links connected by
 `Generic6DOFJoint3D` nodes. This representation is flatter than the source XML. The
 custom editor dock presents the original robot hierarchy when you need to inspect it.
 
-URDF files that reference STL meshes can use the bundled `godot-stl-io` add-on.
+URDF files that reference STL meshes use the bundled loader under
+`addons/metis/integrations/stl`.
 
 The original add-on and demo projects are available from:
 
 - [Godot URDF](https://github.com/brean/godot_urdf)
 - [Godot URDF demos](https://github.com/brean/godot_urdf_demo)
 - [godot-stl-io](https://github.com/onze/godot-stl-io)
+
+Local modifications and licenses are recorded beside each integration in
+`addons/metis/integrations`.

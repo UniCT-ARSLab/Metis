@@ -8,9 +8,11 @@ node or runtime contract in more detail.
 
 1. Read the [architecture overview](reference/architecture.md) to understand the
    boundary between Godot, the bridge, and Python.
-2. Follow [Build a new agent and scenario](tutorials/new-agent-and-scenario.md).
-3. Run `python/tools/random_rollout.py` before starting a long training job.
-4. Use [Godot reference](reference/godot.md) and
+2. Read [Distribution and installation](reference/distribution.md) if you are using
+   the Asset Library package or preparing a release.
+3. Follow [Build a new agent and scenario](tutorials/new-agent-and-scenario.md).
+4. Run `python/tools/random_rollout.py` before starting a long training job.
+5. Use [Godot reference](reference/godot.md) and
    [Python reference](reference/python.md) while debugging.
 
 ## Scenario tutorials
@@ -46,10 +48,23 @@ Metis/Keras artifact.
 - [Extending the Godot side](guides/extending-godot.md) shows how to add observation,
   reward, event, progress, and action components.
 
+## Algorithms
+
+- [Algorithm guide](algorithms/README.md) compares every native learner and gives a
+  practical selection order.
+- [Shared training options](algorithms/common-options.md) documents collection,
+  checkpoints, demonstrations, curriculum, recovery, rendering, and runtime flags.
+- Individual guides: [DQN](algorithms/dqn.md), [PPO](algorithms/ppo.md),
+  [DDPG](algorithms/ddpg.md), [DDPG+BC](algorithms/ddpg-bc.md),
+  [DDPGfD](algorithms/ddpgfd.md), [TD3](algorithms/td3.md),
+  [TD3+BC](algorithms/td3-bc.md), and [SAC](algorithms/sac.md).
+
 ## Reference
 
 - [Architecture](reference/architecture.md): ownership, protocol, transitions,
   multi-agent semantics, and async collection.
+- [Distribution and installation](reference/distribution.md): add-on layout, Python
+  runtime setup, CLI, and release builds.
 - [Godot](reference/godot.md): scene tree, component contracts, and physical reset.
 - [Python](reference/python.md): public commands, internal packages, and algorithm
   support.
@@ -80,14 +95,20 @@ but only one preview is needed. See [Collection and rendering](../README.md#coll
 
 ## Documentation conventions
 
-User-facing commands go through four files:
+An installed Metis runtime exposes one CLI:
 
 ```text
-python/train.py
-python/run.py
-python/recorder.py
-python/export.py
+metis train
+metis run
+metis record
+metis export
+metis doctor
 ```
+
+Source checkouts keep the equivalent `python/train.py`, `python/run.py`,
+`python/recorder.py`, and `python/export.py` entry points. Both forms dispatch to the
+same implementation; tutorials use the source form because they are tested from this
+repository.
 
 Modules under `python/algorithms`, `python/core`, and `python/envs` are implementation
 details or extension points. Tutorials configure existing Godot components first and

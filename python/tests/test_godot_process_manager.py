@@ -99,6 +99,17 @@ Device: 1
         commands = self.start_and_capture(headless=True, render_env_count=None)
         self.assertEqual(["--headless" in command for command in commands], [True, True, True])
 
+    def test_each_environment_uses_a_distinct_engine_log(self):
+        commands = self.start_and_capture(headless=True, render_env_count=None)
+        log_paths = [
+            Path(command[command.index("--log-file") + 1]).name
+            for command in commands
+        ]
+        self.assertEqual(
+            log_paths,
+            ["godot_engine_6200.log", "godot_engine_6201.log", "godot_engine_6202.log"],
+        )
+
     def test_light_gpu_passes_detected_offload_environment_to_godot(self):
         popen_calls = []
 

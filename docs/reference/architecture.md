@@ -16,7 +16,8 @@ algorithm change without embedding TensorFlow in a Godot project.
 ## Runtime flow
 
 ```text
-python/train.py
+metis train
+(or python/train.py in a source checkout)
     |
     +-- selects a backend and algorithm
     +-- GodotProcessManager starts N processes
@@ -30,6 +31,11 @@ python/train.py
                             +-- ScenarioRewardSystem
                             +-- ProgressProvider
 ```
+
+The Godot runtime, editor tools, and maintained URDF/STL integrations are distributed
+as one add-on under `addons/metis`. The learner is a version-matched Python wheel.
+This packaging changes installation, not the protocol or the ownership boundary.
+See [Distribution and installation](distribution.md).
 
 Python sends `reset` at the start of an episode. Godot resets and randomizes the
 scene, then returns the first observation. On every `step`, Python sends one action per
@@ -143,6 +149,13 @@ multi-policy snapshot is published as one version: workers never observe a half-
 half-new set. The trade-off is policy lag: a worker may finish an episode using a
 slightly older policy group.
 
+Replay-based synchronous and asynchronous trainers use the same transition-credit
+scheduler, so switching collector mode does not intentionally change the configured
+update-to-data ratio. A full async queue applies backpressure and blocks collectors;
+queued transitions are discarded only when recovery deliberately invalidates data
+from the previous policy version. The practical async difference is policy staleness,
+controlled by `--async-policy-sync-steps`, rather than a different learner budget.
+
 PPO collects complete rollout generations and only trains on data produced by the
 same frozen policy version. Off-policy algorithms can mix older data through replay by
 design.
@@ -218,6 +231,11 @@ chronological state.
 
 Stable-Baselines3 uses its own PyTorch `.zip` model format and `.pkl` replay
 snapshots. It cannot be resumed or exported as if it were a native Keras bundle.
+
+The included replay-based algorithms currently use one-step TD targets. Metis does
+not yet aggregate n-step returns for DQN, SAC, DDPG, or TD3; PPO instead uses complete
+rollouts with GAE. This matters most for long-horizon tasks with sparse rewards and is
+part of the algorithm layer, not the Godot bridge contract.
 
 ## Runtime files
 

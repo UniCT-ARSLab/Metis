@@ -29,7 +29,11 @@ func _initialize() -> void:
 	var found_non_marker_position := false
 	var passed := spawn_pool.size() > 1
 	for _sample_index in range(100):
-		var sampled: Vector3 = scenario.call("_sample_target_position", rng, spawn_pool)
+		var sampled: Vector3 = scenario.call(
+			"_sample_target_position",
+			rng,
+			spawn_pool,
+			spawn_pool[0].global_position)
 		passed = passed and sampled.x >= lower.x and sampled.x <= upper.x
 		passed = passed and sampled.y >= lower.y and sampled.y <= upper.y
 		passed = passed and sampled.z >= lower.z and sampled.z <= upper.z

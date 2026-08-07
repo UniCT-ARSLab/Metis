@@ -6,7 +6,7 @@ class_name Car
 @export var brake_strength := 8.0
 @export var steering_speed_degrees := 100.0
 @export var min_speed_for_steering := 0.5
-@export var friction := 3.0
+@export var friction := 1.6
 @export var max_speed := 20.0
 @export var manual_control := false
 

@@ -23,7 +23,7 @@ func _initialize() -> void:
 		"meshes/base.stl",
 		urdf_path) == expected_mesh
 
-	var loader_script := load("res://addons/godot_urdf/urdf_loader.gd") as Script
+	var loader_script := load("res://addons/metis/integrations/urdf/urdf_loader.gd") as Script
 	var loader := loader_script.new() as Node3D
 	loader.urdf_file_path = absolute_urdf_path
 	loader.package_folder = absolute_package_root

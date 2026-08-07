@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import signal
 import sys
@@ -27,6 +28,7 @@ def tracker_args(checkpoint_dir, **overrides):
         "best_evaluation_episodes": 20,
         "best_evaluation_seed": 10_000,
         "best_evaluation_training_episode": None,
+        "best_evaluation_follow_curriculum": True,
         "best_evaluation_max_steps": None,
         "best_evaluation_port": None,
         "best_evaluation_timeout": 30.0,
@@ -39,17 +41,29 @@ def tracker_args(checkpoint_dir, **overrides):
         "num_envs": 4,
         "num_episodes": 500,
         "max_steps_per_episode": 0,
+        "physics_frames_per_step": 3,
         "multi_agent": False,
         "godot_bin": "/godot",
         "godot_project": "godot",
         "godot_scene": "res://scenario.tscn",
         "agent_id": None,
+        "adaptive_curriculum": False,
+        "curriculum_initial_level": 0.0,
+        "curriculum_level_step": 0.1,
+        "curriculum_promotion_metric": "success_rate",
+        "curriculum_promotion_threshold": 0.7,
+        "curriculum_promotion_evaluations": 2,
+        "curriculum_min_policy_updates": 100,
+        "curriculum_demotion_threshold": None,
+        "curriculum_demotion_evaluations": 3,
+        "resume": False,
+        "resume_checkpoint": None,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
 
 
-def evaluation(episode, success_rate, reward_mean):
+def evaluation(episode, success_rate, reward_mean, **diagnostics):
     return PolicyEvaluationResult(
         episode,
         {
@@ -63,6 +77,7 @@ def evaluation(episode, success_rate, reward_mean):
             "steps_mean": 100.0,
             "steps_min": 50,
             "steps_max": 150,
+            **diagnostics,
         },
     )
 
@@ -94,6 +109,61 @@ class BestCheckpointTrackerTests(unittest.TestCase):
 
             self.assertTrue(tracker.is_improvement(evaluation(200, 0.10, 11.0)))
 
+    def test_task_progress_ranks_progress_before_reward_until_success_exists(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            args = tracker_args(temp_dir, best_metric="task_progress")
+            tracker = BestCheckpointTracker(args, "sac")
+            baseline = evaluation(
+                100,
+                success_rate=0.0,
+                reward_mean=100.0,
+                progress_mean=0.40,
+                position_error_mean=0.30,
+                orientation_error_mean=40.0,
+                hold_frames_max=0,
+            )
+            tracker.record_best(baseline, "best/ckpt-100")
+
+            self.assertTrue(
+                tracker.is_improvement(
+                    evaluation(
+                        200,
+                        success_rate=0.0,
+                        reward_mean=-10.0,
+                        progress_mean=0.50,
+                        position_error_mean=0.25,
+                        orientation_error_mean=35.0,
+                        hold_frames_max=0,
+                    )
+                )
+            )
+            self.assertTrue(
+                tracker.is_improvement(
+                    evaluation(
+                        300,
+                        success_rate=0.05,
+                        reward_mean=-100.0,
+                        progress_mean=0.10,
+                        position_error_mean=0.50,
+                        orientation_error_mean=90.0,
+                        hold_frames_max=0,
+                    )
+                )
+            )
+
+    def test_auto_metric_accepts_progress_without_pose_diagnostics(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tracker = BestCheckpointTracker(tracker_args(temp_dir), "sac")
+            result = evaluation(
+                100,
+                success_rate=0.0,
+                reward_mean=1.0,
+                progress_mean=0.4,
+            )
+
+            self.assertTrue(tracker.is_improvement(result))
+            self.assertTrue(all(map(math.isfinite, tracker.comparison_key(result.summary))))
+
     def test_metadata_is_restored(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             args = tracker_args(temp_dir)
@@ -117,6 +187,69 @@ class BestCheckpointTrackerTests(unittest.TestCase):
 
             max_steps_index = command.index("--max-steps") + 1
             self.assertEqual(command[max_steps_index], "10000")
+            physics_frames_index = command.index(
+                "--physics-frames-per-step") + 1
+            self.assertEqual(command[physics_frames_index], "3")
+
+    def test_evaluation_follows_live_episode_by_default(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tracker = BestCheckpointTracker(tracker_args(temp_dir), "dqn")
+
+            command = tracker._evaluation_command(
+                "ckpt-125", Path(temp_dir) / "summary.json", episode=125
+            )
+
+            training_episode_index = command.index("--training-episode") + 1
+            self.assertEqual(command[training_episode_index], "125")
+
+    def test_explicit_evaluation_episode_overrides_live_curriculum(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tracker = BestCheckpointTracker(
+                tracker_args(
+                    temp_dir,
+                    best_evaluation_training_episode=2200,
+                ),
+                "dqn",
+            )
+
+            command = tracker._evaluation_command(
+                "ckpt-125", Path(temp_dir) / "summary.json", episode=125
+            )
+
+            training_episode_index = command.index("--training-episode") + 1
+            self.assertEqual(command[training_episode_index], "2200")
+
+    def test_curriculum_demotion_resets_best_comparison_baseline(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tracker = BestCheckpointTracker(
+                tracker_args(
+                    temp_dir,
+                    adaptive_curriculum=True,
+                    curriculum_initial_level=0.4,
+                    curriculum_demotion_threshold=0.4,
+                    curriculum_demotion_evaluations=1,
+                ),
+                "sac",
+            )
+            tracker.record_best(
+                evaluation(100, success_rate=0.9, reward_mean=10.0),
+                "best/ckpt-100",
+            )
+            source = write_fake_checkpoint(
+                Path(temp_dir) / "ckpt-200", "demotion-candidate"
+            )
+            tracker.evaluate = lambda _path, _episode: evaluation(
+                200, success_rate=0.1, reward_mean=-10.0
+            )
+
+            tracker.evaluate_async(source, 200)
+            promoted = apply_ready_best_checkpoint(tracker, wait_timeout=10.0)
+
+            self.assertIsNone(promoted)
+            self.assertAlmostEqual(tracker.curriculum.level, 0.3)
+            self.assertIsNone(tracker.best_key)
+            self.assertIsNone(tracker.best_summary)
+            tracker.close()
 
     def test_cpu_evaluator_limits_math_library_threads(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -142,6 +275,74 @@ class BestCheckpointTrackerTests(unittest.TestCase):
                 "TF_NUM_INTEROP_THREADS",
             ):
                 self.assertEqual(seen[variable], "2")
+
+    def test_frozen_evaluation_summary_is_persisted(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tracker = BestCheckpointTracker(tracker_args(temp_dir), "dqn")
+
+            def fake_process(command, _child_env, _timeout):
+                summary_path = Path(
+                    command[command.index("--summary-json") + 1]
+                )
+                summary_path.write_text(
+                    json.dumps(
+                        {
+                            "episodes": 1,
+                            "successes": 0,
+                            "trials": 1,
+                            "success_rate": 0.0,
+                            "selection_success_rate": 0.0,
+                            "reward_mean": -1.0,
+                            "reward_min": -1.0,
+                            "reward_max": -1.0,
+                            "steps_mean": 10.0,
+                            "steps_min": 10,
+                            "steps_max": 10,
+                            "failure_reasons": {"position_gate": 1},
+                            "episode_records": [
+                                {
+                                    "episode": 0,
+                                    "agent_id": "Arm",
+                                    "success": False,
+                                    "failure_reason": "position_gate",
+                                }
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return 0, "", ""
+
+            tracker._run_evaluation_process = fake_process
+
+            result = tracker.evaluate("ckpt-100", 100)
+
+            artifact = Path(temp_dir) / "evaluations" / "eval-100.json"
+            self.assertIsNotNone(result)
+            self.assertTrue(artifact.is_file())
+            payload = json.loads(artifact.read_text(encoding="utf-8"))
+            self.assertEqual(payload["evaluation_episode"], 100)
+            self.assertEqual(payload["failure_reasons"], {"position_gate": 1})
+            self.assertEqual(result.summary["evaluation_artifact"], str(artifact))
+
+    def test_checkpoint_optimizer_iterations_are_detected(self):
+        import tensorflow as tf
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            actor_optimizer = tf.keras.optimizers.Adam()
+            actor_optimizer.iterations.assign(7)
+            critic_optimizer = tf.keras.optimizers.Adam()
+            critic_optimizer.iterations.assign(99)
+            prefix = Path(temp_dir) / "ckpt-7"
+            tf.train.Checkpoint(
+                actor_optimizer=actor_optimizer,
+                critic_optimizer=critic_optimizer,
+            ).write(str(prefix))
+
+            self.assertEqual(
+                BestCheckpointTracker._checkpoint_training_updates(prefix),
+                7,
+            )
 
 
 def write_fake_checkpoint(prefix, marker):
@@ -197,6 +398,28 @@ class PromoteEvaluatedCheckpointTests(unittest.TestCase):
             self.assertTrue(metadata["checkpoint"].endswith("ckpt-100"))
             tracker.close()
 
+    def test_promoted_off_policy_checkpoint_keeps_matching_replay(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = write_fake_checkpoint(
+                Path(temp_dir) / "ckpt-100", "evaluated")
+            source_replay = Path(temp_dir) / "replay-100.npz"
+            source_replay.write_bytes(b"matching-replay")
+            tracker = self.staged_tracker(
+                temp_dir,
+                evaluation(100, 0.5, 1.0),
+                save_replay_buffer=True,
+            )
+
+            tracker.evaluate_async(source, 100)
+            best_path = apply_ready_best_checkpoint(
+                tracker, wait_timeout=10.0)
+
+            best_replay = Path(best_path).parent / "replay-100.npz"
+            self.assertEqual(best_replay.read_bytes(), b"matching-replay")
+            metadata = json.loads(tracker.metadata_path.read_text())
+            self.assertEqual(metadata["replay_buffer"], str(best_replay))
+            tracker.close()
+
     def test_a_non_improvement_leaves_the_best_directory_untouched(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             tracker = BestCheckpointTracker(tracker_args(temp_dir), "dqn")
@@ -214,15 +437,28 @@ class PromoteEvaluatedCheckpointTests(unittest.TestCase):
 
     def test_pruning_keeps_only_the_newest_best_checkpoints(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            tracker = BestCheckpointTracker(tracker_args(temp_dir, keep_best_checkpoints=2), "dqn")
+            tracker = BestCheckpointTracker(
+                tracker_args(
+                    temp_dir,
+                    keep_best_checkpoints=2,
+                    save_replay_buffer=True,
+                ),
+                "dqn",
+            )
             for episode, rate in ((100, 0.1), (200, 0.2), (300, 0.3)):
                 source = write_fake_checkpoint(Path(temp_dir) / f"ckpt-{episode}", str(episode))
+                (Path(temp_dir) / f"replay-{episode}.npz").write_bytes(
+                    str(episode).encode("ascii"))
                 tracker.evaluate = lambda _p, _e, rate=rate, episode=episode: evaluation(episode, rate, 1.0)
                 tracker.evaluate_async(source, episode)
                 self.assertIsNotNone(apply_ready_best_checkpoint(tracker, wait_timeout=10.0))
 
             kept = sorted(p.name for p in tracker.directory.glob("ckpt-*.index"))
             self.assertEqual(kept, ["ckpt-200.index", "ckpt-300.index"])
+            kept_replays = sorted(
+                p.name for p in tracker.directory.glob("replay-*.npz"))
+            self.assertEqual(
+                kept_replays, ["replay-200.npz", "replay-300.npz"])
             tracker.close()
 
     def test_staging_survives_the_source_being_pruned_mid_evaluation(self):
@@ -344,7 +580,7 @@ class CheckpointStateMetafileTests(unittest.TestCase):
 class SleepingEvaluatorTracker(BestCheckpointTracker):
     """Swaps Godot for a child that only sleeps, so shutdown can be tested anywhere."""
 
-    def _evaluation_command(self, checkpoint_path, summary_path):
+    def _evaluation_command(self, checkpoint_path, summary_path, episode=None):
         return [sys.executable, "-c", "import time; time.sleep(600)"]
 
 
@@ -355,7 +591,7 @@ class OrphanSpawningTracker(BestCheckpointTracker):
         self.pid_path = pid_path
         super().__init__(args, algorithm)
 
-    def _evaluation_command(self, checkpoint_path, summary_path):
+    def _evaluation_command(self, checkpoint_path, summary_path, episode=None):
         script = (
             "import subprocess, sys, time\n"
             "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)'])\n"

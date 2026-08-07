@@ -1,0 +1,22 @@
+{
+  "frozen_utc": "2026-08-04T12:38:22Z",
+  "note": "FROZEN dataset gate approved. Do NOT regenerate/modify. selection+final NEVER in replay.",
+  "files": {
+    "train.npz": {
+      "sha256": "539319f7f4aaf7d0c1b4189ec07089b55e45196c9a1665861519fcc8e6070b1c",
+      "bytes": 39784671
+    },
+    "selection.npz": {
+      "sha256": "99f2f18f73335db14c605603a9c8a57be6e546adf637124c3f2243fbbd047d5c",
+      "bytes": 19825010
+    },
+    "final_test.npz": {
+      "sha256": "65cdb6e20b16326f8ed00f050a8bd0ab5970283f62e3fc04b295df99d6d93fec",
+      "bytes": 19677675
+    },
+    "report.json": {
+      "sha256": "7667d57603a5b3c21cf846c80db51842002aa15801657d06770228216e22ade5",
+      "bytes": 14932
+    }
+  }
+}

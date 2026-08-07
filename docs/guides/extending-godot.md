@@ -1,7 +1,9 @@
 # Extending Metis in Godot
 
-Reusable Godot components live under `godot/scripts/agent/`. Mechanics that belong to
-one task stay in the agent body or under `godot/scenarios`.
+Reusable Godot components live under `godot/addons/metis/runtime/agent/`. Mechanics
+that belong to one task stay in the agent body or under `godot/scenarios`. In a
+standalone project, keep custom components outside `addons/metis` so upgrading the
+add-on cannot overwrite them.
 
 ## Choose the right extension point
 
@@ -45,7 +47,7 @@ its own state, physics query, or calculation.
 This source returns normalized distance to a target:
 
 ```gdscript
-extends "res://scripts/agent/observations/ObservationSource.gd"
+extends "res://addons/metis/runtime/agent/observations/ObservationSource.gd"
 class_name TargetDistanceObservationSource
 
 @export var observation_name := "target_distance"
@@ -67,8 +69,10 @@ func _read_distance() -> float:
     return clampf(distance / maxf(max_distance, 0.000001), 0.0, 1.0)
 ```
 
-Save it under `godot/scripts/agent/observations/`, add it below
-`ObservationSystem`, and configure it in the Inspector.
+In the Metis repository, save task-specific code beside its agent or scenario. In an
+installed project, a path such as `res://rl_components/observations/` keeps it separate
+from the add-on. Add the node below `ObservationSystem` and configure it in the
+Inspector.
 
 Observation-source rules:
 
@@ -83,7 +87,7 @@ Observation-source rules:
 This example rewards forward speed only while a clearance signal is active:
 
 ```gdscript
-extends "res://scripts/agent/reward_components/RewardComponent.gd"
+extends "res://addons/metis/runtime/agent/reward_components/RewardComponent.gd"
 class_name GatedSpeedReward
 
 @export var gate_observation := "path_clear"
@@ -120,7 +124,7 @@ Use a scenario component when the value depends on progress, teams, goals, or ob
 outside one body:
 
 ```gdscript
-extends "res://scripts/agent/scenario_reward_components/ScenarioRewardComponent.gd"
+extends "res://addons/metis/runtime/agent/scenario_reward_components/ScenarioRewardComponent.gd"
 class_name PossessionScenarioReward
 
 @export var event_name := "has_possession"
@@ -144,12 +148,27 @@ Optional methods include:
 - `get_agent_terms(agent_id)`;
 - `is_episode_end_only()` for a value computed only at episode end.
 
+Python configuration does not write arbitrary reward properties. To expose a value as
+a runtime setting, add its name to `scenario_config_properties` in the Inspector:
+
+```gdscript
+@export var possession_scale := 0.005
+
+
+func _ready() -> void:
+    scenario_config_properties = PackedStringArray(["possession_scale"])
+```
+
+For validation or derived values, override `apply_scenario_config(config)` instead.
+Keep the whitelist small: changing reward semantics during a run also changes the
+meaning of replay already collected.
+
 ## Adding an event source
 
 This source emits an event when health reaches zero:
 
 ```gdscript
-extends "res://scripts/agent/events/ScenarioEventSource.gd"
+extends "res://addons/metis/runtime/agent/events/ScenarioEventSource.gd"
 class_name HealthDepletedEventSource
 
 @export var health_property := "health"
@@ -183,7 +202,7 @@ controller-provided agent ID instead of assuming node names are globally unique.
 Progress can be any mostly ordered metric:
 
 ```gdscript
-extends "res://scripts/agent/progress/ProgressProvider.gd"
+extends "res://addons/metis/runtime/agent/progress/ProgressProvider.gd"
 class_name BrickProgressProvider
 
 @export var bricks_container: Node

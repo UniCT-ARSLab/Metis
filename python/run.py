@@ -50,12 +50,26 @@ from algorithms.ppo import build_action_metadata, pack_action, split_model_outpu
 from core.evaluation import (
     agent_succeeded,
     build_evaluation_summary,
+    classify_episode_failure,
     episode_agent_infos,
+    episode_reset_modes,
+    episode_reset_raw_values,
+    episode_reset_values,
+    finalize_episode_agent_diagnostics,
+    new_episode_agent_diagnostics,
     print_evaluation_summary,
     summarize_episode_outcome,
+    update_episode_agent_diagnostics,
     write_evaluation_summary,
 )
-from core.models import build_continuous_actor, build_hybrid_actor_critic, build_sac_actor, build_shared_q_network
+from core.models import (
+    build_continuous_actor,
+    build_hybrid_actor_critic,
+    build_sac_actor,
+    build_shared_q_network,
+    default_network_layers,
+    set_network_layers,
+)
 from core.multi_policy import (
     add_multi_policy_arguments,
     assignment_from_manifest,
@@ -64,6 +78,8 @@ from core.multi_policy import (
 )
 from core.policy_artifact import (
     POLICY_MODEL_FILENAME,
+    PolicyArtifactSaver,
+    build_policy_metadata,
     load_policy_into_model,
     load_policy_model,
     policy_algorithms_are_compatible,
@@ -92,6 +108,17 @@ def parse_args(argv=None):
         default="auto",
     )
     parser.add_argument(
+        "--network-layers",
+        type=int,
+        nargs="+",
+        default=None,
+        metavar="WIDTH",
+        help="Hidden layer widths for actor/critic/Q networks, e.g. --network-layers 256 256. "
+        "Omitted, each algorithm uses its reference architecture (SAC 256 256, "
+        "TD3/DDPG 400 300, PPO and DQN 64 64). Checkpoints written before these "
+        "defaults used 256 256 128 and need that value passed explicitly.",
+    )
+    parser.add_argument(
         "--policy-path",
         default=None,
         help=(
@@ -107,6 +134,20 @@ def parse_args(argv=None):
         default=None,
         help="Exact TensorFlow checkpoint prefix (for example checkpoints/run/ckpt-2000).",
     )
+    parser.add_argument(
+        "--export-policy-dir",
+        default=None,
+        help=(
+            "Save the loaded policy as a portable Metis policy.keras bundle in this "
+            "directory. This can extract only the actor from an exact checkpoint."
+        ),
+    )
+    parser.add_argument(
+        "--export-policy-only",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Export the loaded policy and exit without running evaluation episodes.",
+    )
     parser.add_argument("--godot-bin", default=os.environ.get("GODOT_BIN"))
     parser.add_argument("--godot-project", default=None)
     parser.add_argument("--godot-scene", default=None)
@@ -121,6 +162,15 @@ def parse_args(argv=None):
         type=int,
         default=1000,
         help="Maximum episode steps; use 0 or --no-time-limit to rely on terminal conditions.",
+    )
+    parser.add_argument(
+        "--physics-frames-per-step",
+        type=int,
+        default=1,
+        help=(
+            "Godot physics ticks advanced for each policy action. Use the same "
+            "value as training when evaluating a checkpoint."
+        ),
     )
     parser.add_argument("--infinite", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument(
@@ -159,6 +209,25 @@ def parse_args(argv=None):
         type=int,
         default=None,
         help="Scenario curriculum episode. Defaults to the episode encoded in a checkpoint name, or 0.",
+    )
+    parser.add_argument(
+        "--curriculum-level",
+        type=float,
+        default=None,
+        help=(
+            "Optional normalized scenario curriculum level in [0, 1]. Training uses "
+            "this for frozen evaluations when adaptive curriculum is enabled."
+        ),
+    )
+    parser.add_argument(
+        "--evaluation-mode",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Enable the scenario-defined deterministic evaluation mode: the scenario selects "
+            "targets by its own fixed evaluation policy instead of the training sampler. Set by "
+            "the training frozen-eval command; plain inference leaves it off."
+        ),
     )
     parser.add_argument("--delay", type=float, default=0.0)
     parser.add_argument(
@@ -260,9 +329,24 @@ def select_continuous_action(model, obs, env, algorithm):
     output = model(np.expand_dims(obs, axis=0), training=False)
     if algorithm == "sac":
         raw_action = tf.tanh(output[0]).numpy()[0]
-    else:
-        raw_action = output.numpy()[0]
-    return np.clip(scale_action_numpy(raw_action, env.action_low, env.action_high), env.action_low, env.action_high).astype(np.float32)
+        return np.clip(
+            scale_action_numpy(raw_action, env.action_low, env.action_high),
+            env.action_low, env.action_high,
+        ).astype(np.float32)
+    if isinstance(output, (list, tuple)):
+        # PPO actor-critic: the model returns a LIST of heads and its continuous head emits the Gaussian
+        # MEAN (just before the value head). Training clips that mean to the bounds, so the deterministic
+        # eval action is the mean CLIPPED to the bounds (not tanh-scaled).
+        mean = output[-2]
+        raw_action = (mean.numpy() if hasattr(mean, "numpy") else np.asarray(mean))[0]
+        return np.clip(raw_action, env.action_low, env.action_high).astype(np.float32)
+    # TD3 / DDPG: a single deterministic actor whose output is already tanh-squashed to [-1, 1], so it
+    # is SCALED to the action bounds (same as SAC), not clipped.
+    raw_action = (output.numpy() if hasattr(output, "numpy") else np.asarray(output))[0]
+    return np.clip(
+        scale_action_numpy(raw_action, env.action_low, env.action_high),
+        env.action_low, env.action_high,
+    ).astype(np.float32)
 
 
 def select_multi_continuous_actions(model, obs_batch, env, algorithm):
@@ -625,8 +709,27 @@ def load_policy(model, args, algorithm):
     )
 
 
-def emit_evaluation_summary(args, rewards, steps, successes, trials):
-    summary = build_evaluation_summary(rewards, steps, successes, trials)
+def emit_evaluation_summary(
+    args,
+    rewards,
+    steps,
+    successes,
+    trials,
+    diagnostics=None,
+    reset_outcomes=None,
+    episode_records=None,
+    expected_regions=None,
+):
+    summary = build_evaluation_summary(
+        rewards,
+        steps,
+        successes,
+        trials,
+        diagnostics=diagnostics,
+        reset_outcomes=reset_outcomes,
+        episode_records=episode_records,
+        expected_regions=expected_regions,
+    )
     if summary is None:
         return None
     print_evaluation_summary(summary)
@@ -636,8 +739,13 @@ def emit_evaluation_summary(args, rewards, steps, successes, trials):
 
 def main():
     args = parse_args()
+    # Must precede any network construction: the loaded checkpoint only matches if the
+    # architecture is set first.
+    set_network_layers(args.network_layers or default_network_layers(args.algorithm))
     if args.max_steps < 0:
         raise ValueError("--max-steps cannot be negative; use --no-time-limit for no limit")
+    if args.physics_frames_per_step < 1:
+        raise ValueError("--physics-frames-per-step must be at least 1")
     if args.delay < 0.0:
         raise ValueError("--delay cannot be negative")
     if args.realtime_action_hz < 0.0:
@@ -646,6 +754,8 @@ def main():
         raise ValueError("--realtime-simulation-fps must be at least 1")
     if args.training_episode is not None and args.training_episode < 0:
         raise ValueError("--training-episode cannot be negative")
+    if args.export_policy_only and not args.export_policy_dir:
+        raise ValueError("--export-policy-only requires --export-policy-dir")
     if args.execution_mode == "auto":
         # Lockstep freezes the scene between policy updates, so a human watching sees the
         # sim stutter. Nobody is watching a headless run, and automated checkpoint
@@ -674,6 +784,18 @@ def main():
     evaluation_steps = []
     evaluation_successes = 0
     evaluation_trials = 0
+    evaluation_reset_outcomes = {}
+    evaluation_episode_records = []
+    evaluation_expected_regions = set()
+    evaluation_diagnostics = {
+        "progress_mean": [],
+        "progress_max": [],
+        "position_error_mean": [],
+        "position_error_min": [],
+        "orientation_error_mean": [],
+        "orientation_error_min": [],
+        "hold_frames_max": [],
+    }
     try:
         env = ScenarioGymEnv(
             host=args.host,
@@ -775,11 +897,31 @@ def main():
         training_episode = args.training_episode
         if training_episode is None:
             training_episode = inferred_episode if inferred_episode is not None else 0
+        if args.export_policy_dir:
+            if assignment is not None:
+                raise RuntimeError(
+                    "--export-policy-dir currently exports a shared/single policy; "
+                    "export multi-policy actors separately."
+                )
+            PolicyArtifactSaver(
+                model,
+                args.export_policy_dir,
+                build_policy_metadata(algorithm, env),
+            ).save(inferred_episode if inferred_episode is not None else training_episode)
+            if args.export_policy_only:
+                print("Policy export complete; evaluation skipped.", flush=True)
+                return
         scenario_config = {
             "max_steps": env_max_steps,
             "training_episode": training_episode,
             "training_mode": False,
+            "evaluation_mode": bool(args.evaluation_mode),
+            "physics_frames_per_step": args.physics_frames_per_step,
         }
+        if args.curriculum_level is not None:
+            scenario_config["curriculum_level"] = float(
+                np.clip(args.curriculum_level, 0.0, 1.0)
+            )
         if args.continue_after_success:
             scenario_config.update(
                 continue_after_success=True,
@@ -837,6 +979,16 @@ def main():
                 "preserve_state": should_preserve_state(args, episode),
             }
             obs, info = env.reset(seed=args.seed + episode, options=reset_options)
+            episode_reset_mode = episode_reset_modes(info, args.multi_agent)
+            episode_target_regions = episode_reset_values(
+                info, "target_region", args.multi_agent)
+            episode_target_cells = episode_reset_values(
+                info, "target_cell", args.multi_agent)
+            # active_regions is a LIST per agent; use the raw helper so it stays a list
+            # instead of being flattened into a text label (which would break isinstance).
+            for active in episode_reset_raw_values(info, "active_regions", args.multi_agent):
+                if isinstance(active, (list, tuple)):
+                    evaluation_expected_regions.update(str(a).strip().lower() for a in active)
             realtime_deadline = time.monotonic()
             total_reward = 0.0
             steps_taken = 0
@@ -849,6 +1001,7 @@ def main():
             # multi-agent case where different agents reach the target at different steps (a scalar
             # max-over-steps would under-count them).
             episode_agent_success = []
+            episode_agent_diagnostics = []
             if args.multi_agent:
                 total_reward = np.zeros((len(env.agent_ids),), dtype=np.float32)
 
@@ -885,11 +1038,19 @@ def main():
                 else:
                     total_reward += float(reward)
 
-                for idx, agent_info in enumerate(episode_agent_infos(info, args.multi_agent)):
+                agent_infos = episode_agent_infos(info, args.multi_agent)
+                for idx, agent_info in enumerate(agent_infos):
                     while idx >= len(episode_agent_success):
                         episode_agent_success.append(False)
+                    while idx >= len(episode_agent_diagnostics):
+                        episode_agent_diagnostics.append(
+                            new_episode_agent_diagnostics()
+                        )
                     if agent_succeeded(agent_info):
                         episode_agent_success[idx] = True
+                    update_episode_agent_diagnostics(
+                        episode_agent_diagnostics[idx], agent_info
+                    )
 
                 if args.print_every > 0 and step % args.print_every == 0:
                     if isinstance(action, dict):
@@ -925,6 +1086,122 @@ def main():
             evaluation_steps.append(steps_taken)
             evaluation_successes += success_count
             evaluation_trials += trial_count
+            agent_count = max(
+                trial_count,
+                len(episode_agent_success),
+                len(episode_agent_diagnostics),
+                len(episode_reset_mode),
+                len(episode_target_regions),
+                len(episode_target_cells),
+                1,
+            )
+            while len(episode_agent_diagnostics) < agent_count:
+                episode_agent_diagnostics.append(new_episode_agent_diagnostics())
+            while len(episode_agent_success) < agent_count:
+                episode_agent_success.append(False)
+            episode_records = []
+            for agent_idx in range(agent_count):
+                reset_mode = (
+                    episode_reset_mode[agent_idx]
+                    if agent_idx < len(episode_reset_mode)
+                    else ""
+                )
+                agent_success = (
+                    bool(episode_agent_success[agent_idx])
+                    if agent_idx < len(episode_agent_success)
+                    else bool(success_count)
+                    if trial_count == 1
+                    else False
+                )
+                outcome_record = {
+                    **finalize_episode_agent_diagnostics(
+                        episode_agent_diagnostics[agent_idx]
+                    ),
+                    "episode": int(episode),
+                    "agent_index": int(agent_idx),
+                    "agent_id": (
+                        str(env.agent_ids[agent_idx])
+                        if agent_idx < len(env.agent_ids)
+                        else str(agent_idx)
+                    ),
+                    "reset_mode": reset_mode,
+                    "success": agent_success,
+                    "reward": (
+                        float(total_reward[agent_idx])
+                        if args.multi_agent and agent_idx < len(total_reward)
+                        else reward_score
+                    ),
+                    "steps": int(steps_taken),
+                }
+                target_region = (
+                    episode_target_regions[agent_idx]
+                    if agent_idx < len(episode_target_regions)
+                    else ""
+                )
+                target_cell = (
+                    episode_target_cells[agent_idx]
+                    if agent_idx < len(episode_target_cells)
+                    else ""
+                )
+                outcome_record["target_region"] = target_region
+                outcome_record["target_cell"] = target_cell
+                outcome_record["failure_reason"] = classify_episode_failure(
+                    outcome_record
+                )
+                episode_records.append(outcome_record)
+                evaluation_episode_records.append(outcome_record)
+                if reset_mode:
+                    evaluation_reset_outcomes.setdefault(
+                        reset_mode, []).append(outcome_record)
+                if target_region not in {"", "bootstrap", "marker"}:
+                    evaluation_reset_outcomes.setdefault(
+                        f"target_region:{target_region}", []).append(
+                            outcome_record)
+            progress_values = [
+                value
+                for state in episode_agent_diagnostics
+                for value in state["progress"]
+            ]
+            position_values = [
+                value
+                for state in episode_agent_diagnostics
+                for value in state["position_error"]
+            ]
+            orientation_values = [
+                value
+                for state in episode_agent_diagnostics
+                for value in state["orientation_error"]
+            ]
+            hold_values = [
+                value
+                for state in episode_agent_diagnostics
+                for value in state["hold_frames"]
+            ]
+            if progress_values:
+                evaluation_diagnostics["progress_mean"].append(
+                    float(np.mean(progress_values))
+                )
+                evaluation_diagnostics["progress_max"].append(
+                    float(np.max(progress_values))
+                )
+            if position_values:
+                evaluation_diagnostics["position_error_mean"].append(
+                    float(np.mean(position_values))
+                )
+                evaluation_diagnostics["position_error_min"].append(
+                    float(np.min(position_values))
+                )
+            if orientation_values:
+                evaluation_diagnostics["orientation_error_mean"].append(
+                    float(np.mean(orientation_values))
+                )
+                evaluation_diagnostics["orientation_error_min"].append(
+                    float(np.min(orientation_values))
+                )
+            if hold_values:
+                evaluation_diagnostics["hold_frames_max"].append(
+                    float(np.max(hold_values))
+                )
             total_label = total_reward.tolist() if hasattr(total_reward, "tolist") else f"{total_reward:.4f}"
             terminal_label = terminal_reasons if terminal_reasons else ["unknown"]
             print(
@@ -944,6 +1221,10 @@ def main():
             evaluation_steps,
             evaluation_successes,
             evaluation_trials,
+            evaluation_diagnostics,
+            evaluation_reset_outcomes,
+            evaluation_episode_records,
+            expected_regions=evaluation_expected_regions,
         )
     except KeyboardInterrupt:
         print("Stopped by user.", flush=True)
@@ -953,6 +1234,10 @@ def main():
             evaluation_steps,
             evaluation_successes,
             evaluation_trials,
+            evaluation_diagnostics,
+            evaluation_reset_outcomes,
+            evaluation_episode_records,
+            expected_regions=evaluation_expected_regions,
         )
     finally:
         if env is not None:

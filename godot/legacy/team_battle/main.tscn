@@ -7,7 +7,7 @@
 [ext_resource type="Texture2D" uid="uid://cb0nhdo72knb8" path="res://assets/models/tank/tank_thread.png" id="4_85g3d"]
 [ext_resource type="Script" uid="uid://nbmrpjqh17l5" path="res://legacy/team_battle/multi_agent_reward_system.gd" id="4_reward"]
 [ext_resource type="Script" uid="uid://c70yrbo1ktrbl" path="res://legacy/team_battle/team_battle_controller.gd" id="5_controller"]
-[ext_resource type="Script" uid="uid://d38lybllmy6tq" path="res://scripts/bridge_server.gd" id="6_bridge"]
+[ext_resource type="Script" uid="uid://d38lybllmy6tq" path="res://addons/metis/runtime/bridge_server.gd" id="6_bridge"]
 
 [sub_resource type="BoxShape3D" id="2"]
 size = Vector3(20, 1, 20)

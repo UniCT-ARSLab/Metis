@@ -19,6 +19,10 @@ from queue import Empty, Full, Queue
 
 import numpy as np
 
+from core.curriculum import (
+    add_adaptive_curriculum_arguments,
+    ensure_adaptive_curriculum,
+)
 from core.training_health import (
     TensorFlowCheckpointRecovery,
     TrainingHealthMonitor,
@@ -38,6 +42,22 @@ def _emit_health_event(event):
     for sink in list(_HEALTH_EVENT_SINKS):
         try:
             sink(event)
+        except Exception:
+            pass
+
+
+_CURRICULUM_SINKS = []
+
+
+def register_curriculum_sink(sink):
+    """Register a non-blocking consumer for the canonical curriculum-stage snapshot."""
+    _CURRICULUM_SINKS.append(sink)
+
+
+def _emit_curriculum(snapshot):
+    for sink in list(_CURRICULUM_SINKS):
+        try:
+            sink(snapshot)
         except Exception:
             pass
 
@@ -172,7 +192,20 @@ def add_best_checkpoint_arguments(parser):
         "--best-evaluation-training-episode",
         type=int,
         default=None,
-        help="Fixed scenario curriculum episode used for evaluation; defaults to --num-episodes.",
+        help=(
+            "Fixed scenario curriculum episode used for every evaluation. When omitted, "
+            "evaluation follows the live training episode by default."
+        ),
+    )
+    parser.add_argument(
+        "--best-evaluation-follow-curriculum",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Pass the live training episode to Godot during frozen evaluation. Enabled by "
+            "default; use --no-best-evaluation-follow-curriculum to evaluate at the final "
+            "episode-based difficulty, or set --best-evaluation-training-episode explicitly."
+        ),
     )
     parser.add_argument(
         "--best-evaluation-max-steps",
@@ -218,10 +251,18 @@ def add_best_checkpoint_arguments(parser):
     )
     parser.add_argument(
         "--best-metric",
-        choices=["auto", "success_rate", "reward_mean"],
+        choices=["auto", "success_rate", "reward_mean", "task_progress", "lexicographic"],
         default="auto",
-        help="Primary metric used to select the best frozen policy.",
+        help=(
+            "Primary metric used to select the best frozen policy. task_progress ranks "
+            "success first, then average progress and pose quality before falling back "
+            "to reward; it is useful while a sparse task still has zero successes. "
+            "lexicographic ranks success_rate -> inverse collision_rate -> task_progress, and "
+            "REFUSES to record a 0-success/100%%-collision checkpoint as best (so progress alone "
+            "cannot crown a collapsed policy)."
+        ),
     )
+    add_adaptive_curriculum_arguments(parser)
 
 
 def add_training_health_arguments(parser):
@@ -378,12 +419,19 @@ class BestCheckpointTracker:
 
     # Grace between asking the evaluator to stop and killing it outright.
     EVALUATION_TERMINATE_GRACE = 5.0
+    COMPARISON_VERSION = 3
 
     def __init__(self, args, algorithm):
         self.args = args
         self.algorithm = str(algorithm)
+        self.curriculum = ensure_adaptive_curriculum(args)
         self.health_monitor = ensure_training_health_monitor(args, algorithm)
         self.enabled = bool(getattr(args, "best_checkpoint", False))
+        if self.curriculum.enabled and not self.enabled:
+            raise ValueError(
+                "--adaptive-curriculum requires --best-checkpoint because promotion "
+                "depends on frozen policy evaluations"
+            )
         if self.health_monitor.auto_recovery and not self.enabled:
             raise ValueError(
                 "--auto-recovery requires --best-checkpoint because only a frozen, "
@@ -397,7 +445,15 @@ class BestCheckpointTracker:
         self.best_summary = None
         self._executor = None
         self._pending = None  # (future, episode, staged_prefix)
-        self._ready = None  # (result, staged_prefix) awaiting promote or discard
+        self._pending_training_updates = None
+        self._pending_replay_path = None
+        # Optional generic hook: when set to a callable exporter(dest_keras_path)->None, evaluation runs on
+        # a self-contained policy.keras the exporter writes (staged/promoted as a single artifact) instead of
+        # a tf checkpoint. Lets a policy whose runnable form is not the raw checkpoint (e.g. residual PPO,
+        # whose effective action is base+gated-residual) use the standard best-checkpoint machinery. Default
+        # None keeps every existing algorithm on the unchanged checkpoint path.
+        self._policy_exporter = None
+        self._ready = None  # (result, staged_prefix, replay_path) awaiting promote or discard
         self._retained = []  # [(episode, prefix)] oldest first
         self._closing = threading.Event()
         self._process = None
@@ -409,6 +465,28 @@ class BestCheckpointTracker:
             self._clear_staging()  # drop leftovers from a killed run
             self._load_retained()
             self._load_metadata()
+
+    def set_policy_artifact_exporter(self, exporter):
+        """Evaluate a self-contained policy.keras (written by `exporter(dest_path)`) instead of the raw
+        checkpoint. `exporter` must serialize the CURRENT effective policy at call time (it runs on the
+        training thread, before the async evaluation is scheduled, so the bytes are pinned to the episode)."""
+        self._policy_exporter = exporter
+
+    @staticmethod
+    def _is_artifact_prefix(prefix):
+        return str(prefix).endswith(".keras")
+
+    def _remove_staged(self, prefix):
+        """Delete a staged/promoted artifact, whether it is a policy bundle (policy.keras + sibling .json)
+        or a tf-checkpoint shard set."""
+        if self._is_artifact_prefix(prefix):
+            for path in (Path(prefix), Path(prefix).with_suffix(".json")):
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+        else:
+            remove_checkpoint_files(prefix)
 
     def configure_recovery(self, checkpoint, optimizers, *, policy_publisher=None, post_restore=None):
         handler = TensorFlowCheckpointRecovery(
@@ -465,8 +543,15 @@ class BestCheckpointTracker:
                 flush=True,
             )
             return
+        if int(metadata.get("comparison_version", 1)) != self.COMPARISON_VERSION:
+            print(
+                "Best-checkpoint comparison format changed; starting a new "
+                "comparison baseline.",
+                flush=True,
+            )
+            return
         comparison_key = metadata.get("comparison_key")
-        if isinstance(comparison_key, list) and len(comparison_key) == 2:
+        if isinstance(comparison_key, list) and len(comparison_key) >= 2:
             self.best_key = tuple(float(value) for value in comparison_key)
             self.best_summary = metadata
 
@@ -479,25 +564,89 @@ class BestCheckpointTracker:
         return every > 0 and int(episode) % every == 0
 
     def comparison_key(self, summary):
-        success_rate = float(summary.get("success_rate", 0.0))
-        reward_mean = float(summary.get("reward_mean", -np.inf))
+        success_rate = float(
+            summary.get(
+                "selection_success_rate",
+                summary.get("success_rate", 0.0),
+            )
+        )
+        reward_mean = float(
+            summary.get("regular_reward_mean", summary.get("reward_mean", -np.inf))
+        )
         if self.args.best_metric == "reward_mean":
             return reward_mean, success_rate
-        return success_rate, reward_mean
+        if self.args.best_metric == "success_rate":
+            return success_rate, reward_mean
+
+        progress = float(
+            summary.get("regular_progress_mean", summary.get("progress_mean", -np.inf))
+        )
+        if self.args.best_metric == "lexicographic":
+            collision_rate = float(
+                summary.get("regular_collision_rate", summary.get("collision_rate", 0.0))
+            )
+            safe_progress = progress if np.isfinite(progress) else 0.0
+            # success first, then FEWER collisions, then progress, then reward. task_progress can
+            # only break ties among equally-safe checkpoints -- it can never outweigh a collision.
+            return (success_rate, -collision_rate, safe_progress, reward_mean)
+        if not np.isfinite(progress):
+            return success_rate, reward_mean
+        position_error = float(
+            summary.get(
+                "regular_position_error_mean",
+                summary.get("position_error_mean", np.nan),
+            )
+        )
+        orientation_error = float(
+            summary.get(
+                "regular_orientation_error_mean",
+                summary.get("orientation_error_mean", np.nan),
+            )
+        )
+        hold_frames = float(
+            summary.get("regular_hold_frames_max", summary.get("hold_frames_max", 0.0))
+        )
+        return (
+            success_rate,
+            progress,
+            -position_error if np.isfinite(position_error) else 0.0,
+            -orientation_error if np.isfinite(orientation_error) else 0.0,
+            hold_frames,
+            reward_mean,
+        )
 
     def is_improvement(self, result):
         candidate_key = self.comparison_key(result.summary)
         if not all(np.isfinite(value) for value in candidate_key):
             return False
+        # Never crown a fully collapsed policy: a 0-success run that collides on every episode is
+        # not a "best", no matter how high its task_progress reads.
+        summary = result.summary
+        success_rate = float(
+            summary.get("selection_success_rate", summary.get("success_rate", 0.0))
+        )
+        collision_rate = float(
+            summary.get("regular_collision_rate", summary.get("collision_rate", 0.0))
+        )
+        if success_rate <= 0.0 and collision_rate >= 1.0:
+            return False
         return self.best_key is None or candidate_key > self.best_key
 
-    def _evaluation_command(self, checkpoint_path, summary_path):
+    def _evaluation_command(self, checkpoint_path, summary_path, episode=None):
         evaluation_port = self.args.best_evaluation_port
         if evaluation_port is None:
             evaluation_port = int(self.args.base_port) + max(int(self.args.num_envs), 1)
         training_episode = self.args.best_evaluation_training_episode
         if training_episode is None:
             training_episode = int(self.args.num_episodes)
+        # An explicit fixed episode always wins. Otherwise evaluate the same curriculum stage
+        # the learner is collecting from, rather than silently jumping to final difficulty.
+        if (
+            self.args.best_evaluation_training_episode is None
+            and getattr(self.args, "best_evaluation_follow_curriculum", True)
+            and episode is not None
+        ):
+            training_episode = int(episode)
         max_steps = self.args.best_evaluation_max_steps
         if max_steps is None:
             max_steps = int(self.args.max_steps_per_episode)
@@ -505,23 +654,44 @@ class BestCheckpointTracker:
                 max_steps = 10_000
 
         runner = Path(__file__).resolve().parents[1] / "run.py"
+        # A staged policy.keras (artifact mode) is a standard runnable policy: run.py loads it generically
+        # via --load-from policy, with no knowledge of how it was produced. Otherwise load the tf checkpoint.
+        if self._is_artifact_prefix(checkpoint_path):
+            load_args = ["--load-from", "policy", "--policy-path", str(checkpoint_path)]
+        else:
+            load_args = ["--load-from", "checkpoint", "--checkpoint-path", str(checkpoint_path)]
         command = [
             sys.executable,
             str(runner),
             "--algorithm", self.algorithm,
-            "--load-from", "checkpoint",
-            "--checkpoint-path", str(checkpoint_path),
+            *load_args,
             "--episodes", str(self.args.best_evaluation_episodes),
             "--epsilon", "0.0",
+            "--evaluation-mode",
             "--training-episode", str(training_episode),
             "--seed", str(self.args.best_evaluation_seed),
             "--max-steps", str(max_steps),
+            "--physics-frames-per-step", str(
+                getattr(self.args, "physics_frames_per_step", 1)
+            ),
             "--port", str(evaluation_port),
             "--print-every", "0",
             "--summary-json", str(summary_path),
             "--headless",
             "--multi-agent" if self.args.multi_agent else "--no-multi-agent",
         ]
+        # The evaluator rebuilds the networks from scratch before loading the checkpoint, so it needs
+        # the same architecture the trainer used. Without this the weights fail to load with a shape
+        # mismatch and every frozen evaluation dies, leaving the health monitor stuck in warming_up.
+        network_layers = getattr(self.args, "network_layers", None)
+        if network_layers:
+            command.append("--network-layers")
+            command.extend(str(int(width)) for width in network_layers)
+        curriculum_config = self.curriculum.scenario_config()
+        if "curriculum_level" in curriculum_config:
+            command.extend(
+                ("--curriculum-level", str(curriculum_config["curriculum_level"]))
+            )
         if bool(getattr(self.args, "multi_policy", False)):
             command.extend([
                 "--multi-policy",
@@ -542,7 +712,7 @@ class BestCheckpointTracker:
     def evaluate(self, checkpoint_path, episode):
         with tempfile.TemporaryDirectory(prefix="godot-policy-eval-") as temp_dir:
             summary_path = Path(temp_dir) / "summary.json"
-            command = self._evaluation_command(checkpoint_path, summary_path)
+            command = self._evaluation_command(checkpoint_path, summary_path, episode)
             child_env = os.environ.copy()
             if self.args.best_evaluation_device == "cpu":
                 child_env["CUDA_VISIBLE_DEVICES"] = ""
@@ -591,10 +761,69 @@ class BestCheckpointTracker:
                 )
                 return None
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            curriculum_config = self.curriculum.scenario_config()
+            if "curriculum_level" in curriculum_config:
+                summary["curriculum_level"] = float(
+                    curriculum_config["curriculum_level"]
+                )
+            summary["evaluation_episode"] = int(episode)
+            evaluation_directory = Path(self.args.checkpoint_dir) / "evaluations"
+            evaluation_directory.mkdir(parents=True, exist_ok=True)
+            evaluation_artifact = evaluation_directory / f"eval-{int(episode)}.json"
+            summary["evaluation_artifact"] = str(evaluation_artifact)
+            temporary_artifact = evaluation_artifact.with_suffix(".json.tmp")
+            temporary_artifact.write_text(
+                json.dumps(summary, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            temporary_artifact.replace(evaluation_artifact)
+            selected_success = float(
+                summary.get("selection_success_rate", summary["success_rate"])
+            )
+            selected_reward = float(
+                summary.get("regular_reward_mean", summary["reward_mean"])
+            )
+            selected_progress = summary.get(
+                "regular_progress_mean",
+                summary.get("progress_mean"),
+            )
+            selected_position = summary.get(
+                "regular_position_error_mean",
+                summary.get("position_error_mean"),
+            )
+            selected_orientation = summary.get(
+                "regular_orientation_error_mean",
+                summary.get("orientation_error_mean"),
+            )
+            target_regions = summary.get("target_regions", {})
+            region_label = ""
+            if isinstance(target_regions, dict) and target_regions:
+                region_label = " regions=" + ",".join(
+                    f"{name}:{float(values.get('success_rate', 0.0)):.0%}"
+                    for name, values in sorted(target_regions.items())
+                    if isinstance(values, dict)
+                )
             print(
-                f"Frozen evaluation episode={episode}: success={summary['successes']}/{summary['trials']} "
-                f"({summary['success_rate']:.2%}) reward_mean={summary['reward_mean']:.4f} "
-                f"steps_mean={summary['steps_mean']:.1f}",
+                f"Frozen evaluation episode={episode}: selection_success={selected_success:.2%} "
+                f"overall_success={summary['successes']}/{summary['trials']} "
+                f"({summary['success_rate']:.2%}) reward_mean={selected_reward:.4f} "
+                f"steps_mean={summary['steps_mean']:.1f}"
+                + (
+                    f" progress_mean={float(selected_progress):.4f}"
+                    if selected_progress is not None
+                    else ""
+                )
+                + (
+                    f" position_error={float(selected_position):.4f}m"
+                    if selected_position is not None
+                    else ""
+                )
+                + (
+                    f" orientation_error={float(selected_orientation):.1f}deg"
+                    if selected_orientation is not None
+                    else ""
+                )
+                + region_label,
                 flush=True,
             )
             return PolicyEvaluationResult(int(episode), summary)
@@ -685,25 +914,84 @@ class BestCheckpointTracker:
             )
             return False
         episode = int(episode)
-        # Copy now, not on promotion. The training directory prunes to
-        # --keep-checkpoints while the evaluation runs, so by the time a result comes
-        # back the evaluated bytes may already be gone -- and the evaluator itself has
-        # been reading a file the trainer was free to delete underneath it.
-        try:
-            staged_prefix = copy_checkpoint_files(
-                checkpoint_path, self.staging_directory / f"ckpt-{episode}"
+        # Stage now, not on promotion. The training directory prunes to --keep-checkpoints while the
+        # evaluation runs, so by the time a result comes back the evaluated bytes may already be gone -- and
+        # the evaluator itself has been reading a file the trainer was free to delete underneath it.
+        if self._policy_exporter is not None:
+            # Artifact mode: export a frozen, self-contained policy.keras of the CURRENT effective policy.
+            staged_prefix = self.staging_directory / f"policy-{episode}.keras"
+            try:
+                self._policy_exporter(staged_prefix)
+            except Exception as exc:  # exporter failure must not take down training
+                print(f"WARNING: could not export policy artifact for evaluation at episode={episode}: {exc}",
+                      flush=True)
+                return False
+            training_updates = None
+        else:
+            try:
+                staged_prefix = copy_checkpoint_files(
+                    checkpoint_path, self.staging_directory / f"ckpt-{episode}"
+                )
+            except OSError as exc:
+                print(
+                    f"WARNING: could not stage checkpoint {checkpoint_path} for evaluation: {exc}",
+                    flush=True,
+                )
+                return False
+            training_updates = (
+                self._checkpoint_training_updates(checkpoint_path)
+                if self.curriculum.enabled
+                else None
             )
-        except OSError as exc:
-            print(
-                f"WARNING: could not stage checkpoint {checkpoint_path} for evaluation: {exc}",
-                flush=True,
-            )
-            return False
         if self._executor is None:
             self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="best-ckpt-eval")
         future = self._executor.submit(self.evaluate, staged_prefix, episode)
         self._pending = (future, episode, staged_prefix)
+        self._pending_training_updates = training_updates
+        self._pending_replay_path = (
+            replay_path_for_checkpoint(checkpoint_path)
+            if bool(getattr(self.args, "save_replay_buffer", False))
+            else None
+        )
         return True
+
+    @staticmethod
+    def _checkpoint_training_updates(checkpoint_path):
+        """Return the largest optimizer iteration stored in a TensorFlow checkpoint."""
+        try:
+            import tensorflow as tf
+
+            iterations = []
+            for variable_name, _shape in tf.train.list_variables(str(checkpoint_path)):
+                if not variable_name.endswith(
+                    "/_iterations/.ATTRIBUTES/VARIABLE_VALUE"
+                ):
+                    continue
+                normalized_name = variable_name.lower()
+                if (
+                    "critic" in normalized_name
+                    or "alpha_optimizer" in normalized_name
+                ):
+                    continue
+                if (
+                    "actor_optimizer/" not in normalized_name
+                    and not normalized_name.startswith("optimizer/")
+                    and "/optimizer/" not in normalized_name
+                    and "policy_optimizer/" not in normalized_name
+                ):
+                    continue
+                value = np.asarray(
+                    tf.train.load_variable(str(checkpoint_path), variable_name)
+                )
+                iterations.append(int(value.reshape(())))
+            return max(iterations, default=0)
+        except Exception as exc:
+            print(
+                f"WARNING: could not inspect optimizer iterations in "
+                f"{checkpoint_path}: {exc}",
+                flush=True,
+            )
+            return None
 
     def poll_ready(self, timeout=0.0):
         """Collect a completed background evaluation.
@@ -734,26 +1022,32 @@ class BestCheckpointTracker:
         elif not future.done():
             return None
         self._pending = None
+        training_updates = self._pending_training_updates
+        self._pending_training_updates = None
+        replay_path = self._pending_replay_path
+        self._pending_replay_path = None
         try:
             result = future.result()
         except Exception as exc:  # pragma: no cover - defensive: evaluate() already catches its own errors
             print(f"WARNING: best-policy evaluation raised an exception: {exc}", flush=True)
             result = None
         if result is None:
-            remove_checkpoint_files(staged_prefix)
+            self._remove_staged(staged_prefix)
             return None
+        if training_updates is not None:
+            result.summary["training_updates"] = int(training_updates)
         # Hand the result over still attached to the bytes that produced it, so a caller
         # cannot promote anything else by accident.
-        self._ready = (result, staged_prefix)
+        self._ready = (result, staged_prefix, replay_path)
         return result
 
     def discard_ready(self):
         """Drop a polled result that did not improve, and its staged copy."""
         if self._ready is None:
             return
-        _result, staged_prefix = self._ready
+        _result, staged_prefix, _replay_path = self._ready
         self._ready = None
-        remove_checkpoint_files(staged_prefix)
+        self._remove_staged(staged_prefix)
 
     def promote_ready(self, result):
         """Publish the exact weights that produced `result`.
@@ -764,9 +1058,26 @@ class BestCheckpointTracker:
         """
         if self._ready is None or self._ready[0] is not result:
             raise RuntimeError("promote_ready() requires the result returned by the last poll_ready()")
-        _result, staged_prefix = self._ready
+        _result, staged_prefix, source_replay_path = self._ready
         self._ready = None
         episode = int(result.episode)
+        if self._is_artifact_prefix(staged_prefix):
+            # Artifact mode: promote the staged bundle (policy.keras + coherent policy.json) as the single best
+            # deployable policy. No tf-shard retention / replay / checkpoint-state file -- the bundle IS the
+            # runnable best. The .json is copied first so a reader never sees policy.keras without its manifest.
+            best_artifact = self.directory / "policy.keras"
+            staged_manifest = Path(staged_prefix).with_suffix(".json")
+            if staged_manifest.is_file():
+                best_manifest = self.directory / "policy.json"
+                tmp_manifest = best_manifest.with_name(best_manifest.name + ".tmp")
+                shutil.copyfile(staged_manifest, tmp_manifest)
+                os.replace(tmp_manifest, best_manifest)
+            temporary = best_artifact.with_name(best_artifact.name + ".tmp")
+            shutil.copyfile(staged_prefix, temporary)
+            os.replace(temporary, best_artifact)
+            self._remove_staged(staged_prefix)
+            self.record_best(result, best_artifact)
+            return best_artifact
         best_prefix = self.directory / f"ckpt-{episode}"
         remove_checkpoint_files(best_prefix)
         for shard in checkpoint_shard_paths(staged_prefix):
@@ -775,10 +1086,67 @@ class BestCheckpointTracker:
         self._retained = [entry for entry in self._retained if entry[0] != episode]
         self._retained.append((episode, best_prefix))
         self._retained.sort()
+        promoted_replay = self._promote_replay_snapshot(
+            source_replay_path, best_prefix)
+        if promoted_replay is not None:
+            result.summary["replay_buffer"] = str(promoted_replay)
         self._prune_retained()
         self._write_checkpoint_state()
         self.record_best(result, best_prefix)
         return best_prefix
+
+    def _promote_replay_snapshot(self, source_path, best_prefix):
+        if source_path is None:
+            return None
+        source_path = Path(source_path)
+        temporary_source = source_path.with_name(source_path.name + ".tmp")
+        deadline = time.monotonic() + 10.0
+        while (
+            not source_path.is_file()
+            and temporary_source.exists()
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.05)
+        if not source_path.is_file():
+            print(
+                f"WARNING: best checkpoint {best_prefix} has no matching replay "
+                f"snapshot at {source_path}; checkpoint resume will collect replay "
+                "with the restored policy.",
+                flush=True,
+            )
+            return None
+        destination = replay_path_for_checkpoint(best_prefix)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(destination.name + ".tmp")
+        shutil.copyfile(source_path, temporary)
+        temporary.replace(destination)
+        print(
+            f"Promoted replay buffer: {destination}",
+            flush=True,
+        )
+        return destination
+
+    def reset_comparison_baseline_for_curriculum(
+        self,
+        reason="Curriculum advanced; waiting for a frozen evaluation at the new level.",
+    ):
+        """Start a fresh best/health baseline after curriculum difficulty changes."""
+        previous_level = None
+        if isinstance(self.best_summary, dict):
+            previous_level = self.best_summary.get("curriculum_level")
+        if self.metadata_path.is_file():
+            level_label = (
+                f"{float(previous_level):.3f}".replace(".", "_")
+                if previous_level is not None
+                else "previous"
+            )
+            archived = self.directory / f"best_metrics_level_{level_label}.json"
+            shutil.copy2(self.metadata_path, archived)
+            self.metadata_path.unlink()
+        self.best_key = None
+        self.best_summary = None
+        if hasattr(self.health_monitor, "reset_evaluation_baseline"):
+            self.health_monitor.reset_evaluation_baseline(reason)
 
     def _load_retained(self):
         entries = []
@@ -793,6 +1161,9 @@ class BestCheckpointTracker:
         while len(self._retained) > int(self.args.keep_best_checkpoints):
             _episode, prefix = self._retained.pop(0)
             remove_checkpoint_files(prefix)
+            replay_path = replay_path_for_checkpoint(prefix)
+            if replay_path.is_file():
+                replay_path.unlink()
 
     def _write_checkpoint_state(self):
         """Keep tf.train.latest_checkpoint() working on the best directory.
@@ -820,6 +1191,14 @@ class BestCheckpointTracker:
     def _clear_staging(self):
         for index_path in self.staging_directory.glob("ckpt-*.index"):
             remove_checkpoint_files(index_path.with_suffix(""))
+        # Policy-artifact staging (residual best) leaves policy-N.keras (+ its sibling policy-N.json)
+        # instead of tf shards; a killed run can strand them, so clear those too.
+        for artifact in self.staging_directory.glob("policy-*.keras"):
+            for path in (artifact, artifact.with_suffix(".json")):
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
 
     def close(self):
         """Stop the evaluator and its Godot child, then wait for the worker to unwind.
@@ -836,6 +1215,8 @@ class BestCheckpointTracker:
             self._executor.shutdown(wait=True, cancel_futures=True)
             self._executor = None
         self._pending = None
+        self._pending_training_updates = None
+        self._pending_replay_path = None
         self.discard_ready()
         if self.enabled:
             self._clear_staging()
@@ -845,6 +1226,7 @@ class BestCheckpointTracker:
         metadata = {
             "algorithm": self.algorithm,
             "metric": self.args.best_metric,
+            "comparison_version": self.COMPARISON_VERSION,
             "episode": int(result.episode),
             "checkpoint": str(checkpoint_path),
             "comparison_key": list(self.best_key),
@@ -854,10 +1236,25 @@ class BestCheckpointTracker:
         temporary_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         temporary_path.replace(self.metadata_path)
         self.best_summary = metadata
+        selected_reward = float(
+            result.summary.get(
+                "regular_reward_mean",
+                result.summary["reward_mean"],
+            )
+        )
+        selected_progress = result.summary.get(
+            "regular_progress_mean",
+            result.summary.get("progress_mean"),
+        )
         print(
             f"New best checkpoint: {checkpoint_path} metric={self.args.best_metric} "
-            f"success={result.summary['success_rate']:.2%} "
-            f"reward_mean={result.summary['reward_mean']:.4f}",
+            f"success={result.summary.get('selection_success_rate', result.summary['success_rate']):.2%} "
+            f"reward_mean={selected_reward:.4f}"
+            + (
+                f" progress_mean={float(selected_progress):.4f}"
+                if selected_progress is not None
+                else ""
+            ),
             flush=True,
         )
 
@@ -979,7 +1376,11 @@ def add_collector_arguments(parser):
         "--async-updates-per-step",
         type=int,
         default=1,
-        help="Gradient updates performed whenever the configured collection interval is reached.",
+        help=(
+            "Gradient updates performed whenever the configured collection interval is reached. "
+            "The setting is shared by sync and async collectors; the historical option name is "
+            "retained for compatibility."
+        ),
     )
     parser.add_argument(
         "--async-update-basis",
@@ -987,7 +1388,8 @@ def add_collector_arguments(parser):
         default="transitions",
         help=(
             "Schedule updates from individual agent transitions (multi-agent adaptive) or "
-            "from Godot environment step events (legacy behavior)."
+            "from Godot environment step events (legacy behavior). The same schedule is used "
+            "by sync and async collectors."
         ),
     )
     parser.add_argument(
@@ -998,7 +1400,19 @@ def add_collector_arguments(parser):
         default=4,
         help=(
             "Collected units required before scheduling learner updates. The unit is selected "
-            "by --async-update-basis; --async-update-every-steps is retained as a legacy alias."
+            "by --async-update-basis. This controls both collector modes; "
+            "--async-update-every-steps is retained as a legacy alias."
+        ),
+    )
+    parser.add_argument(
+        "--sync-batch-steps",
+        type=int,
+        default=0,
+        help=(
+            "Sync collector only: environment steps per reporting batch. Envs auto-reset, so "
+            "episodes span batches and this only sets how often metrics reach the log and the "
+            "dashboard. Zero means one batch per --max-steps-per-episode, which on long episodes "
+            "leaves the dashboard a minute behind; a small value (25-50) reports promptly."
         ),
     )
     parser.add_argument(
@@ -1226,6 +1640,54 @@ class AsyncCollectorPool:
     @property
     def alive_count(self):
         return sum(thread.is_alive() for thread in self._threads)
+
+
+class SyncUpdateThrottle:
+    """Collection-to-update scheduler for replay-based synchronous trainers.
+
+    It mirrors ``AsyncEventScheduler`` so switching collector mode changes transport and
+    concurrency, not the learner's update-to-data ratio.
+    """
+
+    def __init__(self, args):
+        self.update_basis = str(getattr(args, "async_update_basis", "transitions"))
+        self.update_every = int(
+            getattr(args, "async_update_every", getattr(args, "async_update_every_steps", 4))
+        )
+        self.updates_per_interval = int(getattr(args, "async_updates_per_step", 1))
+        self.max_updates_per_env_step = int(
+            getattr(args, "async_max_updates_per_env_step", 1)
+        )
+        if self.update_basis not in {"transitions", "env_steps"}:
+            raise ValueError(
+                "Sync update basis must be 'transitions' or 'env_steps'"
+            )
+        if self.update_every <= 0:
+            raise ValueError("Sync update interval must be greater than zero")
+        if self.updates_per_interval < 0:
+            raise ValueError("Sync updates per interval cannot be negative")
+        if self.max_updates_per_env_step < 0:
+            raise ValueError("Sync update cap cannot be negative")
+        self._credit = 0
+
+    def updates_due(self, collected_transitions, env_steps=1):
+        """Return updates earned by newly collected data from one synchronous batch."""
+        transition_count = max(0, int(collected_transitions))
+        step_count = max(0, int(env_steps))
+        collected_units = (
+            transition_count
+            if self.update_basis == "transitions"
+            else step_count
+        )
+        self._credit += collected_units
+        intervals, self._credit = divmod(self._credit, self.update_every)
+        requested = intervals * self.updates_per_interval
+        if self.max_updates_per_env_step <= 0:
+            return requested
+        return min(requested, step_count * self.max_updates_per_env_step)
+
+    def reset(self):
+        self._credit = 0
 
 
 class AsyncEventScheduler:
@@ -1625,6 +2087,7 @@ def maybe_start_dashboard(args, algorithm=None):
     server.start()
     register_metrics_sink(server.record)
     register_health_event_sink(server.record_health)
+    register_curriculum_sink(server.record_curriculum)
     health_monitor.replay_events(server.record_health)
     health_monitor.emit_snapshot()
     print(f"Dashboard live: http://127.0.0.1:{server.port}", flush=True)
@@ -1735,7 +2198,45 @@ def apply_ready_best_checkpoint(tracker, wait_timeout=0.0):
     result = tracker.poll_ready(timeout=wait_timeout)
     if result is None:
         return None
-    improved = tracker.is_improvement(result)
+    # The promotion cooldown lives inside observe_evaluation now (per-transition update count, not
+    # cumulative). Always observe; the controller freezes promotion until enough NEW updates.
+    curriculum_promoted = tracker.curriculum.observe_evaluation(
+        result.episode,
+        result.summary,
+    )
+    if tracker.curriculum.enabled:
+        snap = tracker.curriculum.snapshot()
+        print(
+            "Curriculum stage={i}/{n} level={lv:.1f} promote={c}/{cr} "
+            "demote={d}/{dr} updates_since={u}/{mu} cooldown={cd} "
+            "last={lt} selection_success={ss:.2%}".format(
+                i=snap["stage_index"], n=snap["stage_name"] or "-", lv=snap["level"],
+                c=snap["confirmations"], cr=snap["promotion_required"],
+                d=snap["demotion_confirmations"], dr=snap["demotion_required"],
+                u=snap["updates_since_last_transition"], mu=snap["min_policy_updates"],
+                cd=snap["cooldown_active"], lt=snap["last_transition"] or "-",
+                ss=float(result.summary.get(
+                    "selection_success_rate",
+                    result.summary.get("success_rate", 0.0))),
+            ),
+            flush=True,
+        )
+        snap["selection_success_rate"] = float(result.summary.get(
+            "selection_success_rate", result.summary.get("success_rate", 0.0)))
+        snap["target_regions"] = result.summary.get("target_regions", {})
+        _emit_curriculum(snap)
+    curriculum_demoted = (
+        tracker.curriculum.enabled
+        and tracker.curriculum.last_transition == "demoted"
+    )
+    if curriculum_demoted:
+        tracker.reset_comparison_baseline_for_curriculum(
+            "Curriculum moved back after repeated frozen-evaluation failures; "
+            "waiting for a baseline at the restored level."
+        )
+        tracker.discard_ready()
+        return None
+    improved = tracker.is_improvement(result) or curriculum_promoted
     if not improved:
         best_summary = tracker.best_summary
         best_checkpoint = (
@@ -1760,6 +2261,9 @@ def apply_ready_best_checkpoint(tracker, wait_timeout=0.0):
         best_checkpoint=str(checkpoint_path),
         improved=True,
     )
+    if curriculum_promoted:
+        tracker.curriculum.record_promotion_checkpoint(checkpoint_path)
+        tracker.reset_comparison_baseline_for_curriculum()
     return checkpoint_path
 
 
@@ -1855,8 +2359,20 @@ def cleanup_stale_replay_buffers(checkpoint_manager):
 
 def restore_replay_buffer(args, checkpoint_path, buffer):
     replay_path = replay_path_for_checkpoint(checkpoint_path)
-    if replay_path.is_file():
+    candidates = [replay_path]
+    checkpoint_path = Path(checkpoint_path)
+    if checkpoint_path.parent.name == "best":
+        candidates.append(
+            replay_path_for_checkpoint(
+                checkpoint_path.parent.parent / checkpoint_path.name
+            )
+        )
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        replay_path = candidate
         restored = buffer.load(replay_path)
+        args._replay_warmup_uses_restored_policy = False
         print(
             f"Restored replay buffer: {replay_path} transitions={restored}/{args.replay_capacity}",
             flush=True,
@@ -1864,9 +2380,11 @@ def restore_replay_buffer(args, checkpoint_path, buffer):
         return restored
     if getattr(args, "require_replay_buffer", False):
         raise FileNotFoundError(f"Checkpoint {checkpoint_path!r} has no replay buffer at {str(replay_path)!r}")
+    args._replay_warmup_uses_restored_policy = True
     print(
         f"WARNING: no replay buffer found for {checkpoint_path}; updates remain disabled until "
-        f"replay_size reaches replay_warmup={args.replay_warmup}.",
+        f"replay_size reaches replay_warmup={args.replay_warmup}. Collection will use the "
+        "restored policy instead of random warmup actions.",
         flush=True,
     )
     return 0

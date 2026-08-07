@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://cikdemorecorder1"]
+
+[ext_resource type="Script" path="res://tools/ik_demo_recorder.gd" id="1_rec"]
+
+[node name="IKDemoRecorder" type="Node3D"]
+script = ExtResource("1_rec")

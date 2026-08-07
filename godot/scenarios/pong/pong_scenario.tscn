@@ -1,12 +1,12 @@
 [gd_scene format=3 uid="uid://cv66pt1beuw2j"]
 
 [ext_resource type="Script" uid="uid://c1qwau3h5p18r" path="res://scenarios/pong/pong_scenario.gd" id="1_5k7yf"]
-[ext_resource type="Script" uid="uid://d38lybllmy6tq" path="res://scripts/bridge_server.gd" id="1_8qidu"]
-[ext_resource type="Script" uid="uid://cun4ha1fidr8n" path="res://scripts/agent/ScenarioController.gd" id="2_5k7yf"]
-[ext_resource type="Script" uid="uid://b47ph323gt6gl" path="res://scripts/agent/events/ScenarioEventSystem.gd" id="3_loxhw"]
-[ext_resource type="Script" uid="uid://botsx3bwjduj2" path="res://scripts/agent/events/ManualScenarioEventSource.gd" id="4_cvres"]
-[ext_resource type="Script" uid="uid://tn1jug3aq4ll" path="res://scripts/agent/ScenarioRewardSystem.gd" id="5_dlml4"]
-[ext_resource type="Script" uid="uid://b0mpnu83er6il" path="res://scripts/agent/scenario_reward_components/EventScenarioReward.gd" id="6_s5no5"]
+[ext_resource type="Script" uid="uid://d38lybllmy6tq" path="res://addons/metis/runtime/bridge_server.gd" id="1_8qidu"]
+[ext_resource type="Script" uid="uid://cun4ha1fidr8n" path="res://addons/metis/runtime/agent/ScenarioController.gd" id="2_5k7yf"]
+[ext_resource type="Script" uid="uid://b47ph323gt6gl" path="res://addons/metis/runtime/agent/events/ScenarioEventSystem.gd" id="3_loxhw"]
+[ext_resource type="Script" uid="uid://botsx3bwjduj2" path="res://addons/metis/runtime/agent/events/ManualScenarioEventSource.gd" id="4_cvres"]
+[ext_resource type="Script" uid="uid://tn1jug3aq4ll" path="res://addons/metis/runtime/agent/ScenarioRewardSystem.gd" id="5_dlml4"]
+[ext_resource type="Script" uid="uid://b0mpnu83er6il" path="res://addons/metis/runtime/agent/scenario_reward_components/EventScenarioReward.gd" id="6_s5no5"]
 [ext_resource type="PackedScene" uid="uid://de6qiwynlc8es" path="res://agents/PongPaddle/pong_paddle.tscn" id="7_4x70t"]
 [ext_resource type="PackedScene" uid="uid://1cn4sfelb5ti" path="res://scenarios/pong/pong_ball.tscn" id="8_y1c7r"]
 

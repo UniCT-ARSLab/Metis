@@ -92,38 +92,40 @@
     <div id="health-events" class="mt-4 pt-3 border-t border-gray-100 dark:border-white/10 space-y-1 text-xs"></div>
   </section>
 
+  <section id="curriculum-panel" class="card bg-white dark:bg-white/5 border border-gray-200 dark:border-white/10 p-5 hidden">
+    <div class="flex items-center justify-between flex-wrap gap-2">
+      <div class="flex items-center gap-2">
+        <h2 class="font-semibold">Curriculum</h2>
+        <span id="cur-stage" class="px-2 py-0.5 rounded-md text-xs font-semibold bg-indigo-100 text-indigo-700 dark:bg-indigo-500/20 dark:text-indigo-300">stage —</span>
+        <span id="cur-cooldown" class="px-2 py-0.5 rounded-md text-xs bg-gray-100 text-gray-600 dark:bg-white/10 dark:text-gray-300">cooldown —</span>
+      </div>
+      <span id="cur-last" class="text-xs text-gray-500 dark:text-gray-400">—</span>
+    </div>
+    <div class="mt-3 grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-2 text-sm">
+      <div class="flex justify-between"><span class="text-gray-500">Level</span><strong id="cur-level">—</strong></div>
+      <div class="flex justify-between"><span class="text-gray-500" title="promotion confirmations / required">Promotion</span><strong id="cur-promote">—</strong></div>
+      <div class="flex justify-between"><span class="text-gray-500" title="demotion confirmations / required">Demotion</span><strong id="cur-demote">—</strong></div>
+      <div class="flex justify-between"><span class="text-gray-500" title="policy updates since the last stage change / required">Updates since change</span><strong id="cur-updates">—</strong></div>
+      <div class="flex justify-between"><span class="text-gray-500" title="worst active region success">Selection success</span><strong id="cur-selection">—</strong></div>
+      <div class="flex justify-between col-span-2 sm:col-span-1"><span class="text-gray-500">Success / region</span><strong id="cur-regions" class="tabular-nums">—</strong></div>
+    </div>
+  </section>
+
   <section id="kpis" class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4"></section>
 
   <section class="grid grid-cols-1 lg:grid-cols-2 gap-5">
     <div class="card bg-white dark:bg-white/5 border border-gray-200 dark:border-white/10 p-5">
-      <h3 class="text-sm font-semibold mb-3 flex items-center gap-1.5">Reward
-        <span class="info" tabindex="0">i<span class="tip">The episode return reported by the trainer. Follow its trend across many episodes rather than judging one sample: exploration, random resets, and multiple agents can make individual values noisy. <b>The absolute scale and sign are task-specific</b>, so a negative return does not automatically mean that learning has failed.</span></span>
+      <h3 class="text-sm font-semibold mb-3 flex items-center gap-1.5">Reward (raw / avg 50 / max 50 / best)
+        <span class="info" tabindex="0">i<span class="tip">Per-episode return. With asynchronous multi-env collection every point is ONE env's episode (one agent here), interleaved across the 8 envs — so the raw line is noisy by design. <b>avg&nbsp;50</b> is the moving average over the last 50 completed episodes (the trend to follow); <b>max&nbsp;50</b> is the highest return within the last 50 episodes — the RECENT peak, which can go down (unlike best) so a one-off high does not hide a later decline; <b>best</b> is the running maximum return so far (the all-time ceiling, never decreases). <b>The absolute scale and sign are task-specific</b>, so a negative return does not automatically mean learning failed. For the cleanest signal use the frozen-eval <b>reward_mean</b> (every 100 episodes), not this live stream.</span></span>
       </h3><canvas id="c-reward"></canvas>
     </div>
+    <!-- Dynamic per-metric charts: one card auto-generated for every numeric metric the trainer emits,
+         so the dashboard adapts to the algorithm (SAC / PPO / anything) instead of hard-coding keys. -->
+    <div id="dynamic-charts" class="contents"></div>
     <div class="card bg-white dark:bg-white/5 border border-gray-200 dark:border-white/10 p-5">
-      <h3 class="text-sm font-semibold mb-3 flex items-center gap-1.5">Progress (mean / max)
-        <span class="info" tabindex="0">i<span class="tip">Progress is defined by the Godot scenario and usually normalized from 0 to 1. <b>Mean</b> summarizes the controlled agents, while <b>max</b> shows the best result in that episode. A rising mean indicates broader improvement; a high max with a low mean means success is still occasional. Confirm the exact meaning with the scene's ProgressProvider.</span></span>
-      </h3><canvas id="c-progress"></canvas>
-    </div>
-    <div class="card bg-white dark:bg-white/5 border border-gray-200 dark:border-white/10 p-5">
-      <h3 class="text-sm font-semibold mb-3 flex items-center gap-1.5">Losses (critic / actor)
-        <span class="info" tabindex="0">i<span class="tip"><b>Critic loss</b> measures value-target fitting; <b>actor loss</b> is the policy objective optimized by actor-critic methods. Their scale and even the actor loss sign depend on the algorithm and reward scale. Look for sustained instability, rapid growth, or non-finite values rather than a universal target number. Short spikes can be normal after new experience enters training.</span></span>
-      </h3><canvas id="c-loss"></canvas>
-    </div>
-    <div class="card bg-white dark:bg-white/5 border border-gray-200 dark:border-white/10 p-5">
-      <h3 class="text-sm font-semibold mb-3 flex items-center gap-1.5">Throughput (env steps/s · updates/s)
-        <span class="info" tabindex="0">i<span class="tip"><b>Environment steps/s</b> measures simulation decisions collected each second; <b>updates/s</b> measures learner optimization steps. These values describe speed, not policy quality. Compare them after warmup under the same configuration. A persistent drop can point to slower Godot instances, rendering overhead, queue pressure, checkpoint work, or a learner bottleneck.</span></span>
-      </h3><canvas id="c-tput"></canvas>
-    </div>
-    <div class="card bg-white dark:bg-white/5 border border-gray-200 dark:border-white/10 p-5">
-      <h3 class="text-sm font-semibold mb-3 flex items-center gap-1.5">Alpha (entropy coeff)
-        <span class="info" tabindex="0">i<span class="tip">SAC's learned entropy temperature. A higher alpha gives more weight to stochastic exploration; a lower alpha favors the reward objective and a more concentrated policy. <b>There is no universal ideal value</b>: interpret it together with entropy, rewards, and action behavior. Abrupt runaway growth or an early collapse toward zero may indicate unstable temperature tuning.</span></span>
-      </h3><canvas id="c-alpha"></canvas>
-    </div>
-    <div class="card bg-white dark:bg-white/5 border border-gray-200 dark:border-white/10 p-5">
-      <h3 class="text-sm font-semibold mb-3 flex items-center gap-1.5">Outcomes (success · collision · stall)
-        <span class="info" tabindex="0">i<span class="tip">Rates reported for the controlled agents in each completed episode. <b>Success</b> means the scene emitted its finish condition; <b>collision</b> and <b>stall</b> reflect scene-defined terminal diagnostics. Healthy training usually raises success while reducing avoidable failures, but the categories are not guaranteed to be mutually exclusive. Check the scenario event rules for their exact meaning.</span></span>
-      </h3><canvas id="c-outcome"></canvas>
+      <h3 class="text-sm font-semibold mb-3 flex items-center gap-1.5">Frozen policy evaluation
+        <span class="info" tabindex="0">i<span class="tip">Success measured periodically in an isolated deterministic run of a saved checkpoint. <b>Regular success</b> excludes bootstrap or assisted reset modes when the scenario reports them and is used for curriculum promotion and policy selection. <b>Overall success</b> includes every evaluation episode. These sparse points are the appropriate measure of deployed policy quality.</span></span>
+      </h3><canvas id="c-evaluation"></canvas>
     </div>
   </section>
   <p class="text-xs text-gray-400 text-center" id="footer">no data yet</p>
@@ -239,6 +241,31 @@ function compactValue(value) {
     return String(Number(n.toPrecision(3)));
   }).replace(/'/g, "");
 }
+function renderCurriculum(d) {
+  if (!d) return;
+  const panel = document.getElementById("curriculum-panel");
+  if (panel) panel.classList.remove("hidden");
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  set("cur-stage", `stage ${d.stage_index ?? "?"}/${d.stage_name ?? "?"}`);
+  const cd = document.getElementById("cur-cooldown");
+  if (cd) {
+    cd.textContent = d.cooldown_active ? "cooldown active" : "cooldown clear";
+    cd.className = "px-2 py-0.5 rounded-md text-xs " + (d.cooldown_active
+      ? "bg-amber-100 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300"
+      : "bg-gray-100 text-gray-600 dark:bg-white/10 dark:text-gray-300");
+  }
+  set("cur-level", (d.level ?? 0).toFixed(1));
+  set("cur-promote", `${d.confirmations ?? 0} / ${d.promotion_required ?? 0}`);
+  set("cur-demote", `${d.demotion_confirmations ?? 0} / ${d.demotion_required ?? 0}`);
+  set("cur-updates", `${d.updates_since_last_transition ?? 0} / ${d.min_policy_updates ?? 0}`);
+  set("cur-selection", d.selection_success_rate != null ? (d.selection_success_rate * 100).toFixed(0) + "%" : "—");
+  const ep = d.last_promotion_episode ?? d.last_demotion_episode;
+  set("cur-last", d.last_transition ? `${d.last_transition}${ep != null ? " @ ep " + ep : ""}` : "no transition yet");
+  const tr = d.target_regions || {};
+  const parts = Object.keys(tr).sort().map(k => `${k}:${(((tr[k] || {}).success_rate ?? 0) * 100).toFixed(0)}%`);
+  set("cur-regions", parts.length ? parts.join("  ") : "—");
+}
+
 function renderHealth(data) {
   if (!data) return;
   const state = data.state ?? data.health_state ?? "warming_up";
@@ -301,6 +328,7 @@ function ingestHealth(event) {
   if (healthEvents.length > 500) healthEvents = healthEvents.slice(-500);
   renderHealth(event);
   renderHealthEvents();
+  updateEvaluationChart();
 }
 function fmtDuration(s) {
   s = Math.max(0, Math.floor(s));
@@ -342,12 +370,17 @@ function mkChart(id, datasets) {
   return new Chart(document.getElementById(id), { type: "line", data: { labels: [], datasets }, options: baseOpts() });
 }
 function initCharts() {
-  charts.reward = mkChart("c-reward", [line("reward", "#6366f1")]);
-  charts.progress = mkChart("c-progress", [line("mean", "#10b981"), line("max", "#f59e0b")]);
-  charts.loss = mkChart("c-loss", [line("critic1", "#ef4444"), line("critic2", "#f97316"), line("actor", "#3b82f6")]);
-  charts.tput = mkChart("c-tput", [line("env steps/s", "#8b5cf6"), line("updates/s", "#14b8a6")]);
-  charts.alpha = mkChart("c-alpha", [line("alpha", "#ec4899")]);
-  charts.outcome = mkChart("c-outcome", [line("success", "#22c55e"), line("collision", "#ef4444"), line("stall", "#eab308")]);
+  charts.reward = mkChart("c-reward", [
+    { label: "raw", data: [], borderColor: "#6366f133", backgroundColor: "#6366f111", borderWidth: 1, pointRadius: 0, tension: 0.25, fill: false },
+    { label: "avg 50", data: [], borderColor: "#6366f1", backgroundColor: "#6366f122", borderWidth: 2.5, pointRadius: 0, tension: 0.25, fill: false },
+    { label: "max 50", data: [], borderColor: "#14b8a6", backgroundColor: "#14b8a600", borderWidth: 1.5, pointRadius: 0, tension: 0.25, fill: false },
+    { label: "best", data: [], borderColor: "#f59e0b", backgroundColor: "#f59e0b00", borderWidth: 1.5, borderDash: [6, 4], pointRadius: 0, tension: 0, fill: false },
+  ]);
+  charts.evaluation = mkChart("c-evaluation", [
+    line("regular success", "#22c55e"),
+    line("overall success", "#38bdf8"),
+    { label: "pos error m", data: [], borderColor: "#f43f5e", backgroundColor: "#f43f5e22", borderWidth: 2, borderDash: [4, 3], pointRadius: 0, tension: 0.25, fill: false, yAxisID: "y2" },
+  ]);
 }
 // EMA smoothing so the per-episode noise (async multi-env + varied targets) doesn't hide the
 // trend. weight in [0,1): 0 = raw, higher = smoother. Nulls pass through (gaps stay gaps).
@@ -363,29 +396,151 @@ function emaSmooth(arr, weight) {
   }
   return out;
 }
-function updateCharts() {
-  const rows = sample(episodes);
-  const labels = rows.map(epNum);
-  const set = (chart, series) => {
+// Moving average over the last `win` finite samples (window-based, unlike the global EMA). Nulls
+// carry the current window average so gaps do not break the line.
+function rollingMean(arr, win) {
+  const out = new Array(arr.length).fill(null);
+  const q = []; let sum = 0;
+  for (let i = 0; i < arr.length; i++) {
+    const v = arr[i];
+    if (v != null && Number.isFinite(v)) {
+      q.push(v); sum += v;
+      if (q.length > win) sum -= q.shift();
+    }
+    out[i] = q.length ? sum / q.length : null;
+  }
+  return out;
+}
+// Running maximum (the best return reached so far, all-time ceiling — never decreases).
+function runningMax(arr) {
+  const out = new Array(arr.length).fill(null);
+  let m = null;
+  for (let i = 0; i < arr.length; i++) {
+    const v = arr[i];
+    if (v != null && Number.isFinite(v)) m = (m == null) ? v : Math.max(m, v);
+    out[i] = m;
+  }
+  return out;
+}
+// Rolling maximum over the last `win` episodes (the RECENT peak return — can decrease,
+// unlike the all-time running max), so a one-off high does not mask a later decline.
+function windowMax(arr, win) {
+  const out = new Array(arr.length).fill(null);
+  const q = [];
+  for (let i = 0; i < arr.length; i++) {
+    const v = arr[i];
+    if (v != null && Number.isFinite(v)) {
+      q.push(v);
+      if (q.length > win) q.shift();
+    }
+    out[i] = q.length ? Math.max(...q) : null;
+  }
+  return out;
+}
+// ---- dynamic per-metric charts ----------------------------------------------------------
+// Bookkeeping / label fields that are not learning signals, so they never get their own chart.
+const DYNAMIC_SKIP = new Set([
+  "episode", "completed", "policy_version", "worker", "collector", "exploration",
+  "assignment", "policies", "by_policy", "skipped", "reward", "rewards", "queue", "replay",
+  "workers", "samples", "total_timesteps",
+]);
+// Generic value parser: pulls one number out of the human-readable metric strings the trainer emits.
+// "mean:0.9 max:0.95" -> 0.9 ; "5/10 (50%)" -> 0.5 ; "50.3 [40, 60]" or "1.2/3.4" -> 50.3 / 1.2 ;
+// plain number -> itself. Returns null when there is no number (pure label), so it is skipped.
+function parseMetric(v) {
+  if (v === null || v === undefined) return null;
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  const s = String(v);
+  let m = s.match(/mean:\s*([-0-9.eE]+)/);
+  if (m) return parseFloat(m[1]);
+  m = s.match(/([0-9.]+)\s*\/\s*([0-9.]+)\s*\(/);           // "5/10 (…%)" rate
+  if (m && parseFloat(m[2]) > 0) return parseFloat(m[1]) / parseFloat(m[2]);
+  m = s.match(/-?[0-9]+\.?[0-9]*(e[-+]?[0-9]+)?/i);          // leading number of anything else
+  return m ? parseFloat(m[0]) : null;
+}
+// Discover, from the most recent episodes, every field that carries a number and is not skipped.
+function discoverMetricKeys() {
+  const keys = new Set();
+  for (const row of episodes.slice(-200)) {
+    for (const k of Object.keys(row)) {
+      if (DYNAMIC_SKIP.has(k)) continue;
+      if (parseMetric(row[k]) !== null) keys.add(k);
+    }
+  }
+  return [...keys].sort();
+}
+const dynamicCharts = {};
+function ensureDynamicChart(key) {
+  if (dynamicCharts[key]) return dynamicCharts[key];
+  const card = document.createElement("div");
+  card.className = "card bg-white dark:bg-white/5 border border-gray-200 dark:border-white/10 p-5";
+  const title = document.createElement("h3");
+  title.className = "text-sm font-semibold mb-3";
+  title.textContent = key.replaceAll("_", " ");
+  const canvas = document.createElement("canvas");
+  card.appendChild(title); card.appendChild(canvas);
+  document.getElementById("dynamic-charts").appendChild(card);
+  const chart = new Chart(canvas, {
+    type: "line",
+    data: { labels: [], datasets: [line("raw", "#6366f1"), line("avg 50", "#f59e0b")] },
+    options: baseOpts(),
+  });
+  chart.data.datasets[0].borderWidth = 1;
+  chart.data.datasets[0].borderColor = "#6366f155";
+  dynamicCharts[key] = chart;
+  return chart;
+}
+function updateDynamicCharts() {
+  const labels = sample(episodes).map(epNum);
+  for (const key of discoverMetricKeys()) {
+    const chart = ensureDynamicChart(key);
+    const full = episodes.map(r => parseMetric(r[key]));
     chart.data.labels = labels;
-    series.forEach((fn, i) => {
-      chart.data.datasets[i].data = emaSmooth(rows.map(fn), smoothing);
-    });
+    chart.data.datasets[0].data = sample(emaSmooth(full, smoothing));
+    chart.data.datasets[1].data = sample(rollingMean(full, 50));
     chart.update("none");
+  }
+}
+function updateCharts() {
+  const labels = sample(episodes).map(epNum);
+  // Reward: raw + moving-average(50) + recent-window max + running best (its own curated card).
+  const rewardFull = episodes.map(r => field(r, "reward"));
+  charts.reward.data.labels = labels;
+  charts.reward.data.datasets[0].data = sample(rewardFull);
+  charts.reward.data.datasets[1].data = sample(rollingMean(rewardFull, 50));
+  charts.reward.data.datasets[2].data = sample(windowMax(rewardFull, 50));
+  charts.reward.data.datasets[3].data = sample(runningMax(rewardFull));
+  charts.reward.update("none");
+  updateDynamicCharts();
+}
+function updateEvaluationChart() {
+  if (!charts.evaluation) return;
+  const byEpisode = new Map();
+  for (const event of healthEvents) {
+    const evaluation = event?.current_evaluation;
+    if (!evaluation || evaluation.episode == null) continue;
+    byEpisode.set(Number(evaluation.episode), evaluation);
+  }
+  const rows = [...byEpisode.values()].sort((a, b) => Number(a.episode) - Number(b.episode));
+  charts.evaluation.data.labels = rows.map(row => Number(row.episode));
+  charts.evaluation.data.datasets[0].data = rows.map(row => num(row.success_rate));
+  charts.evaluation.data.datasets[1].data = rows.map(row =>
+    num(row.overall_success_rate ?? row.success_rate)
+  );
+  charts.evaluation.data.datasets[2].data = rows.map(row => num(row.position_error_mean));
+  charts.evaluation.options.scales.y.min = 0;
+  charts.evaluation.options.scales.y.max = 1;
+  charts.evaluation.options.scales.y2 = {
+    position: "right", min: 0,
+    grid: { drawOnChartArea: false },
+    ticks: { color: themeColors().tick, font: { size: 10 } },
+    title: { display: true, text: "pos err (m)", color: themeColors().tick, font: { size: 10 } },
   };
-  set(charts.reward, [r => field(r, "reward")]);
-  set(charts.progress, [r => progressPair(r).mean, r => progressPair(r).max]);
-  set(charts.loss, [
-    r => num((String(r.critic_loss ?? "").split("/")[0])),
-    r => num((String(r.critic_loss ?? "").split("/")[1])),
-    r => field(r, "actor_loss"),
-  ]);
-  set(charts.tput, [r => field(r, "env_steps_s"), r => field(r, "updates_s")]);
-  set(charts.alpha, [r => field(r, "alpha")]);
-  set(charts.outcome, [r => ratePair(r, "finish"), r => ratePair(r, "collision"), r => ratePair(r, "stall")]);
+  charts.evaluation.update("none");
 }
 function refreshChartTheme() {
-  Object.values(charts).forEach(c => { c.options = baseOpts(); c.update("none"); });
+  [...Object.values(charts), ...Object.values(dynamicCharts)].forEach(c => { c.options = baseOpts(); c.update("none"); });
+  updateEvaluationChart();
 }
 
 // ---- data flow --------------------------------------------------------------------------
@@ -411,6 +566,7 @@ async function loadHealthHistory() {
     healthEvents = data.events || [];
     if (healthEvents.length) renderHealth(healthEvents[healthEvents.length - 1]);
     renderHealthEvents();
+    updateEvaluationChart();
   } catch (e) { renderHealthEvents(); }
 }
 function connect() {
@@ -424,12 +580,14 @@ function connect() {
     if (msg.type === "meta") { renderMeta(msg.data); }
     else if (msg.type === "snapshot") { if (episodes.length === 0) { episodes = msg.data; renderKpis(); updateCharts(); } }
     else if (msg.type === "episodes") { ingest(msg.data); }
+    else if (msg.type === "curriculum") { renderCurriculum(msg.data); }
     else if (msg.type === "health") { ingestHealth(msg.data); }
     else if (msg.type === "health_snapshot") {
       if (healthEvents.length === 0) {
         healthEvents = msg.data || [];
         if (healthEvents.length) renderHealth(healthEvents[healthEvents.length - 1]);
         renderHealthEvents();
+        updateEvaluationChart();
       }
     }
   };

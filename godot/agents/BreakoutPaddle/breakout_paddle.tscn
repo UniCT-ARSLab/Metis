@@ -2,14 +2,14 @@
 
 [ext_resource type="Texture2D" uid="uid://c7y6gc31prv7" path="res://assets/sprites/breakout/paddleBlu.png" id="1_gkoiq"]
 [ext_resource type="Script" uid="uid://ck2qw03f5oqft" path="res://agents/BreakoutPaddle/breakout_paddle.gd" id="1_hqqp6"]
-[ext_resource type="Script" uid="uid://byrdvsguqdev3" path="res://scripts/agent/Agent.gd" id="2_wf0fb"]
-[ext_resource type="Script" uid="uid://bjhxcss2ima54" path="res://scripts/agent/action_space/ActionSpace.gd" id="3_hqqp6"]
-[ext_resource type="Script" uid="uid://c3v2k8xuahe2j" path="res://scripts/agent/action_space/DiscreteActionSet.gd" id="4_2q727"]
-[ext_resource type="Script" uid="uid://d1xuba84xevcv" path="res://scripts/agent/RewardSystem.gd" id="5_lonxf"]
-[ext_resource type="Script" uid="uid://dyq1fjgcu1wqu" path="res://scripts/agent/reward_components/StepPenaltyReward.gd" id="6_cmbfi"]
-[ext_resource type="Script" uid="uid://clefx53jebtj3" path="res://scripts/agent/observations/ObservationSystem.gd" id="7_cm808"]
-[ext_resource type="Script" uid="uid://cys7i0vchrdlo" path="res://scripts/agent/observations/MethodObservationSource.gd" id="8_ft730"]
-[ext_resource type="Script" uid="uid://cp4g4r5f7n1kx" path="res://scripts/agent/action_space/DiscreteAction.gd" id="9_discrete_action"]
+[ext_resource type="Script" uid="uid://byrdvsguqdev3" path="res://addons/metis/runtime/agent/Agent.gd" id="2_wf0fb"]
+[ext_resource type="Script" uid="uid://bjhxcss2ima54" path="res://addons/metis/runtime/agent/action_space/ActionSpace.gd" id="3_hqqp6"]
+[ext_resource type="Script" uid="uid://c3v2k8xuahe2j" path="res://addons/metis/runtime/agent/action_space/DiscreteActionSet.gd" id="4_2q727"]
+[ext_resource type="Script" uid="uid://d1xuba84xevcv" path="res://addons/metis/runtime/agent/RewardSystem.gd" id="5_lonxf"]
+[ext_resource type="Script" uid="uid://dyq1fjgcu1wqu" path="res://addons/metis/runtime/agent/reward_components/StepPenaltyReward.gd" id="6_cmbfi"]
+[ext_resource type="Script" uid="uid://clefx53jebtj3" path="res://addons/metis/runtime/agent/observations/ObservationSystem.gd" id="7_cm808"]
+[ext_resource type="Script" uid="uid://cys7i0vchrdlo" path="res://addons/metis/runtime/agent/observations/MethodObservationSource.gd" id="8_ft730"]
+[ext_resource type="Script" uid="uid://cp4g4r5f7n1kx" path="res://addons/metis/runtime/agent/action_space/DiscreteAction.gd" id="9_discrete_action"]
 
 [sub_resource type="CapsuleShape2D" id="CapsuleShape2D_chi8s"]
 radius = 24.0

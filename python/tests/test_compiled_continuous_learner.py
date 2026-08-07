@@ -18,7 +18,7 @@ ACTION_LOW = np.array([-1.0, -1.0], dtype=np.float32)
 ACTION_HIGH = np.array([1.0, 1.0], dtype=np.float32)
 
 
-def _build_learner(compiled, seed=0):
+def _build_learner(compiled, seed=0, actor_anchor_coef=0.0):
     tf.keras.utils.set_random_seed(seed)
     actor = build_sac_actor(OBS_DIM, ACTION_SIZE)
     critic1 = build_continuous_critic(OBS_DIM, ACTION_SIZE)
@@ -50,6 +50,7 @@ def _build_learner(compiled, seed=0):
         -20.0,
         2.0,
         compiled=compiled,
+        actor_anchor_coef=actor_anchor_coef,
     )
 
 
@@ -110,6 +111,14 @@ class CompiledSacLearnerTest(unittest.TestCase):
                 late = float(np.mean(critic1_losses[-10:]))
                 # Regressing critics toward a bounded target must reduce the fit error.
                 self.assertLess(late, early)
+
+    def test_actor_anchor_supports_eager_and_compiled_updates(self):
+        for compiled in (True, False):
+            with self.subTest(compiled=compiled):
+                learner = _build_learner(compiled, actor_anchor_coef=10.0)
+                losses = learner(*_fixed_batch(), update_policy=True)
+                self.assertEqual(len(losses), 5)
+                self.assertTrue(all(np.isfinite(value) for value in losses))
 
 
 class _FixedBuffer:

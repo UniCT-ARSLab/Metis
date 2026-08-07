@@ -10,6 +10,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty
+from threading import Event
 
 
 def configure_tensorflow_runtime():
@@ -48,7 +49,17 @@ configure_tensorflow_runtime()
 import numpy as np
 import tensorflow as tf
 
-from core.models import build_greedy_action_fn, build_shared_q_network
+
+def replay_warmup_threshold(args):
+    return max(int(args.replay_warmup), int(args.batch_size))
+
+from core.curriculum import scenario_curriculum_config
+from core.models import (
+    build_greedy_action_fn,
+    build_shared_q_network,
+    default_network_layers,
+    set_network_layers,
+)
 from core.multi_policy import (
     MultiPolicySnapshot,
     add_multi_policy_arguments,
@@ -71,6 +82,7 @@ from core.training_health import OffPolicyRecoveryRuntime
 from core.training import (
     AsyncCollectorPool,
     AsyncEventScheduler,
+    SyncUpdateThrottle,
     AsyncEpisodeEvent,
     AsyncStepEvent,
     AsyncWorkerDoneEvent,
@@ -200,6 +212,17 @@ def parse_args():
         ),
     )
     parser.add_argument("--replay-capacity", type=int, default=100000)
+    parser.add_argument(
+        "--network-layers",
+        type=int,
+        nargs="+",
+        default=None,
+        metavar="WIDTH",
+        help="Hidden layer widths for actor/critic/Q networks, e.g. --network-layers 256 256. "
+        "Omitted, each algorithm uses its reference architecture (SAC 256 256, "
+        "TD3/DDPG 400 300, PPO and DQN 64 64). Checkpoints written before these "
+        "defaults used 256 256 128 and need that value passed explicitly.",
+    )
     parser.add_argument("--env-seed-base", type=int, default=100)
     parser.add_argument("--episode-seed-multiplier", type=int, default=1000)
     parser.add_argument("--env-timeout", type=float, default=30.0)
@@ -446,9 +469,20 @@ def run_async_dqn(
             lambda: snapshot.publish(model.get_weights())
         )
     rngs = [np.random.default_rng(args.env_seed_base + 100_003 * idx) for idx in range(len(envs))]
+    replay_ready_event = Event()
+    warmup_completed_episode = {
+        "value": int(start_episode)
+        if len(buffer) >= replay_warmup_threshold(args)
+        else None
+    }
+    if warmup_completed_episode["value"] is not None:
+        replay_ready_event.set()
 
     def epsilon_for_episode(episode):
-        elapsed = max(0, int(episode) - int(start_episode))
+        warmup_episode = warmup_completed_episode["value"]
+        if warmup_episode is None:
+            return 1.0
+        elapsed = max(0, int(episode) - int(warmup_episode))
         return max(args.epsilon_min, float(start_epsilon) * (args.epsilon_decay ** elapsed))
 
     def begin_episode(worker_id, env, episode):
@@ -457,6 +491,7 @@ def run_async_dqn(
             max_steps=args.max_steps_per_episode,
             physics_frames_per_step=args.physics_frames_per_step,
             training_mode=True,
+            **scenario_curriculum_config(args),
         )
         obs, info = env.reset(seed=args.episode_seed_multiplier * episode + worker_id)
         # Each worker draws its own opponent into a model private to it, so concurrent
@@ -499,6 +534,7 @@ def run_async_dqn(
                     if opponent_pool is not None and opponent_pool.enabled
                     else np.ones((agent_count,), dtype=np.bool_)
                 ),
+                "replay_warmup_exploration": not replay_ready_event.is_set(),
             }
         return {
             "obs": obs,
@@ -515,6 +551,7 @@ def run_async_dqn(
             "last_action": 0,
             "opponent_match": opponent_match,
             "learner_mask": None,
+            "replay_warmup_exploration": not replay_ready_event.is_set(),
         }
 
     def choose_action(worker_id, _env, episode, _step_idx, local_model, state):
@@ -689,6 +726,12 @@ def run_async_dqn(
                     for transition in step_event.transitions:
                         buffer.add(*transition)
                         collected_transitions += 1
+                if (
+                    not replay_ready_event.is_set()
+                    and len(buffer) >= replay_warmup_threshold(args)
+                ):
+                    warmup_completed_episode["value"] = int(completed)
+                    replay_ready_event.set()
                 budget.consume(collected_transitions)
                 updates_due = scheduler.ingest(step_events)
                 updates_performed = 0
@@ -743,7 +786,17 @@ def run_async_dqn(
             mean_loss = float(np.mean(losses_since_log)) if losses_since_log else 0.0
             throughput = scheduler.throughput(pool)
             print_episode_metrics(event.episode, [
-                ("mode", [("collector", "async"), ("worker", event.worker_id), ("epsilon", f"{epsilon:.3f}")]),
+                ("mode", [
+                    ("collector", "async"),
+                    ("worker", event.worker_id),
+                    (
+                        "exploration",
+                        "warmup_random"
+                        if state.get("replay_warmup_exploration", False)
+                        else "epsilon_greedy",
+                    ),
+                    ("epsilon", f"{epsilon:.3f}"),
+                ]),
                 ("outcome", [
                     ("reward", rewards),
                     ("progress", f"{float(state.get('progress', 0.0)):.4f}"),
@@ -755,6 +808,8 @@ def run_async_dqn(
                     ("total_timesteps", budget.collected),
                     ("queue", f"{throughput['queue_size']}/{throughput['queue_capacity']} ({throughput['queue_saturation']:.0%})"),
                     ("replay", f"{len(buffer)}/{args.replay_capacity}"),
+                    ("replay_warmup_left", max(
+                        0, replay_warmup_threshold(args) - len(buffer))),
                     ("updates", len(losses_since_log)),
                     ("loss", f"{mean_loss:.5f}"),
                     ("policy_version", snapshot.version),
@@ -1073,11 +1128,30 @@ def run_async_multi_policy_dqn(
         policy_id: float(state.epsilon.numpy())
         for policy_id, state in policy_states.items()
     }
+    trainable_states = [
+        state for state in policy_states.values() if state.trainable
+    ]
+    if not trainable_states:
+        raise ValueError("Multi-policy DQN requires at least one trainable policy")
+    replay_ready_event = Event()
+    warmup_completed_episode = {
+        "value": int(start_episode)
+        if all(
+            len(state.buffer) >= replay_warmup_threshold(args)
+            for state in trainable_states
+        )
+        else None
+    }
+    if warmup_completed_episode["value"] is not None:
+        replay_ready_event.set()
 
     def epsilon_for(policy_id, episode):
         if not policy_states[policy_id].trainable:
             return 0.0
-        elapsed = max(0, int(episode) - int(start_episode))
+        warmup_episode = warmup_completed_episode["value"]
+        if warmup_episode is None:
+            return 1.0
+        elapsed = max(0, int(episode) - int(warmup_episode))
         return max(
             args.epsilon_min,
             initial_epsilons[policy_id] * (args.epsilon_decay ** elapsed),
@@ -1089,6 +1163,7 @@ def run_async_multi_policy_dqn(
             max_steps=args.max_steps_per_episode,
             physics_frames_per_step=args.physics_frames_per_step,
             training_mode=True,
+            **scenario_curriculum_config(args),
         )
         obs, info = env.reset(
             seed=args.episode_seed_multiplier * episode + worker_id
@@ -1109,6 +1184,7 @@ def run_async_multi_policy_dqn(
             "episode_steps": np.zeros((agent_count,), dtype=np.int32),
             "event_counts": {},
             "terminal_counts": {},
+            "replay_warmup_exploration": not replay_ready_event.is_set(),
         }
 
     def choose_action(
@@ -1277,6 +1353,15 @@ def run_async_multi_policy_dqn(
                         policy_id, *payload = transition
                         policy_states[policy_id].buffer.add(*payload)
                         collected += 1
+                if (
+                    not replay_ready_event.is_set()
+                    and all(
+                        len(state.buffer) >= replay_warmup_threshold(args)
+                        for state in trainable_states
+                    )
+                ):
+                    warmup_completed_episode["value"] = int(completed)
+                    replay_ready_event.set()
                 budget.consume(collected)
                 updates_due = scheduler.ingest_by_policy(
                     step_events,
@@ -1354,6 +1439,12 @@ def run_async_multi_policy_dqn(
                     ("collector", "async"),
                     ("worker", event.worker_id),
                     ("policies", len(policy_states)),
+                    (
+                        "exploration",
+                        "warmup_random"
+                        if payload.get("replay_warmup_exploration", False)
+                        else "epsilon_greedy",
+                    ),
                 ]),
                 ("outcome", [("reward", payload["ep_reward"].tolist())]),
                 ("training", [
@@ -1620,6 +1711,11 @@ def run_sync_multi_policy_dqn(
     last_completed_episode = start_episode
     last_saved_episode = None
     interrupted = False
+    sync_throttles = {
+        policy_id: SyncUpdateThrottle(args)
+        for policy_id, state in policy_states.items()
+        if state.trainable
+    }
     try:
         for episode in range(start_episode, args.num_episodes):
             env_states = []
@@ -1629,6 +1725,7 @@ def run_sync_multi_policy_dqn(
                     max_steps=args.max_steps_per_episode,
                     physics_frames_per_step=args.physics_frames_per_step,
                     training_mode=True,
+                    **scenario_curriculum_config(args),
                 )
                 obs, info = env.reset(
                     seed=args.episode_seed_multiplier * episode + env_idx
@@ -1674,7 +1771,13 @@ def run_sync_multi_policy_dqn(
                         policy_id = assignment.policy_for_agent(agent_id)
                         policy = policy_states[policy_id]
                         epsilon = (
-                            float(policy.epsilon.numpy())
+                            1.0
+                            if (
+                                policy.trainable
+                                and len(policy.buffer)
+                                < replay_warmup_threshold(args)
+                            )
+                            else float(policy.epsilon.numpy())
                             if policy.trainable
                             else 0.0
                         )
@@ -1693,6 +1796,9 @@ def run_sync_multi_policy_dqn(
                 for env, env_state, actions, step_result in stepper.step(requests):
                     next_obs, _reward, terminated, truncated, info = step_result
                     done = bool(terminated or truncated)
+                    transitions_by_policy = {
+                        policy_id: 0 for policy_id in sync_throttles
+                    }
                     per_agent_rewards = np.asarray(
                         info.get("per_agent_rewards"),
                         dtype=np.float32,
@@ -1748,6 +1854,7 @@ def run_sync_multi_policy_dqn(
                                 ),
                             )
                             budget.consume(1)
+                            transitions_by_policy[policy_id] += 1
                         env_state["ep_reward"][agent_idx] += (
                             per_agent_rewards[agent_idx]
                         )
@@ -1765,14 +1872,27 @@ def run_sync_multi_policy_dqn(
                                 args.batch_size,
                             ):
                                 continue
-                            loss = float(
+                            updates_due = sync_throttles[
+                                policy_id
+                            ].updates_due(
+                                transitions_by_policy.get(policy_id, 0),
+                                env_steps=(
+                                    1
+                                    if transitions_by_policy.get(
+                                        policy_id, 0
+                                    ) > 0
+                                    else 0
+                                ),
+                            )
+                            if updates_due <= 0:
+                                continue
+                            losses[policy_id].extend(
                                 policy.learner_step(
                                     policy.buffer,
                                     args.batch_size,
-                                    1,
-                                )[0]
+                                    updates_due,
+                                ).tolist()
                             )
-                            losses[policy_id].append(loss)
                 if budget.exhausted:
                     break
 
@@ -1784,7 +1904,10 @@ def run_sync_multi_policy_dqn(
                         )
 
             for policy in policy_states.values():
-                if policy.trainable:
+                if (
+                    policy.trainable
+                    and len(policy.buffer) >= replay_warmup_threshold(args)
+                ):
                     policy.epsilon.assign(
                         max(
                             args.epsilon_min,
@@ -1924,6 +2047,9 @@ def main():
     describe_tensorflow_backend(args)
     dashboard = maybe_start_dashboard(args, algorithm="dqn")
     training_start_time = time.monotonic()
+    # Architecture is process-wide state, so it must be fixed before the first network is
+    # built -- the seeding block below is the last point where nothing exists yet.
+    set_network_layers(args.network_layers or default_network_layers("dqn"))
     random.seed(args.env_seed_base)
     np.random.seed(args.env_seed_base)
     tf.random.set_seed(args.env_seed_base)
@@ -2177,9 +2303,16 @@ def main():
         if recovery_handler is not None:
             recovery_handler.set_post_restore(recovery_runtime.post_restore)
 
+        sync_throttle = SyncUpdateThrottle(args)
         last_saved_episode = None
         for episode in range(start_episode, args.num_episodes):
             opponent_match = opponent_pool.start_episode(model, episode)
+            warmup_exploration = len(buffer) < replay_warmup_threshold(args)
+            action_epsilon = (
+                1.0
+                if warmup_exploration
+                else epsilon
+            )
             env_states = []
             for env_idx, env in enumerate(envs):
                 env.configure(
@@ -2187,6 +2320,7 @@ def main():
                     max_steps=args.max_steps_per_episode,
                     physics_frames_per_step=args.physics_frames_per_step,
                     training_mode=True,
+                    **scenario_curriculum_config(args),
                 )
                 obs, info = env.reset(seed=args.episode_seed_multiplier * episode + env_idx)
                 if args.multi_agent:
@@ -2242,7 +2376,13 @@ def main():
                         continue
 
                     if args.multi_agent:
-                        action = select_actions(model, state["obs"], state["done_mask"], epsilon, num_actions)
+                        action = select_actions(
+                            model,
+                            state["obs"],
+                            state["done_mask"],
+                            action_epsilon,
+                            num_actions,
+                        )
                         if opponent_match.model is not None:
                             opponent_action = select_actions(
                                 opponent_match.model,
@@ -2260,7 +2400,12 @@ def main():
                             state["action_counts"][agent_idx, int(action_id)] += 1
                             state["last_action"][agent_idx] = int(action_id)
                     else:
-                        action = select_action(model, state["obs"], epsilon, num_actions)
+                        action = select_action(
+                            model,
+                            state["obs"],
+                            action_epsilon,
+                            num_actions,
+                        )
                         state["action_counts"][int(action)] += 1
                         state["last_action"] = int(action)
 
@@ -2269,6 +2414,7 @@ def main():
                 for env, state, action, step_result in stepper.step(step_requests):
                     next_obs, reward, terminated, truncated, info = step_result
                     done = bool(terminated or truncated)
+                    transitions_added = 0
 
                     if args.multi_agent:
                         per_agent_rewards = np.asarray(info.get("per_agent_rewards"), dtype=np.float32)
@@ -2305,6 +2451,7 @@ def main():
                                     bool(per_agent_terminated[agent_idx] or terminated),
                                 )
                                 budget.consume(1)
+                                transitions_added += 1
                             state["ep_reward"][agent_idx] += per_agent_rewards[agent_idx]
 
                         state["done_mask"] = per_agent_done
@@ -2325,6 +2472,7 @@ def main():
                             bool(terminated),
                         )
                         budget.consume(1)
+                        transitions_added += 1
                         state["ep_reward"] += float(reward)
 
                     state["obs"] = next_obs
@@ -2334,15 +2482,26 @@ def main():
                         len(buffer) >= max(args.replay_warmup, args.batch_size)
                         and not best_tracker.health_monitor.verification_pending
                     ):
-                        loss = float(learner_step(buffer, args.batch_size, 1)[0])
-                        losses.append(loss)
+                        updates_due = sync_throttle.updates_due(
+                            transitions_added,
+                            env_steps=1,
+                        )
+                        if updates_due > 0:
+                            losses.extend(
+                                learner_step(
+                                    buffer,
+                                    args.batch_size,
+                                    updates_due,
+                                ).tolist()
+                            )
                 if budget.exhausted:
                     break
 
             if (episode + 1) % args.target_update_every == 0:
                 target_model.set_weights(model.get_weights())
 
-            epsilon = max(args.epsilon_min, epsilon * args.epsilon_decay)
+            if len(buffer) >= replay_warmup_threshold(args):
+                epsilon = max(args.epsilon_min, epsilon * args.epsilon_decay)
             rewards_summary = [
                 state["ep_reward"].tolist() if hasattr(state["ep_reward"], "tolist") else state["ep_reward"]
                 for state in env_states
@@ -2409,7 +2568,13 @@ def main():
                 outcome_metrics.append(("seen_rate", f"{seen_rate:.3f}"))
             print_episode_metrics(episode, [
                 ("mode", [
-                    ("epsilon", f"{epsilon:.3f}"),
+                    (
+                        "exploration",
+                        "warmup_random"
+                        if warmup_exploration
+                        else "epsilon_greedy",
+                    ),
+                    ("epsilon", f"{action_epsilon:.3f}"),
                     ("opponent", opponent_match.label),
                 ]),
                 ("outcome", outcome_metrics),

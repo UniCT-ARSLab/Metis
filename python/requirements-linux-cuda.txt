@@ -1,2 +1,2 @@
--r requirements.txt
+-r requirements-base.txt
 tensorflow[and-cuda]

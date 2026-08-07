@@ -13,6 +13,11 @@ func _initialize() -> void:
 		quit(1)
 		return
 
+	var prismatic_ok := await _validate_prismatic_runtime()
+	if not prismatic_ok:
+		quit(1)
+		return
+
 	print("URDF mimic test passed")
 	quit(0)
 
@@ -101,5 +106,60 @@ func _validate_runtime_propagation() -> bool:
 	if not velocity_ok or not position_ok:
 		push_error(
 			"URDF mimic runtime failed: velocity=%f position=%f" %
+			[follower_velocity, follower_position])
+	return velocity_ok and position_ok
+
+
+func _validate_prismatic_runtime() -> bool:
+	var source_data := URDFJoint.new()
+	source_data.name = "slider_source"
+	source_data.type = "prismatic"
+	source_data.limit = URDFLimit.new()
+	source_data.limit.lower = 0.0
+	source_data.limit.upper = 0.04
+	source_data.limit.velocity = 0.2
+
+	var follower_data := URDFJoint.new()
+	follower_data.name = "slider_follower"
+	follower_data.type = "prismatic"
+	follower_data.mimic_joint = "slider_source"
+	follower_data.mimic_multiplier = 1.0
+	follower_data.limit = URDFLimit.new()
+	follower_data.limit.lower = 0.0
+	follower_data.limit.upper = 0.04
+	follower_data.limit.velocity = 0.2
+
+	var robot_data := URDFRobot.new()
+	robot_data.joints.assign([source_data, follower_data])
+	var robot := GodotRobot.new()
+	robot.urdf = robot_data
+	var source := URDF6DOFJoint3D.new()
+	source.joint = source_data
+	var follower := URDF6DOFJoint3D.new()
+	follower.joint = follower_data
+	robot.add_child(source)
+	robot.add_child(follower)
+	root.add_child(robot)
+	await process_frame
+
+	var actuated := robot.get_actuated_joint_names()
+	var velocity_ok := actuated.has("slider_source")
+	velocity_ok = velocity_ok and not actuated.has("slider_follower")
+	velocity_ok = velocity_ok and robot.set_joint_target_velocity(
+		"slider_source", 0.1)
+	var follower_velocity := follower.get_param_z(
+		Generic6DOFJoint3D.PARAM_LINEAR_MOTOR_TARGET_VELOCITY)
+	velocity_ok = velocity_ok and is_equal_approx(follower_velocity, 0.1)
+
+	var position_ok := robot.set_joint_target_position(
+		"slider_source", 0.02, 20.0, 2.0)
+	var follower_position := follower.get_param_z(
+		Generic6DOFJoint3D.PARAM_LINEAR_SPRING_EQUILIBRIUM_POINT)
+	position_ok = position_ok and is_equal_approx(follower_position, 0.02)
+
+	robot.free()
+	if not velocity_ok or not position_ok:
+		push_error(
+			"URDF prismatic runtime failed: velocity=%f position=%f" %
 			[follower_velocity, follower_position])
 	return velocity_ok and position_ok

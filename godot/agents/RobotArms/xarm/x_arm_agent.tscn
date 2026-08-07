@@ -1,16 +1,16 @@
 [gd_scene format=3 uid="uid://vaijuumklpqx"]
 
-[ext_resource type="Script" path="res://agents/RobotArms/urdf_robot_arm_agent.gd" id="1_xarm_body"]
-[ext_resource type="Script" uid="uid://byrdvsguqdev3" path="res://scripts/agent/Agent.gd" id="2_ffe62"]
-[ext_resource type="Script" uid="uid://bjhxcss2ima54" path="res://scripts/agent/action_space/ActionSpace.gd" id="3_gccru"]
-[ext_resource type="Script" uid="uid://clefx53jebtj3" path="res://scripts/agent/observations/ObservationSystem.gd" id="4_2bapi"]
-[ext_resource type="Script" uid="uid://d1xuba84xevcv" path="res://scripts/agent/RewardSystem.gd" id="5_8dt8l"]
+[ext_resource type="Script" uid="uid://cgg74e466ew1n" path="res://agents/RobotArms/urdf_robot_arm_agent.gd" id="1_xarm_body"]
+[ext_resource type="Script" uid="uid://byrdvsguqdev3" path="res://addons/metis/runtime/agent/Agent.gd" id="2_ffe62"]
+[ext_resource type="Script" uid="uid://bjhxcss2ima54" path="res://addons/metis/runtime/agent/action_space/ActionSpace.gd" id="3_gccru"]
+[ext_resource type="Script" uid="uid://clefx53jebtj3" path="res://addons/metis/runtime/agent/observations/ObservationSystem.gd" id="4_2bapi"]
+[ext_resource type="Script" uid="uid://d1xuba84xevcv" path="res://addons/metis/runtime/agent/RewardSystem.gd" id="5_8dt8l"]
 [ext_resource type="PackedScene" uid="uid://cv7oo3gsq3wx3" path="res://assets/urdf/xarm/xarm_fixed.urdf" id="5_ffe62"]
-[ext_resource type="Script" uid="uid://bvoj0o4atoby" path="res://scripts/agent/action_space/ContinuousAction.gd" id="6_continuous"]
-[ext_resource type="Script" uid="uid://cys7i0vchrdlo" path="res://scripts/agent/observations/MethodObservationSource.gd" id="7_method"]
-[ext_resource type="Script" uid="uid://bgx7jh6lg35yv" path="res://scripts/agent/reward_components/FunctionRewardComponent.gd" id="8_function_reward"]
-[ext_resource type="Script" uid="uid://c71jq6uyg03h3" path="res://scripts/agent/reward_components/ActionSmoothnessPenaltyReward.gd" id="9_smoothness"]
-[ext_resource type="Script" uid="uid://dyq1fjgcu1wqu" path="res://scripts/agent/reward_components/StepPenaltyReward.gd" id="10_time"]
+[ext_resource type="Script" uid="uid://bvoj0o4atoby" path="res://addons/metis/runtime/agent/action_space/ContinuousAction.gd" id="6_continuous"]
+[ext_resource type="Script" uid="uid://cys7i0vchrdlo" path="res://addons/metis/runtime/agent/observations/MethodObservationSource.gd" id="7_method"]
+[ext_resource type="Script" uid="uid://bgx7jh6lg35yv" path="res://addons/metis/runtime/agent/reward_components/FunctionRewardComponent.gd" id="8_function_reward"]
+[ext_resource type="Script" uid="uid://c71jq6uyg03h3" path="res://addons/metis/runtime/agent/reward_components/ActionSmoothnessPenaltyReward.gd" id="9_smoothness"]
+[ext_resource type="Script" uid="uid://dyq1fjgcu1wqu" path="res://addons/metis/runtime/agent/reward_components/StepPenaltyReward.gd" id="10_time"]
 
 [sub_resource type="SphereMesh" id="SphereMesh_s8qwa"]
 radius = 0.004
@@ -20,14 +20,13 @@ height = 0.008
 script = ExtResource("1_xarm_body")
 robot_path = NodePath("xarm")
 controlled_joint_names = PackedStringArray("xarm_6_joint", "xarm_5_joint", "xarm_4_joint", "xarm_3_joint", "xarm_2_joint")
-manual_extra_joint_names = PackedStringArray("grip_left")
-manual_gripper_joint_name = &"grip_left"
 tcp_link_name = "hand_link"
 tcp_local_offset = Vector3(0, 0.1, 0)
 workspace_scale = 0.5
 success_distance = 0.02
-success_angle_degrees = 12.0
 terminate_on_success = false
+manual_extra_joint_names = PackedStringArray("grip_left")
+manual_gripper_joint_name = &"grip_left"
 
 [node name="Agent" type="Node" parent="." unique_id=56391476]
 script = ExtResource("2_ffe62")
@@ -61,7 +60,7 @@ script = ExtResource("7_method")
 observation_name = "target_error_base"
 method_name = &"get_target_error_observation"
 
-[node name="TargetOrientationError" type="Node" parent="Agent/ObservationSystem"]
+[node name="TargetOrientationError" type="Node" parent="Agent/ObservationSystem" unique_id=78770802]
 script = ExtResource("7_method")
 observation_name = "target_orientation_error"
 method_name = &"get_target_orientation_error_observation"
@@ -103,7 +102,7 @@ weight = 0.05
 method_name = &"get_near_target_speed_penalty"
 node_caller = NodePath("../../..")
 
-[node name="PoseTracking" type="Node" parent="Agent/RewardSystem" node_paths=PackedStringArray("node_caller")]
+[node name="PoseTracking" type="Node" parent="Agent/RewardSystem" unique_id=818546405 node_paths=PackedStringArray("node_caller")]
 script = ExtResource("8_function_reward")
 term_name = "pose_tracking"
 weight = 0.3
@@ -136,5 +135,5 @@ control_mode = 1
 [node name="MeshInstance3D" type="MeshInstance3D" parent="EndEffector" unique_id=1017964205]
 mesh = SubResource("SphereMesh_s8qwa")
 
-[node name="ToolPose" type="Marker3D" parent="EndEffector"]
+[node name="ToolPose" type="Marker3D" parent="EndEffector" unique_id=1478404501]
 transform = Transform3D(0.48796886, 0.87242466, 0.027599704, 0.8710325, -0.48874876, 0.049265847, 0.05647006, 3.813489e-08, -0.9984043, -0.003402294, 0.0039249985, -0.0043227915)

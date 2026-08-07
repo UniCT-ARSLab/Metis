@@ -16,7 +16,7 @@ compatibility/default_parent_skeleton_in_mesh_instance_3d=true
 
 config/name="Metis"
 run/main_scene="uid://ccslss6gb4l1i"
-config/features=PackedStringArray("4.6")
+config/features=PackedStringArray("4.7")
 boot_splash/stretch_mode=2
 boot_splash/image="uid://cil834xrsy02r"
 config/icon="uid://bber4kdxb5e1m"
@@ -28,7 +28,7 @@ window/size/viewport_height=720
 
 [editor_plugins]
 
-enabled=PackedStringArray("res://addons/godot_urdf/plugin.cfg", "res://addons/metis_inspector/plugin.cfg", "res://addons/stl-io/plugin.cfg")
+enabled=PackedStringArray("res://addons/metis/plugin.cfg")
 
 [global_group]
 

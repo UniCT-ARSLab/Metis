@@ -253,6 +253,12 @@ class ScenarioGymEnv(gym.Env):
 
         obs = self._single_obs_from_msg(msg)
         info = msg.get("info", {})
+        item = self._single_agent_item_from_msg(msg)
+        info["agent_info"] = (
+            dict(item.get("info", {}))
+            if isinstance(item, dict)
+            else {}
+        )
         info["agent_id"] = self.agent_id
         info["agent_ids"] = list(self.agent_ids)
         return obs, info

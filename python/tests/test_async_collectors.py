@@ -17,6 +17,7 @@ from core.training import (
     AsyncWorkerDoneEvent,
     EpisodeAllocator,
     PolicySnapshot,
+    SyncUpdateThrottle,
     add_collector_arguments,
     add_parallel_env_arguments,
     episode_step_indices,
@@ -179,6 +180,43 @@ class AsyncCollectorTests(unittest.TestCase):
         scheduler = AsyncEventScheduler(args)
         events = [AsyncStepEvent(0, tuple((idx,) for idx in range(10))) for _ in range(4)]
         self.assertEqual(scheduler.ingest(events), 1)
+
+    def test_sync_scheduler_matches_transition_credit_and_cap(self):
+        args = argparse.Namespace(
+            async_update_basis="transitions",
+            async_update_every=4,
+            async_updates_per_step=1,
+            async_max_updates_per_env_step=1,
+        )
+        scheduler = SyncUpdateThrottle(args)
+
+        self.assertEqual(scheduler.updates_due(3, env_steps=1), 0)
+        self.assertEqual(scheduler.updates_due(1, env_steps=1), 1)
+        # Ten transitions request two updates, but one synchronous environment
+        # result grants at most one with the default safety cap.
+        self.assertEqual(scheduler.updates_due(10, env_steps=1), 1)
+
+    def test_sync_scheduler_supports_env_steps_and_disabled_updates(self):
+        env_step_args = argparse.Namespace(
+            async_update_basis="env_steps",
+            async_update_every=4,
+            async_updates_per_step=1,
+            async_max_updates_per_env_step=1,
+        )
+        scheduler = SyncUpdateThrottle(env_step_args)
+        self.assertEqual(scheduler.updates_due(40, env_steps=3), 0)
+        self.assertEqual(scheduler.updates_due(1, env_steps=1), 1)
+
+        disabled_args = argparse.Namespace(
+            async_update_basis="transitions",
+            async_update_every=1,
+            async_updates_per_step=0,
+            async_max_updates_per_env_step=0,
+        )
+        self.assertEqual(
+            SyncUpdateThrottle(disabled_args).updates_due(100, env_steps=1),
+            0,
+        )
 
     def test_scheduler_keeps_multi_policy_update_credits_separate(self):
         args = argparse.Namespace(

@@ -54,13 +54,21 @@ The cards and charts consume the same per-episode values printed by the trainer:
 | Losses | `critic_loss`, `actor_loss` |
 | Throughput | `env_steps_s`, `updates_s` |
 | Entropy temperature | `alpha` |
-| Outcomes | `finish`, `collision`, `stall` |
+| Training rollout outcomes | `finish`, `collision`, `stall`; arm collision timing is `before/at/after` success |
+| Frozen policy evaluation | deterministic regular and overall success from checkpoint evaluations |
+
+Training rollout success and frozen-evaluation success are intentionally separate.
+Rollouts used for learning may contain random actions, exploration noise, or
+stochastic SAC actions. Their success line can therefore remain at zero while the
+same checkpoint succeeds in deterministic evaluation. Use rollout outcomes to inspect
+the experience entering the learner, and frozen evaluation to judge checkpoint
+quality, curriculum promotion, and recovery decisions.
 
 Above the charts, the health panel reports two related values:
 
 - **Health state**: `warming_up`, `healthy`, `warning`, `critical`, or `disabled`.
-- **Training phase**: `training`, `recovering`, `verifying`, `stabilizing`, or
-  `finished`.
+- **Training phase**: `training`, `curriculum`, `recovering`, `verifying`,
+  `stabilizing`, or `finished`.
 
 The accompanying reason is the useful part. It names the frozen metric that dropped,
 the number of confirmations still required, a plateau, a numerical failure, or the
@@ -68,6 +76,26 @@ checkpoint used for recovery. The recent event list makes transitions visible ev
 when episodes complete slowly. The right side separates lifetime recovery count from
 the attempt count in the current recovery cycle. `Verification: pending` means policy
 updates are temporarily held while an isolated evaluator checks the restored policy.
+
+Off-policy logs separate `replay_warmup_left` from `critic_warmup_left`. The first
+counts transitions still needed before learning starts and uses
+`exploration=warmup_random`; the second belongs to recovery or resume and counts critic
+updates while the actor is intentionally frozen. Treating both as one `warmup_left`
+made healthy data collection look like a stalled recovery.
+
+When adaptive curriculum is enabled, a `curriculum_promoted` health event marks the
+level change. Best-checkpoint and health comparisons then start a new baseline because
+reward, success gates, and target distribution are no longer directly comparable to
+the previous stage. Evaluations made before
+`--curriculum-min-policy-updates` are still useful diagnostics, but they cannot count
+toward promotion; this prevents a task that begins near a solution from advancing a
+policy whose actor has never been trained.
+
+Demotion is optional. Set `--curriculum-demotion-threshold` below the promotion
+threshold and use `--curriculum-demotion-evaluations` to require repeated failures
+before moving back one level. The gap between thresholds provides hysteresis and
+prevents one noisy evaluation from making the curriculum oscillate. A demotion also
+starts a new frozen-evaluation baseline at the restored level.
 
 Not every metric exists for every algorithm or scene. For example, DQN reports a
 single `loss`, PPO reports policy and value losses, and only SAC has a learned
@@ -110,16 +138,24 @@ up. Loss scales differ by algorithm and reward scale, and a temporary spike can 
 normal. The authoritative signal is the existing frozen-policy evaluation:
 
 1. a checkpoint is evaluated deterministically in an isolated Godot process;
-2. its success rate and mean reward are compared with the validated best checkpoint;
+2. its success rate, task progress, pose diagnostics, and mean reward are compared with
+   the validated best checkpoint when those fields are available;
 3. a moderate relative drop produces `warning`;
 4. a critical drop must repeat for `--health-collapse-patience` evaluations before
    the state becomes `critical`.
 
 Automatic intervention also has a maturity gate. By default Metis waits for five
-frozen evaluations and, when ranking by success, a non-trivial best success rate.
-This prevents an early policy with zero successes from repeatedly rolling back to
-another equally immature checkpoint. For tasks that deliberately have no success
-signal, select `--best-metric reward_mean`.
+frozen evaluations. An explicit `--best-metric success_rate` also requires a
+non-trivial success baseline. This prevents an early policy with zero successes from
+repeatedly rolling back to another equally immature checkpoint.
+
+`--best-metric task_progress` is intended for sparse tasks that expose
+`track_progress` but have not produced a success yet. It ranks success first, then
+average progress, position and orientation quality, achieved hold frames, and finally
+reward. Once any policy succeeds, success rate still dominates. `auto` uses the same
+task-aware ordering when progress diagnostics are present and falls back to success
+plus reward otherwise. For tasks with neither progress nor a success signal, use
+`--best-metric reward_mean`.
 
 Useful controls are:
 

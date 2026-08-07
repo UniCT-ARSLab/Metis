@@ -5,12 +5,32 @@ signal target_reached
 signal obstacle_collision
 signal target_pose_relocated
 
+enum DistanceProgressMode {
+	LINEAR_CLAMPED,
+	INVERSE_DISTANCE,
+}
+
+enum PoseProgressMode {
+	ADDITIVE,
+	POSITION_GATED,
+}
+
 @export_category("URDF Robot")
 @export var robot_path: NodePath = NodePath("urdf")
 @export var controlled_joint_names := PackedStringArray()
+## Uses a deterministic high-level joint-velocity servo: commands are integrated within URDF
+## limits and links follow the resulting pose exactly. This is the default for reaching and
+## trajectory policies, where the physical robot already owns the low-level motor loops.
+## Disable only for a deliberately calibrated rigid-body/motor simulation; doing so changes the
+## task dynamics and invalidates policies trained with kinematic control.
 @export var use_kinematic_control := true
 @export var joint_home_positions := PackedFloat32Array()
 @export var default_joint_speed := 0.5
+## Hard cap (rad/s) applied on top of each joint's URDF velocity limit. Zero disables it, keeping
+## the raw URDF limit (the original behaviour). Set this when a URDF ships very high limits
+## (e.g. 5-20 rad/s) but the reward/stillness thresholds were tuned for a ~1 rad/s regime: without
+## the cap the policy controls a joint an order of magnitude faster than the still/hold gates expect.
+@export var max_joint_speed_override := 0.0
 ## Tapers commands that push a bounded revolute joint toward its hard stop. The value is a
 ## fraction of that joint's complete URDF range; zero keeps only the hard stop at the limit.
 @export_range(0.0, 0.25, 0.005) var joint_limit_slowdown_ratio := 0.05
@@ -57,6 +77,13 @@ signal target_pose_relocated
 ## dense approach signal over the full range from far away. Setting it to 0 (position-only) killed
 ## orientation learning (arm nailed position, left orientation ~140deg). Position stays dominant.
 @export_range(0.0, 1.0, 0.01) var orientation_progress_weight := 0.25
+## Selects how distance becomes position progress. LINEAR_CLAMPED preserves the original
+## 1-distance/scale behavior. INVERSE_DISTANCE remains informative beyond workspace_scale instead
+## of becoming exactly zero when the tool moves farther away than expected.
+@export var distance_progress_mode := DistanceProgressMode.LINEAR_CLAMPED
+## ADDITIVE preserves the original position/orientation blend. POSITION_GATED makes position
+## mandatory: orientation can refine progress, but can never replace approaching the target.
+@export var pose_progress_mode := PoseProgressMode.ADDITIVE
 ## Joint speed (rad/s) at which the stillness reward decays to zero.
 @export var hold_stillness_speed_reference := 0.5
 ## A target transform change larger than either threshold starts a new acquisition without
@@ -67,9 +94,26 @@ signal target_pose_relocated
 @export_category("Safety")
 @export var safety_volumes: Array[Area3D] = []
 @export var obstacle_group := "robot_obstacle"
+## When true a detected collision terminates the episode and stops the joints. When false the collision
+## is still recorded and penalised (via the obstacle_collision signal / reward) but the episode
+## CONTINUES - so a from-scratch policy can graze an obstacle and recover, learning the collision-free
+## approach corridor instead of dying on first contact. Manual control never terminates regardless.
+@export var collision_terminates := true
 @export var auto_detect_environment_collisions := true
 @export_flags_3d_physics var environment_collision_mask := 0xFFFFFFFF
 @export_range(1, 64, 1) var max_collision_results_per_shape := 8
+## Self-body collision: flag (and terminate, like an obstacle hit) when a configured arm link
+## overlaps the robot's OWN central body (e.g. the torso base link). Unlike environment collisions
+## this targets specific self links so the arm learns not to fold into its own body. List only the
+## DISTAL arm links in self_check_link_names — the shoulder links that always touch the body must be
+## left out or they would false-trigger every frame. Reuses the same collision event/penalty path.
+@export var self_body_collision_enabled := false
+@export var self_body_link_names: PackedStringArray = []
+@export var self_check_link_names: PackedStringArray = []
+## Prints the first detected self-body overlap of each episode. Useful while calibrating a new URDF.
+@export var self_collision_debug := false
+## Prints the first collision of each episode, including source, querying link and collider.
+@export var collision_debug := false
 
 @export_category("Manual Control")
 @export var manual_control := false
@@ -86,6 +130,30 @@ signal target_pose_relocated
 @export var manual_gripper_joint_name: StringName = &""
 @export var manual_debug_overlay := true
 @export_dir var manual_capture_directory := "user://manual_arm_captures"
+## Optional region (Area3D / Node3D with a BoxShape3D collision child) that the J key samples to place
+## a fresh random target, for capturing reference poses spread across the region. The scenario wires
+## this to the Easy area. If unset, J jitters the target within manual_random_target_extents of its
+## current position.
+@export var manual_random_target_region: Node3D
+@export var manual_random_target_extents := Vector3(0.05, 0.05, 0.05)
+## IK manual control: when enabled, apply_manual_action() drives the arm with a
+## URDFIKController toward a target (in the RL action space) instead of joint-by-
+## joint keys, so `metis record` captures smooth IK reach demos. Mode "auto"
+## follows the scenario's reach target (full-coverage demos, no teleop); "teleop"
+## follows ik_manual_target, which you move with W/A/S/D/Q/E + arrows/Z/X (T =
+## toggle auto-orientation). ik_manual_max_speed MUST equal the per-joint max speed.
+@export var ik_manual_enabled := false
+@export_enum("auto", "teleop") var ik_manual_mode := "auto"
+@export var ik_manual_target: Node3D
+@export var ik_manual_track_orientation := true
+@export_range(0.01, 5.0, 0.01) var ik_manual_max_speed := 0.5
+var _ik_manual: URDFIKController = null
+# Demo plan-follower (M5): a precomputed collision-free JOINT waypoint path (home->goal) that the
+# arm tracks CLOSED-LOOP by emitting joint_velocity actions through the normal apply_action path.
+# Empty = inactive (dormant during RL; takes precedence over ik_manual only while a plan is set).
+var _demo_plan: Array = []
+var _demo_wp_index := 0
+var _demo_dt_step := 0.05
 ## Physics frames during which collision termination is suppressed after a manual recovery.
 ## This lets the operator move the arm out of an already-overlapping configuration.
 @export_range(1, 300, 1) var manual_recovery_grace_physics_frames := 60
@@ -106,6 +174,13 @@ var _manual_extra_commands: Dictionary[String, float] = {}
 var _pending_reset_offsets: Array[float] = []
 var _robot_collision_shapes: Array[CollisionShape3D] = []
 var _robot_collision_exclusions: Array[RID] = []
+var _robot_collision_link_by_shape_id: Dictionary = {}
+var _self_body_rids: Array[RID] = []
+var _self_check_shapes: Array[CollisionShape3D] = []
+var _self_check_exclusions: Array[RID] = []
+var _self_check_link_by_shape_id: Dictionary = {}
+var _last_self_collision_details: Dictionary = {}
+var _last_collision_details: Dictionary = {}
 var _terminal := false
 var _succeeded := false
 var _collided := false
@@ -142,11 +217,17 @@ func _ready() -> void:
 		set_physics_process(false)
 		return
 	_manual_joint_names = _resolve_manual_joint_names()
+	if ik_manual_enabled:
+		_setup_ik_manual()
 
 	_resize_state()
 	_configure_action_size()
 	_connect_safety_volumes()
 	_cache_robot_collision_geometry()
+	_cache_self_body_geometry()
+	# Imported URDF link bodies can finish registering their physics RIDs after this
+	# adapter's _ready(). Refresh once the complete scene tree has entered the world.
+	call_deferred("_refresh_collision_geometry")
 	_robot.reset_joint_positions(_build_home_positions())
 	_update_end_effector()
 	_capture_target_pose_transform()
@@ -154,6 +235,13 @@ func _ready() -> void:
 		manual_selected_joint, 0, maxi(get_manual_joint_count() - 1, 0))
 	if manual_control:
 		_enable_manual_control()
+
+
+func _refresh_collision_geometry() -> void:
+	if not is_inside_tree() or not _robot:
+		return
+	_cache_robot_collision_geometry()
+	_cache_self_body_geometry()
 
 
 func _physics_process(delta: float) -> void:
@@ -166,11 +254,15 @@ func _physics_process(delta: float) -> void:
 			_update_manual_overlay()
 	if not _training_active:
 		return
-	if manual_control and not _terminal:
+	# In manual control the operator drives the joints directly, so motion must NEVER freeze: success
+	# or collision only set informational flags here, they must not lock the arm (that would block
+	# posing/capturing more references). Motion is gated on _terminal only during autonomous training.
+	if manual_control:
 		apply_manual_action()
 	_update_end_effector()
 	_detect_target_pose_relocation()
 	_check_environment_collisions()
+	_check_self_body_collisions()
 	_update_success_state()
 
 
@@ -198,7 +290,176 @@ func apply_action(action: Variant) -> Variant:
 	return _previous_action.duplicate()
 
 
+func _setup_ik_manual() -> void:
+	_ik_manual = URDFIKController.new()
+	_ik_manual.name = "IKManual"
+	_ik_manual.joint_names = _joint_names
+	_ik_manual.tcp_link_name = tcp_link_name
+	_ik_manual.tcp_local_offset = tcp_local_offset
+	_ik_manual.max_joint_speed = ik_manual_max_speed
+	# teleop starts position-only (free wrist); press T to toggle IK wrist control
+	# (it then snaps to the current wrist so you fine-tune from there). auto uses
+	# the configured flag.
+	_ik_manual.track_orientation = false if ik_manual_mode == "teleop" else ik_manual_track_orientation
+	# teleop: FULL orientation so the operator can set the exact wrist by rotating
+	# the target; auto: pointing (roll-free) to avoid the 180-degree flip.
+	_ik_manual.orientation_mode = "full" if ik_manual_mode == "teleop" else "pointing"
+	_ik_manual.active = false  # driven manually from apply_manual_action
+	add_child(_ik_manual)
+	_ik_manual.set_robot(_robot)
+	if ik_manual_mode == "teleop" and ik_manual_target == null:
+		ik_manual_target = _create_teleop_marker()
+
+
+func _create_teleop_marker() -> Node3D:
+	var marker := Node3D.new()
+	marker.name = "IKTeleopTarget"
+	var mesh := MeshInstance3D.new()
+	var sphere := SphereMesh.new()
+	sphere.radius = 0.02
+	sphere.height = 0.04
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(1.0, 0.9, 0.1)
+	mat.emission_enabled = true
+	mat.emission = Color(1.0, 0.9, 0.1)
+	mesh.mesh = sphere
+	mesh.material_override = mat
+	# small axis gnomon so the operator sees the target orientation
+	marker.add_child(mesh)
+	add_child(marker)
+	var tcp: Node3D = _robot.get_link_node(tcp_link_name)
+	if tcp != null:
+		# place the marker on the TCP TIP (link origin + tcp_local_offset), which is
+		# the point the IK actually drives -- not the bare link origin.
+		var tp := tcp.global_transform
+		marker.global_transform = Transform3D(tp.basis, tp * tcp_local_offset)
+	return marker
+
+
+func _snap_ik_marker_to_target() -> void:
+	# Jump the teleop marker onto the scenario reach target (position) so the arm
+	# drives precisely there; keeps the wrist you already set.
+	if not ik_manual_enabled or ik_manual_target == null:
+		return
+	var tgt: Node3D = _target_pose_node()
+	if tgt != null:
+		ik_manual_target.global_position = tgt.global_position
+		print("[ik] marker snapped to target %.3v" % tgt.global_position)
+
+
+func _toggle_ik_manual_orientation() -> void:
+	if not ik_manual_enabled or _ik_manual == null:
+		return
+	_ik_manual.track_orientation = not _ik_manual.track_orientation
+	if _ik_manual.track_orientation and ik_manual_target != null:
+		# snap the target orientation to the current wrist so there is no jump; you
+		# then fine-tune it from here with the arrows / Z / X.
+		var tcp: Node3D = _robot.get_link_node(tcp_link_name)
+		if tcp != null:
+			ik_manual_target.global_transform.basis = tcp.global_transform.basis.orthonormalized()
+	print("[ik] wrist control (auto-orientation) = ", _ik_manual.track_orientation)
+
+
+func _apply_ik_manual_action() -> Array:
+	var target: Node3D = (
+		_target_pose_node() if ik_manual_mode == "auto" else ik_manual_target)
+	if target == null or _ik_manual == null:
+		return _previous_action.duplicate()
+	if ik_manual_mode == "teleop":
+		_teleop_ik_target(get_physics_process_delta_time())
+	_ik_manual.set_target(target)
+	_ik_manual.solve(false)  # compute only; apply_action drives + records previous_action
+	var applied: Array = apply_action(Array(_ik_manual.get_normalized_action()))
+	manual_control = true  # AFTER apply_action, which resets manual_control to false
+	return applied
+
+
+func _teleop_ik_target(delta: float) -> void:
+	if ik_manual_target == null:
+		return
+	var s: float = 0.25 if Input.is_key_pressed(KEY_SHIFT) else 1.0
+	var d: float = 0.25 * delta * s
+	if Input.is_key_pressed(KEY_W): ik_manual_target.global_position.x += d
+	if Input.is_key_pressed(KEY_S): ik_manual_target.global_position.x -= d
+	if Input.is_key_pressed(KEY_A): ik_manual_target.global_position.y += d
+	if Input.is_key_pressed(KEY_D): ik_manual_target.global_position.y -= d
+	if Input.is_key_pressed(KEY_Q): ik_manual_target.global_position.z += d
+	if Input.is_key_pressed(KEY_E): ik_manual_target.global_position.z -= d
+	var r: float = 1.2 * delta * s
+	if Input.is_key_pressed(KEY_UP): ik_manual_target.rotate_x(r)
+	if Input.is_key_pressed(KEY_DOWN): ik_manual_target.rotate_x(-r)
+	if Input.is_key_pressed(KEY_LEFT): ik_manual_target.rotate_y(r)
+	if Input.is_key_pressed(KEY_RIGHT): ik_manual_target.rotate_y(-r)
+	if Input.is_key_pressed(KEY_Z): ik_manual_target.rotate_z(r)
+	if Input.is_key_pressed(KEY_X): ik_manual_target.rotate_z(-r)
+
+
+## Load a demo plan (list of 7-joint waypoint configs, home->goal). While set it drives
+## apply_manual_action(); reset per episode by re-calling with the new plan (or [] to clear).
+func set_demo_plan(waypoints: Array, physics_frames_per_step: int = 3) -> void:
+	_demo_plan = waypoints if waypoints != null else []
+	_demo_wp_index = 0
+	_demo_dt_step = maxf(float(physics_frames_per_step) / 60.0, 0.0001)
+
+
+## Closed-loop tracking of the planned waypoints: read the CURRENT joint config, command the
+## joint_velocity that reaches the active waypoint in one decision step (saturated), advance when
+## close. The command goes through apply_action -> set_joint_target_velocity (the normal path);
+## the returned applied command IS what is recorded, so recorded action == applied action.
+func _apply_demo_plan_action() -> Array:
+	var count := get_joint_count()
+	# Advance PAST every already-reached waypoint (home == wp[0], or a waypoint reached on the
+	# previous step) BEFORE computing, so the emitted action is always a REAL move toward the next
+	# DISTINCT waypoint. Advancing after computing (the old order) made the very first action a zero
+	# no-op toward the home waypoint, recording a contradictory (obs_home, action=0) first transition
+	# whose next_obs equalled obs_home -- impossible for a feed-forward policy to fit.
+	while _demo_wp_index < _demo_plan.size() - 1:
+		var wp: Array = _demo_plan[_demo_wp_index]
+		var reached := true
+		for i in range(count):
+			var qi: float = _robot.get_joint_position(_joint_names[i])
+			if absf((float(wp[i]) - qi) if i < wp.size() else 0.0) >= 0.03:
+				reached = false
+				break
+		if reached:
+			_demo_wp_index += 1
+		else:
+			break
+	var goal: Array = _demo_plan[_demo_wp_index]
+	# Per-joint velocity that would reach the waypoint in one decision step (action units).
+	var raw: Array = []
+	raw.resize(count)
+	var max_raw := 0.0
+	for i in range(count):
+		var q: float = _robot.get_joint_position(_joint_names[i])
+		var gap: float = (float(goal[i]) - q) if i < goal.size() else 0.0
+		var vmax: float = _joint_max_speed(i)
+		var r: float = (gap / (vmax * _demo_dt_step)) if vmax > 0.0 else 0.0
+		raw[i] = r
+		max_raw = maxf(max_raw, absf(r))
+	# Scale the WHOLE velocity vector uniformly so its largest component saturates at 1 -- this keeps
+	# the command collinear with (waypoint - q), so closed-loop execution traces the SAME straight
+	# joint-space segment the planner validated collision-free (per-joint clamping would bend the
+	# path and clip obstacles). Near the waypoint (max_raw <= 1) it eases in proportionally.
+	var scale: float = (1.0 / max_raw) if max_raw > 1.0 else 1.0
+	var action: Array = []
+	action.resize(count)
+	for i in range(count):
+		action[i] = clampf(float(raw[i]) * scale, -1.0, 1.0)
+	# NOTE: unlike teleop ik_manual, the plan-follower does NOT set manual_control=true.
+	# manual_control makes success informational-only (the arm never terminates), which would
+	# make every demo run to truncation instead of a real target_reached hold-success. Leaving it
+	# false lets the normal autonomous termination (hold -> target_reached) fire, which is exactly
+	# what the recorder needs to accept a demo. The velocity set by apply_action persists across
+	# the decision step's physics frames, so closed-loop tracking is unaffected.
+	return apply_action(action)
+
+
 func apply_manual_action() -> Array:
+	if not _demo_plan.is_empty():
+		return _apply_demo_plan_action()
+	if ik_manual_enabled and _ik_manual != null:
+		return _apply_ik_manual_action()
 	var values: Array = []
 	values.resize(get_joint_count())
 	for index in range(get_joint_count()):
@@ -230,11 +491,11 @@ func apply_manual_action() -> Array:
 		if not is_zero_approx(gripper_axis) and gripper_policy_index >= 0:
 			values[gripper_policy_index] = gripper_axis
 
-	var scale := manual_command_scale
+	var _scale := manual_command_scale
 	if Input.is_key_pressed(KEY_SHIFT):
-		scale *= manual_fine_scale
+		_scale *= manual_fine_scale
 	for index in range(values.size()):
-		values[index] = clampf(float(values[index]) * scale, -1.0, 1.0)
+		values[index] = clampf(float(values[index]) * _scale, -1.0, 1.0)
 	var applied: Array = apply_action(values)
 	for joint_name in _manual_joint_names:
 		if _joint_names.has(joint_name):
@@ -244,10 +505,10 @@ func apply_manual_action() -> Array:
 			joint_name == String(manual_gripper_joint_name)
 			and not is_zero_approx(gripper_axis)
 		):
-			command = clampf(gripper_axis * scale, -1.0, 1.0)
+			command = clampf(gripper_axis * _scale, -1.0, 1.0)
 			command = _limit_aware_named_command(joint_name, command)
 		elif joint_name == selected_name:
-			command = clampf(selected_axis * scale, -1.0, 1.0)
+			command = clampf(selected_axis * _scale, -1.0, 1.0)
 			command = _limit_aware_named_command(joint_name, command)
 		_manual_extra_commands[joint_name] = command
 		_robot.set_joint_target_velocity(
@@ -292,6 +553,12 @@ func _unhandled_key_input(event: InputEvent) -> void:
 			print_manual_pose_diagnostics()
 		KEY_F9:
 			capture_manual_reference()
+		KEY_J:
+			randomize_manual_target()
+		KEY_T:
+			_toggle_ik_manual_orientation()
+		KEY_F:
+			_snap_ik_marker_to_target()
 		KEY_H:
 			_print_manual_help()
 		_:
@@ -392,7 +659,7 @@ func _print_manual_help() -> void:
 		mini(get_manual_joint_count(), 9)
 		+ "Q/E move -/+ | G select gripper | C/O close/open gripper | "
 		+ "Shift fine | Space stop | R recover current pose | "
-		+ "Home reset | "
+		+ "Home reset | J random target | "
 		+ "P pose log | F9 screenshot + JSON")
 
 
@@ -454,8 +721,8 @@ func _update_manual_overlay() -> void:
 
 	var joint_name := _manual_joint_names[manual_selected_joint]
 	var positions: Array[String] = []
-	for name in _manual_joint_names:
-		positions.append("%.1f" % rad_to_deg(_robot.get_joint_position(name)))
+	for _name in _manual_joint_names:
+		positions.append("%.1f" % rad_to_deg(_robot.get_joint_position(_name)))
 	_manual_overlay_label.text = (
 		"MANUAL  J%d/%d  %s  command=%+.2f  state=%s\n"
 		% [
@@ -502,19 +769,71 @@ func capture_manual_reference() -> void:
 	json_file.store_string(JSON.stringify(diagnostics, "\t", true, true))
 	json_file.close()
 
-	await RenderingServer.frame_post_draw
-	var screenshot := get_viewport().get_texture().get_image()
-	var png_path := base_path + ".png"
-	var screenshot_error := screenshot.save_png(png_path)
-	if screenshot_error != OK:
-		push_error(
-			"URDFRobotArmAgentBody: cannot save screenshot '%s' (error %d)." %
-				[png_path, screenshot_error])
-		return
+	# NOTE: no screenshot. Grabbing the viewport image from inside the input handler (with or without
+	# await) was freezing/pausing the game after the first F9. The JSON is the authoritative capture
+	# (joint config + target pose) - the PNG was only a visual aid and is not worth the freeze.
 	print(
-		"[METIS ARM MANUAL] Reference captured: %s | %s" %
-			[ProjectSettings.globalize_path(png_path),
-			ProjectSettings.globalize_path(json_path)])
+		"[METIS ARM MANUAL] Reference captured (JSON only): %s" %
+			ProjectSettings.globalize_path(json_path))
+	# Keep manual control usable so more references can be captured back-to-back: posing the arm on the
+	# target makes it succeed/terminal ("BLOCKED"), which would freeze further motion after the capture.
+	_terminal = false
+	_collided = false
+	_succeeded = false
+	_success_frames = 0
+	_manual_collision_grace_frames = manual_recovery_grace_physics_frames
+	_update_manual_overlay()
+
+
+## Move the target to a fresh random position (bound to the J key) so reference poses can be captured
+## across the whole region. Samples inside manual_random_target_region's box when set, else jitters
+## around the current target. Clears any terminal/success state so posing can continue immediately.
+func randomize_manual_target() -> void:
+	if target == null:
+		push_warning("[METIS ARM MANUAL] No target node assigned to randomize.")
+		return
+	var point := _sample_manual_random_point()
+	target.global_position = point
+	_capture_target_pose_transform()
+	_update_end_effector()
+	_begin_new_target_acquisition()
+	_terminal = false
+	_collided = false
+	_succeeded = false
+	_success_frames = 0
+	_manual_collision_grace_frames = manual_recovery_grace_physics_frames
+	notify_target_pose_relocated()
+	_update_manual_overlay()
+	print("[METIS ARM MANUAL] New random target at (%.3f, %.3f, %.3f)." % [
+		point.x, point.y, point.z])
+
+
+func _sample_manual_random_point() -> Vector3:
+	var shape_node := _find_box_collision_shape(manual_random_target_region) if manual_random_target_region else null
+	if shape_node and shape_node.shape is BoxShape3D:
+		var half := (shape_node.shape as BoxShape3D).size * 0.5
+		var local := Vector3(
+			randf_range(-half.x, half.x),
+			randf_range(-half.y, half.y),
+			randf_range(-half.z, half.z))
+		return shape_node.global_transform * local
+	var base := target.global_position
+	return base + Vector3(
+		randf_range(-manual_random_target_extents.x, manual_random_target_extents.x),
+		randf_range(-manual_random_target_extents.y, manual_random_target_extents.y),
+		randf_range(-manual_random_target_extents.z, manual_random_target_extents.z))
+
+
+func _find_box_collision_shape(node: Node) -> CollisionShape3D:
+	if node == null:
+		return null
+	if node is CollisionShape3D and (node as CollisionShape3D).shape is BoxShape3D:
+		return node as CollisionShape3D
+	for child in node.get_children():
+		var found := _find_box_collision_shape(child)
+		if found:
+			return found
+	return null
 
 
 func get_manual_pose_diagnostics() -> Dictionary:
@@ -538,13 +857,14 @@ func get_manual_pose_diagnostics() -> Dictionary:
 				"command_normalized": _manual_command_for_joint(joint_name),
 				"max_velocity_rad_s": _joint_max_speed_for_name(joint_name),
 			}
-			if joint and joint.type == "revolute" and joint.limit:
+			if joint and joint.type in ["revolute", "prismatic"] and joint.limit:
 				joint_data["lower_rad"] = minf(joint.limit.lower, joint.limit.upper)
 				joint_data["upper_rad"] = maxf(joint.limit.lower, joint.limit.upper)
-				joint_data["lower_deg"] = rad_to_deg(
-					minf(joint.limit.lower, joint.limit.upper))
-				joint_data["upper_deg"] = rad_to_deg(
-					maxf(joint.limit.lower, joint.limit.upper))
+				if joint.type == "revolute":
+					joint_data["lower_deg"] = rad_to_deg(
+						minf(joint.limit.lower, joint.limit.upper))
+					joint_data["upper_deg"] = rad_to_deg(
+						maxf(joint.limit.lower, joint.limit.upper))
 			joints.append(joint_data)
 		for mimic in _robot.urdf.get_mimic_joints():
 			mimic_joints.append({
@@ -619,15 +939,15 @@ func get_manual_pose_diagnostics() -> Dictionary:
 
 
 func _transform_diagnostics(value: Transform3D) -> Dictionary:
-	var basis := value.basis.orthonormalized()
-	var rotation := basis.get_rotation_quaternion().normalized()
+	var _basis := value.basis.orthonormalized()
+	var _rotation := _basis.get_rotation_quaternion().normalized()
 	return {
 		"position": _vector3_diagnostics(value.origin),
 		"quaternion_xyzw": [
-			rotation.x, rotation.y, rotation.z, rotation.w],
-		"axis_x": _vector3_diagnostics(basis.x),
-		"axis_y": _vector3_diagnostics(basis.y),
-		"axis_z": _vector3_diagnostics(basis.z),
+			_rotation.x, _rotation.y, _rotation.z, _rotation.w],
+		"axis_x": _vector3_diagnostics(_basis.x),
+		"axis_y": _vector3_diagnostics(_basis.y),
+		"axis_z": _vector3_diagnostics(_basis.z),
 	}
 
 
@@ -643,6 +963,8 @@ func reset_all(original_transform: Variant, reset_rewards := true) -> void:
 	_terminal = false
 	_succeeded = false
 	_collided = false
+	_last_self_collision_details.clear()
+	_last_collision_details.clear()
 	_success_frames = 0
 	_has_last_target_pose_transform = false
 	for index in range(get_joint_count()):
@@ -652,6 +974,16 @@ func reset_all(original_transform: Variant, reset_rewards := true) -> void:
 	_pending_reset_offsets.clear()
 	_update_end_effector()
 	_capture_target_pose_transform()
+
+	# On reset the teleop marker snaps back to the (home) EE so the IK does not
+	# chase the previous target from the new home; wrist control goes back to off.
+	if ik_manual_enabled and ik_manual_target != null:
+		var home_tcp: Node3D = _robot.get_link_node(tcp_link_name)
+		if home_tcp != null:
+			var tp := home_tcp.global_transform
+			ik_manual_target.global_transform = Transform3D(tp.basis, tp * tcp_local_offset)
+		if _ik_manual != null:
+			_ik_manual.track_orientation = false
 
 	if has_method("reset_physics_interpolation"):
 		reset_physics_interpolation()
@@ -665,6 +997,8 @@ func initialize_episode_from_current_state() -> void:
 	_terminal = false
 	_succeeded = false
 	_collided = false
+	_last_self_collision_details.clear()
+	_last_collision_details.clear()
 	_success_frames = 0
 	_has_last_target_pose_transform = false
 	set_training_active(true)
@@ -705,6 +1039,14 @@ func has_collided() -> bool:
 	return _collided
 
 
+func get_last_self_collision_details() -> Dictionary:
+	return _last_self_collision_details.duplicate(true)
+
+
+func get_last_collision_details() -> Dictionary:
+	return _last_collision_details.duplicate(true)
+
+
 func set_continue_after_success(enabled: bool) -> void:
 	terminate_on_success = not enabled
 	if enabled and _succeeded and not _collided:
@@ -713,11 +1055,22 @@ func set_continue_after_success(enabled: bool) -> void:
 
 
 func get_progress() -> float:
-	var position_progress := 1.0 - clampf(
-		_target_distance() / maxf(workspace_scale, 0.001), 0.0, 1.0)
+	var distance_ratio := _target_distance() / maxf(workspace_scale, 0.001)
+	var position_progress := (
+		1.0 / (1.0 + maxf(distance_ratio, 0.0))
+		if distance_progress_mode == DistanceProgressMode.INVERSE_DISTANCE
+		else 1.0 - clampf(distance_ratio, 0.0, 1.0)
+	)
 	var orientation_progress := 1.0 - clampf(_target_angle_error() / PI, 0.0, 1.0)
 	var orientation_weight := clampf(orientation_progress_weight, 0.0, 1.0)
+	if pose_progress_mode == PoseProgressMode.POSITION_GATED:
+		return position_progress * lerpf(
+			1.0, orientation_progress, orientation_weight)
 	return lerpf(position_progress, orientation_progress, orientation_weight)
+
+
+func get_target_distance() -> float:
+	return _target_distance()
 
 
 func get_joint_count() -> int:
@@ -741,7 +1094,7 @@ func get_joint_position_observation() -> Array:
 	for joint_name in _joint_names:
 		var joint := _robot.urdf.get_joint(joint_name)
 		var _position := _robot.get_joint_position(joint_name)
-		if joint and joint.type == "revolute" and joint.limit:
+		if joint and joint.type in ["revolute", "prismatic"] and joint.limit:
 			var lower := minf(joint.limit.lower, joint.limit.upper)
 			var upper := maxf(joint.limit.lower, joint.limit.upper)
 			if is_equal_approx(lower, upper):
@@ -799,7 +1152,11 @@ func get_joint_limit_penalty() -> float:
 	var margin := 0.10
 	for joint_name in _joint_names:
 		var joint := _robot.urdf.get_joint(joint_name)
-		if not joint or joint.type != "revolute" or not joint.limit:
+		if (
+			not joint
+			or joint.type not in ["revolute", "prismatic"]
+			or not joint.limit
+		):
 			continue
 		var lower := minf(joint.limit.lower, joint.limit.upper)
 		var upper := maxf(joint.limit.lower, joint.limit.upper)
@@ -818,8 +1175,14 @@ func get_hold_stillness_reward() -> float:
 	# target, so the fast reach is never penalised.
 	if not _is_near_target_pose():
 		return 0.0
-	return clampf(
-		1.0 - _max_joint_speed() / maxf(hold_stillness_speed_reference, 0.001), 0.0, 1.0)
+	# Zero (or less) makes the reward track the success gate instead of a fixed speed. A constant
+	# reference silently drifts away from a tightening gate, and then the shaping keeps paying for a
+	# speed the success criterion has already started rejecting.
+	var reference := (
+		hold_stillness_speed_reference
+		if hold_stillness_speed_reference > 0.0
+		else success_max_joint_speed)
+	return clampf(1.0 - _max_joint_speed() / maxf(reference, 0.001), 0.0, 1.0)
 
 
 func get_near_target_speed_penalty() -> float:
@@ -843,6 +1206,17 @@ func get_pose_tracking_reward() -> float:
 		_target_distance() / maxf(near_target_distance, 0.001), 0.0, 1.0)
 	var orientation_full := 1.0 - clampf(_target_angle_error() / PI, 0.0, 1.0)
 	return position_score * (0.3 + 0.7 * orientation_full)
+
+
+func get_near_target_distance_penalty() -> float:
+	# Per-step penalty proportional to distance, active ONLY within near_target_distance. Standing away
+	# from the target keeps costing every step, so the arm cannot freeze at an overshoot (target behind
+	# the tip): it must keep closing. Zero beyond near_target_distance so the fast reach far away is not
+	# penalised. Returns a value in [-1, 0] (scaled by the component weight): -1 at the edge, 0 on target.
+	var d := _target_distance()
+	if d > near_target_distance:
+		return 0.0
+	return -clampf(d / maxf(near_target_distance, 0.001), 0.0, 1.0)
 
 
 func get_hold_progress_reward() -> float:
@@ -872,7 +1246,78 @@ func get_debug_metrics() -> Dictionary:
 		"max_joint_speed": _max_joint_speed(),
 		"hold_frames": _success_frames,
 		"pose_held": _is_pose_held(),
-		"target_acquired": _succeeded
+		"target_acquired": _succeeded,
+		"collided": _collided,
+		"collision_source": str(_last_collision_details.get("source", "")),
+		"collision_details": _last_collision_details.duplicate(true),
+		"success_thresholds": {
+			"distance_m": success_distance,
+			"orientation_deg": success_angle_degrees,
+			"hold_physics_frames": success_hold_physics_frames,
+			"max_joint_speed_rad_s": success_max_joint_speed,
+			"require_still": success_require_still,
+		},
+		# World-space frames behind orientation_error_deg. Without them the error is a single number
+		# with no way to tell a mis-specified target pose from a policy that cannot reach it.
+		"tool_pose_world": _pose_diagnostics(_tool_pose_node()),
+		"target_pose_world": _pose_diagnostics(_target_pose_node()),
+		"gripper_front": _gripper_front_direction(),
+	}
+
+
+## Direction from the TCP link towards the fingertips, i.e. the way the gripper actually faces,
+## reported both in world space and in the TCP link's own frame. The latter is the ground truth for
+## defining the tool pose: its +X should equal that vector, otherwise the orientation error is
+## measured against an axis that has nothing to do with the grasp.
+func _gripper_front_direction() -> Dictionary:
+	if _robot == null or tcp_link_name.is_empty():
+		return {}
+	var hand := _robot.get_link_node(tcp_link_name) as Node3D
+	if hand == null:
+		return {}
+	var centre := Vector3.ZERO
+	var count := 0
+	for link_name in self_check_link_names:
+		if not str(link_name).contains("finger"):
+			continue
+		var node := _robot.get_link_node(link_name) as Node3D
+		if node:
+			centre += node.global_position
+			count += 1
+	if count == 0:
+		return {}
+	centre /= float(count)
+	var world_direction := (centre - hand.global_position)
+	if world_direction.length() < 0.0001:
+		return {}
+	world_direction = world_direction.normalized()
+	var hand_basis := hand.global_basis.orthonormalized()
+	var result := {
+		"world": _vector3_diagnostics(world_direction),
+		"hand_local": _vector3_diagnostics(hand_basis.inverse() * world_direction),
+	}
+	# Finger-to-finger axis: with the front direction it fixes the whole grasp frame, leaving no
+	# free roll to guess at.
+	var left := _robot.get_link_node("openarm_right_left_finger") as Node3D
+	var right := _robot.get_link_node("openarm_right_right_finger") as Node3D
+	if left != null and right != null:
+		var span := right.global_position - left.global_position
+		if span.length() > 0.0001:
+			span = span.normalized()
+			result["span_world"] = _vector3_diagnostics(span)
+			result["span_hand_local"] = _vector3_diagnostics(hand_basis.inverse() * span)
+	return result
+
+
+func _pose_diagnostics(node: Node3D) -> Dictionary:
+	if node == null:
+		return {}
+	var pose_basis := node.global_basis.orthonormalized()
+	return {
+		"position": _vector3_diagnostics(node.global_position),
+		"axis_x": _vector3_diagnostics(pose_basis.x),
+		"axis_y": _vector3_diagnostics(pose_basis.y),
+		"axis_z": _vector3_diagnostics(pose_basis.z),
 	}
 
 
@@ -890,7 +1335,7 @@ func get_control_input(input_name: String) -> float:
 
 
 func report_obstacle_collision() -> void:
-	_register_collision()
+	_register_collision({"source": "reported_obstacle"})
 
 
 func _resolve_controlled_joint_names() -> PackedStringArray:
@@ -910,17 +1355,24 @@ func _resolve_controlled_joint_names() -> PackedStringArray:
 
 func _resolve_manual_joint_names() -> PackedStringArray:
 	var result := _joint_names.duplicate()
-	var available := _robot.get_actuated_joint_names()
 	for joint_name in manual_extra_joint_names:
 		if result.has(joint_name):
 			continue
-		if available.has(joint_name):
+		var joint := _robot.urdf.get_joint(joint_name) if _robot.urdf else null
+		if (
+			joint
+			and joint.type in ["revolute", "continuous", "prismatic"]
+			and not joint.is_mimic()
+		):
 			result.append(joint_name)
 			_manual_extra_commands[joint_name] = 0.0
 		else:
+			var reason := "missing"
+			if joint:
+				reason = "mimic" if joint.is_mimic() else "not independently actuated"
 			push_warning(
-				"URDFRobotArmAgentBody: manual joint '%s' is missing, fixed, or mimic." %
-				joint_name)
+				"URDFRobotArmAgentBody: manual joint '%s' is %s." %
+				[joint_name, reason])
 	return result
 
 
@@ -960,10 +1412,13 @@ func _joint_max_speed(index: int) -> float:
 
 
 func _joint_max_speed_for_name(joint_name: String) -> float:
+	var speed := default_joint_speed
 	var joint := _robot.urdf.get_joint(joint_name)
 	if joint and joint.limit and joint.limit.velocity > 0.0:
-		return joint.limit.velocity
-	return maxf(default_joint_speed, 0.000001)
+		speed = joint.limit.velocity
+	if max_joint_speed_override > 0.0:
+		speed = minf(speed, max_joint_speed_override)
+	return maxf(speed, 0.000001)
 
 
 func _limit_aware_command(index: int, command: float) -> float:
@@ -979,7 +1434,11 @@ func _limit_aware_named_command(joint_name: String, command: float) -> float:
 	if is_zero_approx(command) or not _robot or not _robot.urdf:
 		return command
 	var joint := _robot.urdf.get_joint(joint_name)
-	if not joint or joint.type != "revolute" or not joint.limit:
+	if (
+		not joint
+		or joint.type not in ["revolute", "prismatic"]
+		or not joint.limit
+	):
 		return command
 
 	var lower := minf(joint.limit.lower, joint.limit.upper)
@@ -988,11 +1447,11 @@ func _limit_aware_named_command(joint_name: String, command: float) -> float:
 	if span <= 0.0:
 		return 0.0
 
-	var position := clampf(_robot.get_joint_position(joint_name), lower, upper)
+	var _position := clampf(_robot.get_joint_position(joint_name), lower, upper)
 	var distance_to_limit := (
-		position - lower
+		_position - lower
 		if command < 0.0
-		else upper - position)
+		else upper - _position)
 	if distance_to_limit <= 0.000001:
 		return 0.0
 
@@ -1052,10 +1511,14 @@ func _update_success_state() -> void:
 	if _success_frames < success_hold_physics_frames:
 		return
 	_succeeded = true
-	if terminate_on_success:
+	# In manual control the operator keeps posing/capturing, so success must NOT terminate or stop the
+	# joints (that froze the arm after posing on the target, blocking further F9/J). Only autonomous
+	# training terminates on success.
+	if terminate_on_success and not manual_control:
 		_terminal = true
 		_robot.stop_all_joints()
-	target_reached.emit()
+	if not manual_control:
+		target_reached.emit()
 
 
 func _detect_target_pose_relocation() -> void:
@@ -1109,26 +1572,41 @@ func _connect_safety_volumes() -> void:
 
 func _on_safety_body_entered(body: Node) -> void:
 	if _node_or_parent_is_in_group(body, obstacle_group):
-		_register_collision()
+		_register_collision({
+			"source": "safety_volume_body",
+			"collider": str(body.name),
+			"collider_path": str(body.get_path()),
+		})
 
 
 func _on_safety_area_entered(other: Area3D) -> void:
 	if _node_or_parent_is_in_group(other, obstacle_group):
-		_register_collision()
+		_register_collision({
+			"source": "safety_volume_area",
+			"collider": str(other.name),
+			"collider_path": str(other.get_path()),
+		})
 
 
 func _cache_robot_collision_geometry() -> void:
 	_robot_collision_shapes.clear()
 	_robot_collision_exclusions.clear()
+	_robot_collision_link_by_shape_id.clear()
 	if not _robot:
 		return
 
-	for link_node in _robot.links.values():
+	for link_name in _robot.links.keys():
+		var link_node = _robot.links[link_name]
 		if not link_node is Node:
 			continue
 		if link_node is CollisionObject3D:
 			_robot_collision_exclusions.append(link_node.get_rid())
+		var shapes_before := _robot_collision_shapes.size()
 		_collect_collision_shapes(link_node)
+		for index in range(shapes_before, _robot_collision_shapes.size()):
+			var collision_shape := _robot_collision_shapes[index]
+			_robot_collision_link_by_shape_id[
+				collision_shape.get_instance_id()] = str(link_name)
 
 
 func _collect_collision_shapes(node: Node) -> void:
@@ -1162,7 +1640,97 @@ func _check_environment_collisions() -> void:
 		for hit in space_state.intersect_shape(query, max_collision_results_per_shape):
 			var collider: Variant = hit.get("collider")
 			if collider is Node and _node_or_parent_is_in_group(collider, obstacle_group):
-				_register_collision()
+				_register_collision({
+					"source": "environment",
+					"checker_link": str(_robot_collision_link_by_shape_id.get(
+						collision_shape.get_instance_id(), collision_shape.name)),
+					"checker_shape": str(collision_shape.get_path()),
+					"collider": str((collider as Node).name),
+					"collider_path": str((collider as Node).get_path()),
+				})
+				return
+
+
+func _cache_self_body_geometry() -> void:
+	_self_body_rids.clear()
+	_self_check_shapes.clear()
+	_self_check_exclusions.clear()
+	_self_check_link_by_shape_id.clear()
+	if not self_body_collision_enabled or not _robot:
+		return
+	var body_names := {}
+	for link_name in self_body_link_names:
+		var node: Node = _robot.get_link_node(link_name)
+		if node is CollisionObject3D:
+			_self_body_rids.append((node as CollisionObject3D).get_rid())
+			body_names[link_name] = true
+	if _self_body_rids.is_empty():
+		return
+	# Exclude every robot link EXCEPT the central-body targets, so a checker query can only strike
+	# the body. Adjacent shoulder links (which always touch the body) are excluded and never
+	# false-trigger, and the checker's own link is excluded too.
+	for link_name in _robot.links.keys():
+		var link_node = _robot.links[link_name]
+		if link_node is CollisionObject3D and not body_names.has(link_name):
+			_self_check_exclusions.append((link_node as CollisionObject3D).get_rid())
+	# Checker shapes: the configured distal arm links that can swing into the body.
+	for link_name in self_check_link_names:
+		var node: Node = _robot.get_link_node(link_name)
+		if node:
+			var link_shapes: Array[CollisionShape3D] = []
+			_collect_shapes_into(node, link_shapes)
+			for collision_shape in link_shapes:
+				_self_check_shapes.append(collision_shape)
+				_self_check_link_by_shape_id[collision_shape.get_instance_id()] = link_name
+
+
+func _collect_shapes_into(node: Node, out: Array) -> void:
+	for child in node.get_children():
+		if child is CollisionShape3D:
+			out.append(child)
+		_collect_shapes_into(child, out)
+
+
+func _check_self_body_collisions() -> void:
+	if (
+		_terminal
+		or (manual_control and _manual_collision_grace_frames > 0)
+		or not self_body_collision_enabled
+		or _self_check_shapes.is_empty()
+		or _self_body_rids.is_empty()
+		or not is_inside_tree()
+	):
+		return
+	var space_state := get_world_3d().direct_space_state
+	for collision_shape in _self_check_shapes:
+		if not collision_shape or collision_shape.disabled or not collision_shape.shape:
+			continue
+		var query := PhysicsShapeQueryParameters3D.new()
+		query.shape = collision_shape.shape
+		query.transform = collision_shape.global_transform
+		query.collision_mask = environment_collision_mask
+		query.collide_with_bodies = true
+		query.collide_with_areas = false
+		query.exclude = _self_check_exclusions
+		for hit in space_state.intersect_shape(query, max_collision_results_per_shape):
+			if _self_body_rids.has(hit.get("rid")):
+				var collider: Variant = hit.get("collider")
+				_last_self_collision_details = {
+					"checker_link": str(_self_check_link_by_shape_id.get(
+						collision_shape.get_instance_id(), collision_shape.name)),
+					"checker_shape": str(collision_shape.get_path()),
+					"body_link": (
+						str((collider as Node).name)
+						if collider is Node
+						else "<unknown>"),
+					"body_path": (
+						str((collider as Node).get_path())
+						if collider is Node
+						else ""),
+				}
+				var collision_details := _last_self_collision_details.duplicate(true)
+				collision_details["source"] = "self_body"
+				_register_collision(collision_details)
 				return
 
 
@@ -1175,13 +1743,30 @@ func _node_or_parent_is_in_group(node: Node, group_name: String) -> bool:
 	return false
 
 
-func _register_collision() -> void:
+func _register_collision(details: Dictionary = {}) -> void:
 	if _terminal:
 		return
+	_last_collision_details = details.duplicate(true)
+	if not _last_collision_details.has("source"):
+		_last_collision_details["source"] = "unknown"
+	_last_collision_details["physics_frame"] = Engine.get_physics_frames()
+	_last_collision_details["succeeded_before_collision"] = _succeeded
+	if collision_debug or (
+		self_collision_debug
+		and str(_last_collision_details.get("source", "")) == "self_body"
+	):
+		print(
+			"[METIS ARM COLLISION] %s"
+			% JSON.stringify(_last_collision_details))
 	_collided = true
-	_terminal = true
-	_robot.stop_all_joints()
-	obstacle_collision.emit()
+	# Manual control never terminates/stops (the operator keeps posing/capturing). In training the
+	# collision is always penalised via the signal, but it only terminates + stops the joints when
+	# collision_terminates is true; with it false the arm grazes and recovers (soft collision).
+	if not manual_control:
+		obstacle_collision.emit()
+		if collision_terminates:
+			_terminal = true
+			_robot.stop_all_joints()
 
 
 func _target_distance() -> float:

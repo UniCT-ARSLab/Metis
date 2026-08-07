@@ -1,0 +1,15 @@
+; Minimal project used to verify the packaged Metis add-on in isolation.
+config_version=5
+
+[application]
+
+config/name="Metis Add-on Smoke Test"
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/metis/plugin.cfg")
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"

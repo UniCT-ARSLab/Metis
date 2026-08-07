@@ -50,6 +50,13 @@ class MetisSB3VecEnv(VecEnv):
         self._next_training_episodes = [
             int(training_episode_start) for _env in self.envs
         ]
+        # The Godot curriculum keys on a GLOBAL episode count -- openarm_scenario.gd calls it
+        # "the REAL global episode count" -- and that is what every native Metis trainer sends.
+        # The per-env counters above stay per-env because the episode seed derives from them,
+        # but feeding them to the scene would pace its curriculum num_envs times slower: with 8
+        # envs the assist schedule that should be over by episode 6000 was still sitting on its
+        # 0.15 floor after 8950 episodes, so a paired Metis/SB3 run trains on two different tasks.
+        self._global_training_episode = int(training_episode_start)
         self._episode_numbers = [-1] * len(self.envs)
         self._episode_returns = np.zeros((len(self.envs),), dtype=np.float64)
         self._episode_lengths = np.zeros((len(self.envs),), dtype=np.int64)
@@ -81,7 +88,7 @@ class MetisSB3VecEnv(VecEnv):
 
     @property
     def next_training_episode(self):
-        return max(self._next_training_episodes)
+        return self._global_training_episode
 
     @property
     def current_training_episode(self):
@@ -100,14 +107,16 @@ class MetisSB3VecEnv(VecEnv):
         episode = self._next_training_episodes[index]
         self._next_training_episodes[index] += 1
         self._episode_numbers[index] = episode
+        curriculum_episode = self._global_training_episode
+        self._global_training_episode += 1
 
         config = {
-            "training_episode": episode,
+            "training_episode": curriculum_episode,
             "max_steps": self.max_steps,
             "physics_frames_per_step": self.physics_frames_per_step,
             "training_mode": True,
         }
-        progress_max = self._curriculum_progress_max(episode)
+        progress_max = self._curriculum_progress_max(curriculum_episode)
         if progress_max is not None:
             config.update(reset_progress_min=0.0, reset_progress_max=progress_max)
         self.envs[index].configure(**config)

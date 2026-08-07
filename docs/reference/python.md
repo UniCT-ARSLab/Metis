@@ -5,7 +5,20 @@ to the selected RL backend. Scenario-specific trainers are deliberately avoided.
 
 ## Public commands
 
-### `python/train.py`
+An installed wheel provides the grouped `metis` command and dedicated aliases:
+
+```text
+metis train       metis-train
+metis run         metis-run
+metis record      metis-record
+metis export      metis-export
+metis doctor      metis-doctor
+```
+
+The scripts under `python/` are equivalent source-checkout entry points. They remain
+supported so contributors can test edits without rebuilding the package.
+
+### `metis train` / `python/train.py`
 
 Parses shared arguments, probes the action space when necessary, and lazily loads a
 learner. `--backend metis` is the default and dispatches to `python/algorithms`.
@@ -33,10 +46,24 @@ runtime and can be installed from `requirements-dashboard.txt`.
 dashboard. The backend benchmark uses this persistent stream to compare learning
 curves on a transition axis.
 
-### `python/run.py`
+`--adaptive-curriculum` promotes a scene level only from frozen evaluations. A
+checkpoint must contain at least `--curriculum-min-policy-updates` policy/actor optimizer
+updates (100 by default) before its evaluation can count toward promotion. Critic-only
+warmup and a successful random initialization therefore cannot advance the task.
+Frozen evaluation follows the live episode-based curriculum unless
+`--best-evaluation-training-episode` fixes a stage explicitly. Optional demotion uses
+`--curriculum-demotion-threshold` and `--curriculum-demotion-evaluations`; leave the
+threshold unset to keep a monotonic curriculum.
+
+### `metis run` / `python/run.py`
 
 Loads `policy.keras` and `policy.json` by default. It can also load an explicit policy
 file, legacy H5 weights, or a training checkpoint.
+
+`--export-policy-dir DIR --export-policy-only` extracts the policy network from the
+selected exact checkpoint and writes a portable Metis bundle without running
+evaluation episodes. This is useful when `best/ckpt-N` is better than the latest root
+`policy.keras`, or when a new run should inherit only the actor.
 
 Lockstep execution is used for reproducible evaluation. Real-time execution is useful
 for watching a policy at the scene's natural pace.
@@ -51,17 +78,35 @@ for watching a policy at the scene's natural pace.
 Collision and failure behavior still belongs to the scenario. A scene may stop a body
 at a terminal state even when no physical reset is requested.
 
-### `python/export.py`
+### `metis export` / `python/export.py`
 
 Exports a Keras policy bundle to TensorFlow Lite, ONNX, or both. TFLite uses the main
 TensorFlow installation. ONNX requires the optional packages in
 `requirements-export.txt`.
 
-### `python/recorder.py`
+### `metis record` / `python/recorder.py`
 
 Starts one manually controlled Godot agent and writes an `.npz` dataset containing
 observations, applied actions, rewards, next observations, `terminated`, `truncated`,
 agent IDs, episodes, and steps.
+
+### `metis doctor`
+
+Checks the selected dependency profile, imports the relevant training stack, locates
+Godot, and reports available TensorFlow or PyTorch accelerators. The editor runtime
+setup runs this command before accepting a managed or existing interpreter.
+
+Use `--json` when another tool needs a machine-readable result. `--profile` accepts
+`core`, `native`, `dashboard`, `export`, or `sb3`.
+
+## Installation forms
+
+The Asset Library package creates an isolated interpreter under the Godot project's
+`.metis/venv` directory. A normal Python installation can install the wheel directly.
+Repository development uses `python/.venv`.
+
+These layouts all run the same modules. The full packaging and runtime contract is
+described in [Distribution and installation](distribution.md).
 
 ## Internal packages
 
@@ -187,6 +232,18 @@ learner.
 Async and multi-agent support are backend responsibilities. They cannot be inferred
 only from a model accepting batched tensors.
 
+Every native algorithm builds its hidden layers from one shared list in
+`core/models.py`, defaulting to that algorithm's reference architecture: `256 256` for SAC,
+`400 300` for TD3/DDPG, `64 64` for PPO and DQN. The optional `--network-layers W [W ...]`
+overrides it for the actor, both critics, and the DQN Q network at once; the SB3 adapter
+ignores it and keeps its own `--network`. See
+[Shared training options](../algorithms/common-options.md#network-architecture).
+
+For selection advice, complete flag tables, and runnable examples, continue with the
+[algorithm guide](../algorithms/README.md). Shared collector, checkpoint, curriculum,
+health, and rendering flags are catalogued once in
+[Shared training options](../algorithms/common-options.md).
+
 ## SB3 compatibility matrix
 
 | Capability | Metis backend | SB3 adapter |
@@ -219,6 +276,20 @@ uses the hard cap while the estimates settle.
 The adaptive EMA is local to the learner process and is not restored from a
 checkpoint. The entropy-temperature optimizer is not clipped. DQN, PPO, and the
 DDPG/TD3 family do not currently expose these clipping flags.
+
+## Conservative SAC fine-tuning
+
+`--actor-anchor-coef` adds a trust-region penalty between the live SAC actor and a
+frozen copy of the policy loaded at process startup. It covers both the deterministic
+action mean and, with the relative weight set by `--actor-anchor-log-std-coef`, the
+policy standard deviation. This can stop a competent resumed or warm-started policy
+from drifting while its critics adapt to new replay or a harder curriculum stage.
+
+The default coefficient is `0`, so ordinary training is unchanged. Start with a
+moderate value such as `10` for conservative fine-tuning. A large coefficient can
+also prevent useful adaptation, so lower or remove it when moving to a substantially
+different task. On checkpoint resume the new process anchors to the restored actor;
+automatic recovery does not move that reference.
 
 ## Episode metrics and dashboard sinks
 

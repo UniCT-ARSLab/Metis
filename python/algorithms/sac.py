@@ -1,4 +1,6 @@
 import argparse
+import itertools
+import json
 import os
 import random
 import time
@@ -11,12 +13,19 @@ import numpy as np
 
 from algorithms.common import (
     continuous_exploration_bounds,
+    build_replay_ready_event,
     create_continuous_async_worker,
     curriculum_reset_progress_max,
     describe_tensorflow_backend,
+    exploration_label,
+    format_collision_diagnostics,
     format_float_list,
     load_demonstration_arrays,
     sample_exploratory_action,
+    replay_warmup_remaining,
+    replay_warmup_threshold,
+    scenario_curriculum_config,
+    should_use_random_exploration,
     smooth_actions,
     soft_update,
     summarize_action_deltas,
@@ -27,7 +36,12 @@ from algorithms.common import (
 )
 import tensorflow as tf
 
-from core.models import build_continuous_critic, build_sac_actor
+from core.models import (
+    build_continuous_critic,
+    build_sac_actor,
+    default_network_layers,
+    set_network_layers,
+)
 from core.multi_policy import (
     MultiPolicySnapshot,
     add_multi_policy_arguments,
@@ -45,6 +59,7 @@ from core.training_health import OffPolicyRecoveryRuntime
 from core.training import (
     AsyncCollectorPool,
     AsyncEventScheduler,
+    SyncUpdateThrottle,
     AsyncEpisodeEvent,
     AsyncStepEvent,
     AsyncWorkerDoneEvent,
@@ -170,6 +185,25 @@ def parse_args():
         default=0.05,
         help="Std of the Gaussian perturbation for the CAPS spatial-smoothness term (obs are ~[-1,1]).",
     )
+    parser.add_argument(
+        "--actor-anchor-coef",
+        type=float,
+        default=0.0,
+        help=(
+            "Trust-region penalty that keeps a resumed or warm-started actor close to the "
+            "policy loaded at startup. Useful for conservative fine-tuning of an already "
+            "competent policy; 0 disables it."
+        ),
+    )
+    parser.add_argument(
+        "--actor-anchor-log-std-coef",
+        type=float,
+        default=0.1,
+        help=(
+            "Relative weight of the log-standard-deviation term inside the actor anchor. "
+            "The deterministic action mean always has weight 1."
+        ),
+    )
     parser.add_argument("--log-std-min", type=float, default=-20.0)
     parser.add_argument("--log-std-max", type=float, default=2.0)
     parser.add_argument("--action-smoothing", type=float, default=0.0)
@@ -187,8 +221,9 @@ def parse_args():
         type=int,
         default=2000,
         help=(
-            "On checkpoint resume, update only critics and target critics for this many "
-            "gradient steps before unfreezing actor and alpha. Use 0 to disable."
+            "After checkpoint resume or an actor-only --policy-path warm start, update "
+            "only critics and target critics for this many gradient steps before "
+            "unfreezing actor and alpha. Use 0 to disable."
         ),
     )
     parser.add_argument("--target-update-every", type=int, default=1)
@@ -197,6 +232,17 @@ def parse_args():
         type=int,
         default=2,
         help="Update actor and entropy temperature once every N critic updates.",
+    )
+    parser.add_argument(
+        "--network-layers",
+        type=int,
+        nargs="+",
+        default=None,
+        metavar="WIDTH",
+        help="Hidden layer widths for actor/critic/Q networks, e.g. --network-layers 256 256. "
+        "Omitted, each algorithm uses its reference architecture (SAC 256 256, "
+        "TD3/DDPG 400 300, PPO and DQN 64 64). Checkpoints written before these "
+        "defaults used 256 256 128 and need that value passed explicitly.",
     )
     parser.add_argument("--env-seed-base", type=int, default=100)
     parser.add_argument("--episode-seed-multiplier", type=int, default=1000)
@@ -245,6 +291,36 @@ def parse_args():
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Run behavior cloning again after restoring a checkpoint.",
+    )
+    parser.add_argument(
+        "--demo-validation-path",
+        action="append",
+        default=[],
+        help="Held-out demo npz(s): BC measures action MSE on it each epoch and keeps the "
+        "best-epoch weights (early best-checkpoint against overfitting the training demos).",
+    )
+    parser.add_argument(
+        "--demo-bc-path",
+        action="append",
+        default=[],
+        help="Imitation-only npz(s) of (obs, actions) pairs: added to the BC imitation loss ONLY, "
+        "never prefilled into the replay buffer. Use for DAgger labels (learner-visited states + "
+        "expert action) whose next_obs was produced by the LEARNER, so they are not valid RL "
+        "transitions. --demo-path stays the source of complete transitions (BC + replay).",
+    )
+    parser.add_argument(
+        "--bc-actor-weights-path",
+        type=str,
+        default=None,
+        help="Persist the BC-pretrained actor here BEFORE any SAC/critic-warmup update "
+        "(default: the actor weights path with a _bc suffix).",
+    )
+    parser.add_argument(
+        "--stop-after-bc",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Run BC (+ save the BC actor) then ONE frozen Stage-A evaluation, and STOP before "
+        "the SAC training loop. A gate to inspect the cloned policy without committing to SAC.",
     )
     parser.add_argument("--godot-bin", default=os.environ.get("GODOT_BIN"))
     parser.add_argument("--godot-project", default=None)
@@ -354,7 +430,8 @@ def select_action(actor, obs, action_low, action_high, log_std_min, log_std_max)
     )[0]
 
 
-def build_sac_sample_fn(actor, obs_dim, action_low, action_high, log_std_min, log_std_max, device="/CPU:0"):
+def build_sac_sample_fn(actor, obs_dim, action_low, action_high, log_std_min, log_std_max,
+                        device="/CPU:0", deterministic=False):
     """Trace the squashed-Gaussian sample into one graph per collector.
 
     The collector calls the actor and tf.random.normal in eager mode. Run concurrently
@@ -371,12 +448,44 @@ def build_sac_sample_fn(actor, obs_dim, action_low, action_high, log_std_min, lo
         with tf.device(device):
             mean, log_std = actor(obs_batch, training=False)
             log_std = tf.clip_by_value(log_std, log_std_min, log_std_max)
-            std = tf.exp(log_std)
-            pre_tanh = mean + std * tf.random.normal(tf.shape(mean))
+            if deterministic:
+                pre_tanh = mean
+            else:
+                std = tf.exp(log_std)
+                pre_tanh = mean + std * tf.random.normal(tf.shape(mean))
             raw_action = tf.tanh(pre_tanh)
             return low + 0.5 * (raw_action + 1.0) * (high - low)
 
     return sample
+
+
+def build_sac_log_prob_fn(actor, obs_dim, log_std_min, log_std_max, device="/CPU:0"):
+    """Trace the mean log-prob of the current policy over a batch, for telemetry.
+
+    Alpha moves on sign(log_prob + target_entropy) alone, and that quantity is otherwise
+    invisible: a run whose alpha climbs to 14 and one whose alpha collapses to 0.003 look
+    identical in the log. Traced (not eager) for the same reason the sampler is: an eager
+    tf.random.normal here is a multi-device wrapped op that leaks ~74 kB per call.
+    """
+    @tf.function(input_signature=[tf.TensorSpec([None, obs_dim], tf.float32)])
+    def mean_log_prob(obs_batch):
+        with tf.device(device):
+            mean, log_std = actor(obs_batch, training=False)
+            log_std = tf.clip_by_value(log_std, log_std_min, log_std_max)
+            std = tf.exp(log_std)
+            pre_tanh = mean + std * tf.random.normal(tf.shape(mean))
+            raw_action = tf.tanh(pre_tanh)
+            per_dim = (
+                -0.5 * tf.square((pre_tanh - mean) / (std + 1e-6))
+                - log_std
+                - 0.5 * LOG_2PI
+            )
+            log_prob = tf.reduce_sum(per_dim, axis=1)
+            log_prob -= tf.reduce_sum(
+                tf.math.log(1.0 - tf.square(raw_action) + 1e-6), axis=1)
+            return tf.reduce_mean(log_prob)
+
+    return mean_log_prob
 
 
 def select_actions_with(sample_fn, obs_batch, done_mask, action_low, action_high):
@@ -390,6 +499,7 @@ def select_action_with(sample_fn, obs, action_low, action_high):
     return select_actions_with(
         sample_fn, np.expand_dims(obs, axis=0), None, action_low, action_high
     )[0]
+
 
 
 def build_sac_learner_step(
@@ -422,6 +532,8 @@ def build_sac_learner_step(
     caps_lambda_temporal=1.0,
     caps_lambda_spatial=1.0,
     caps_sigma=0.05,
+    actor_anchor_coef=0.0,
+    actor_anchor_log_std_coef=0.1,
 ):
     """Build the SAC gradient step, optionally compiled into a tf.function.
 
@@ -451,6 +563,18 @@ def build_sac_learner_step(
     caps_lt_c = tf.constant(float(caps_lambda_temporal), dtype=tf.float32)
     caps_ls_c = tf.constant(float(caps_lambda_spatial), dtype=tf.float32)
     caps_sigma_c = tf.constant(float(caps_sigma), dtype=tf.float32)
+    actor_anchor_enabled = bool(actor_anchor_coef and actor_anchor_coef > 0.0)
+    actor_anchor_c = tf.constant(float(actor_anchor_coef), dtype=tf.float32)
+    actor_anchor_log_std_c = tf.constant(
+        float(actor_anchor_log_std_coef), dtype=tf.float32)
+    anchor_actor = None
+    if actor_anchor_enabled:
+        # Snapshot the policy after checkpoint/policy loading. The frozen copy stays outside
+        # the checkpoint so recovery restores the trainable actor without moving its trust
+        # reference. A later process resume deliberately establishes a new reference.
+        anchor_actor = tf.keras.models.clone_model(actor)
+        anchor_actor.set_weights(actor.get_weights())
+        anchor_actor.trainable = False
 
     # Build slots eagerly (outside any graph) so a deferred checkpoint restore populates them
     # deterministically and no variable is created inside the traced function after resume.
@@ -553,6 +677,34 @@ def build_sac_learner_step(
                 spatial = tf.reduce_mean(
                     tf.reduce_sum(tf.square(action_now - tf.tanh(mean_noisy)), axis=1))
                 actor_loss = actor_loss + caps_lt_c * temporal + caps_ls_c * spatial
+            if actor_anchor_enabled:
+                mean_now, log_std_now = actor(obs, training=True)
+                anchor_mean, anchor_log_std = anchor_actor(obs, training=False)
+                mean_error = tf.reduce_mean(
+                    tf.reduce_sum(
+                        tf.square(
+                            tf.tanh(mean_now)
+                            - tf.stop_gradient(tf.tanh(anchor_mean))
+                        ),
+                        axis=1,
+                    )
+                )
+                log_std_error = tf.reduce_mean(
+                    tf.reduce_sum(
+                        tf.square(
+                            tf.clip_by_value(log_std_now, log_std_min, log_std_max)
+                            - tf.stop_gradient(
+                                tf.clip_by_value(
+                                    anchor_log_std, log_std_min, log_std_max
+                                )
+                            )
+                        ),
+                        axis=1,
+                    )
+                )
+                actor_loss = actor_loss + actor_anchor_c * (
+                    mean_error + actor_anchor_log_std_c * log_std_error
+                )
         actor_grads = tape.gradient(actor_loss, actor.trainable_variables)
         actor_grads = clip_actor(actor_grads)
         actor_optimizer.apply_gradients(zip(actor_grads, actor.trainable_variables))
@@ -609,21 +761,130 @@ def build_sac_learner_step(
     return learner_step
 
 
-def pretrain_actor_behavior_cloning(actor, demo_data, epochs, batch_size, learning_rate, action_low, action_high):
-    optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
-    obs = demo_data["obs"]
-    actions = demo_data["actions"]
+def _bc_raw_targets(actions, action_low, action_high):
     action_low = np.asarray(action_low, dtype=np.float32).reshape(1, -1)
     action_high = np.asarray(action_high, dtype=np.float32).reshape(1, -1)
-    raw_targets = 2.0 * (actions - action_low) / np.maximum(action_high - action_low, 1e-6) - 1.0
-    raw_targets = np.clip(raw_targets, -0.995, 0.995).astype(np.float32)
-    count = len(actions)
+    raw = 2.0 * (actions - action_low) / np.maximum(action_high - action_low, 1e-6) - 1.0
+    return np.clip(raw, -0.995, 0.995).astype(np.float32)
 
-    for epoch in range(int(epochs)):
-        order = np.random.permutation(count)
-        losses = []
+
+def _bc_validation_mse(actor, obs, raw_targets, batch_size):
+    """Deterministic action MSE (tanh(mean) vs raw targets) over a held-out set, batched."""
+    total = 0.0
+    n = len(raw_targets)
+    for start in range(0, n, batch_size):
+        stop = min(start + batch_size, n)
+        mean, _ = actor(tf.convert_to_tensor(obs[start:stop], dtype=tf.float32), training=False)
+        predicted = tf.tanh(mean)
+        err = tf.reduce_sum(tf.square(
+            tf.convert_to_tensor(raw_targets[start:stop], dtype=tf.float32) - predicted))
+        total += float(err.numpy())
+    return total / max(n * raw_targets.shape[1], 1)
+
+
+def _bc_group_batches(group_ids, count, batch_size, rng):
+    """Yield index batches balanced by group_id (trajectory), so long trajectories do not dominate
+    the imitation loss. Each slot samples a group uniformly, then a transition from it. Task-
+    agnostic: it only sees opaque group ids, never any cell/region concept. group_ids=None -> a
+    plain shuffled pass."""
+    n_batches = max(1, (count + batch_size - 1) // batch_size)
+    if group_ids is None:
+        order = rng.permutation(count)
         for start in range(0, count, batch_size):
-            idx = order[start:start + batch_size]
+            yield order[start:start + batch_size]
+        return
+    groups = np.unique(group_ids)
+    by_group = {int(g): np.flatnonzero(group_ids == g) for g in groups}
+    keys = np.array(list(by_group.keys()))
+    for _ in range(n_batches):
+        chosen = rng.choice(keys, size=batch_size, replace=True)
+        yield np.array([rng.choice(by_group[int(g)]) for g in chosen])
+
+
+def _load_bc_pairs(paths, obs_dim, action_size):
+    """Load imitation-only (obs, actions) pairs (no rewards/next_obs/dones). Carries an opaque
+    group_id per transition (group_ids/episode_indices key, else per-file constant), offset so
+    trajectories stay disjoint across files. Returns None if paths is empty."""
+    obs_parts, act_parts, grp_parts = [], [], []
+    offset = 0
+    for path in paths:
+        with np.load(path) as d:
+            if "obs" not in d or "actions" not in d:
+                raise ValueError(f"BC-pairs file {path!r} must contain obs and actions arrays")
+            o = np.asarray(d["obs"], dtype=np.float32)
+            a = np.asarray(d["actions"], dtype=np.float32)
+            if "group_ids" in d:
+                g = np.asarray(d["group_ids"]).astype(np.int64)
+            elif "episode_indices" in d:
+                g = np.asarray(d["episode_indices"]).astype(np.int64)
+            else:
+                g = np.zeros(len(a), dtype=np.int64)
+        if o.ndim != 2 or o.shape[1] != obs_dim:
+            raise ValueError(f"BC-pairs {path!r} obs shape {o.shape} != obs_dim {obs_dim}")
+        if a.ndim != 2 or a.shape[1] != action_size:
+            raise ValueError(f"BC-pairs {path!r} actions shape {a.shape} != action_size {action_size}")
+        g = g + offset
+        obs_parts.append(o)
+        act_parts.append(a)
+        grp_parts.append(g)
+        offset = int(g.max()) + 1 if len(g) else offset
+    if not obs_parts:
+        return None
+    return {
+        "obs": np.concatenate(obs_parts, axis=0),
+        "actions": np.concatenate(act_parts, axis=0),
+        "group_ids": np.concatenate(grp_parts, axis=0),
+    }
+
+
+def _combine_bc_sources(demo_data, bc_pairs):
+    """Concatenate the complete-transition demos (--demo-path) and imitation-only pairs
+    (--demo-bc-path) into one BC training set with globally-disjoint group ids."""
+    obs_parts, act_parts, grp_parts = [], [], []
+    offset = 0
+    for src in (demo_data, bc_pairs):
+        if src is None or len(src.get("actions", [])) == 0:
+            continue
+        g = np.asarray(src.get("group_ids", np.zeros(len(src["actions"]), dtype=np.int64)))
+        g = g.astype(np.int64) + offset
+        obs_parts.append(np.asarray(src["obs"], dtype=np.float32))
+        act_parts.append(np.asarray(src["actions"], dtype=np.float32))
+        grp_parts.append(g)
+        offset = int(g.max()) + 1 if len(g) else offset
+    if not obs_parts:
+        return None, None
+    combined = {
+        "obs": np.concatenate(obs_parts, axis=0),
+        "actions": np.concatenate(act_parts, axis=0),
+    }
+    return combined, np.concatenate(grp_parts, axis=0)
+
+
+def pretrain_actor_behavior_cloning(
+    actor, demo_data, epochs, batch_size, learning_rate, action_low, action_high,
+    demo_validation=None, group_ids=None,
+):
+    """Behavior-clone the actor onto the demo actions. Batches are balanced by group_id/trajectory
+    when provided. With a validation set, keep the weights of the epoch with the lowest validation
+    MSE (best-checkpoint / early-stop against overfitting)."""
+    optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+    rng = np.random.default_rng()
+    obs = demo_data["obs"]
+    raw_targets = _bc_raw_targets(demo_data["actions"], action_low, action_high)
+    count = len(raw_targets)
+    groups = None if group_ids is None else np.asarray(group_ids)
+
+    val_obs = val_raw = None
+    if demo_validation is not None and len(demo_validation.get("actions", [])) > 0:
+        val_obs = demo_validation["obs"]
+        val_raw = _bc_raw_targets(demo_validation["actions"], action_low, action_high)
+
+    best_val = None
+    best_epoch = -1
+    best_weights = None
+    for epoch in range(int(epochs)):
+        losses = []
+        for idx in _bc_group_batches(groups, count, batch_size, rng):
             batch_obs = tf.convert_to_tensor(obs[idx], dtype=tf.float32)
             batch_raw_targets = tf.convert_to_tensor(raw_targets[idx], dtype=tf.float32)
 
@@ -635,11 +896,101 @@ def pretrain_actor_behavior_cloning(actor, demo_data, epochs, batch_size, learni
             optimizer.apply_gradients(zip(grads, actor.trainable_variables))
             losses.append(float(loss.numpy()))
 
+        val_msg = ""
+        if val_raw is not None:
+            val_mse = _bc_validation_mse(actor, val_obs, val_raw, batch_size)
+            val_msg = f" val_mse={val_mse:.6f}"
+            if best_val is None or val_mse < best_val:
+                best_val = val_mse
+                best_epoch = epoch + 1
+                best_weights = actor.get_weights()
         print(
             f"demo_bc_epoch={epoch + 1:04d}/{epochs:04d} "
-            f"actor_raw_mse={float(np.mean(losses)):.6f}",
+            f"actor_raw_mse={float(np.mean(losses)):.6f}{val_msg}",
             flush=True,
         )
+
+    if best_weights is not None:
+        actor.set_weights(best_weights)
+        print(
+            f"BC best epoch={best_epoch}/{epochs} val_mse={best_val:.6f} "
+            "(restored best-validation weights)",
+            flush=True,
+        )
+    return {"best_epoch": best_epoch, "best_val_mse": best_val}
+
+
+def _bc_actor_path_default(actor_weights_path):
+    """Derive a BC-actor path from the actor weights path (…foo.weights.h5 -> …foo_bc.weights.h5)."""
+    p = str(actor_weights_path or "bc_actor.weights.h5")
+    if p.endswith(".weights.h5"):
+        return p[: -len(".weights.h5")] + "_bc.weights.h5"
+    root, dot, ext = p.rpartition(".")
+    return f"{root}_bc.{ext}" if dot else f"{p}_bc"
+
+
+def _run_stop_after_bc_eval(
+    args, actor, checkpoint, checkpoint_manager, buffer, best_tracker, start_episode
+):
+    """Save a BC checkpoint, run ONE frozen (deterministic) evaluation at the current curriculum
+    level, then stop before SAC. The SAC backend is task-agnostic: the initial level means "Stage
+    A" only for a task (e.g. OpenArm) that defines it that way, so nothing here assumes it.
+
+    A failed/empty evaluation exits NON-ZERO (raises SystemExit) rather than reporting a passing
+    gate. The summary includes whatever generic reset/cell breakdowns the evaluation produced.
+    """
+    print(
+        "stop-after-bc: saving BC checkpoint + running a frozen evaluation at the current "
+        "curriculum level (SAC NOT started)...",
+        flush=True,
+    )
+    saved_path = save_training_checkpoint(
+        checkpoint, checkpoint_manager, buffer, start_episode, args,
+        final=True, save_replay=False,
+    )
+    result = None
+    try:
+        result = best_tracker.evaluate(str(saved_path), start_episode)
+    except Exception as exc:
+        print(f"stop-after-bc: frozen evaluation raised: {exc}", flush=True)
+    if result is None or not getattr(result, "summary", None):
+        # Fail closed: no summary means the gate did NOT pass -> non-zero exit.
+        raise SystemExit(
+            "stop-after-bc: frozen evaluation produced no summary (failed/timeout); "
+            "exiting non-zero without a gate result."
+        )
+    s = result.summary
+    # Generic reset/cell breakdowns as produced by the task's eval -- never hardcode cell ids.
+    breakdown = {
+        key: s[key]
+        for key in (
+            "reset_modes",
+            "target_regions",
+            "target_cells",
+            "region_success_floor",
+            "regular_success_rate",
+        )
+        if key in s
+    }
+    print(
+        "BC_FROZEN_EVAL "
+        + json.dumps(
+            {
+                "success_rate": float(s.get("success_rate", 0.0)),
+                "selection_success_rate": float(
+                    s.get("selection_success_rate", s.get("success_rate", 0.0))
+                ),
+                "position_error_mean": s.get("position_error_mean"),
+                "orientation_error_mean": s.get("orientation_error_mean"),
+                "hold_frames_max": s.get("hold_frames_max"),
+                "episodes": int(getattr(args, "best_evaluation_episodes", 0)),
+                "curriculum_level": s.get("curriculum_level"),
+                "breakdown": breakdown,
+            }
+        ),
+        flush=True,
+    )
+    print("stop-after-bc: STOPPED before SAC.", flush=True)
 
 
 def save_critic_weights(critic1, critic2, args):
@@ -773,11 +1124,14 @@ def run_async_sac(
         caps_lambda_temporal=args.caps_lambda_temporal,
         caps_lambda_spatial=args.caps_lambda_spatial,
         caps_sigma=args.caps_sigma,
+        actor_anchor_coef=args.actor_anchor_coef,
+        actor_anchor_log_std_coef=args.actor_anchor_log_std_coef,
     )
     print(
         f"SAC learner: {'compiled graph' if args.tf_compile_learner else 'eager'}"
         f"{' + XLA' if args.tf_compile_learner and args.tf_xla else ''}"
-        f" | grad-clip: {describe_grad_clip(args)}",
+        f" | grad-clip: {describe_grad_clip(args)}"
+        f" | actor-anchor: {args.actor_anchor_coef:g}",
         flush=True,
     )
     with tf.device("/CPU:0"):
@@ -799,6 +1153,7 @@ def run_async_sac(
             lambda: snapshot.publish(actor.get_weights())
         )
     rngs = [np.random.default_rng(args.env_seed_base + 100_003 * idx) for idx in range(len(envs))]
+    replay_ready_event = build_replay_ready_event(buffer, args)
 
     def action_selector(worker_id, env, _episode, _step_idx, local_actor, state):
         if state["use_random_exploration"]:
@@ -845,6 +1200,7 @@ def run_async_sac(
         snapshot,
         action_size,
         action_selector,
+        replay_ready_event=replay_ready_event,
     )
     pool = AsyncCollectorPool(
         envs,
@@ -922,6 +1278,8 @@ def run_async_sac(
                     for transition in step_event.transitions:
                         buffer.add(*transition)
                         collected_transitions += 1
+                if len(buffer) >= replay_warmup_threshold(args):
+                    replay_ready_event.set()
                 budget.consume(collected_transitions)
                 updates_due = scheduler.ingest(step_events)
                 updates_performed = 0
@@ -973,13 +1331,14 @@ def run_async_sac(
             finish_rate = diagnostics["finishes"] / max(controlled_agents, 1)
             collision_rate = diagnostics["collisions"] / max(controlled_agents, 1)
             stall_rate = diagnostics["stalls"] / max(controlled_agents, 1)
-            warmup_left = recovery_runtime.warmup_left
+            replay_warmup_left = replay_warmup_remaining(buffer, args)
+            critic_warmup_left = recovery_runtime.warmup_left
             throughput = scheduler.throughput(pool)
             print_episode_metrics(event.episode, [
                 ("mode", [
                     ("collector", "async"),
                     ("worker", event.worker_id),
-                    ("exploration", "random" if state["use_random_exploration"] else "policy"),
+                    ("exploration", exploration_label(state)),
                     ("alpha", f"{float(tf.exp(log_alpha).numpy()):.4f}"),
                     *(([("reset_progress_max", f"{state['reset_progress_max']:.3f}")]) if state["reset_progress_max"] is not None else []),
                 ]),
@@ -991,7 +1350,8 @@ def run_async_sac(
                 ]),
                 ("agents", [
                     ("finish", f"{diagnostics['finishes']}/{controlled_agents} ({finish_rate:.2%})"),
-                    ("collision", f"{diagnostics['collisions']}/{controlled_agents} ({collision_rate:.2%})"),
+                    ("collision", format_collision_diagnostics(
+                        diagnostics, controlled_agents)),
                     ("stall", f"{diagnostics['stalls']}/{controlled_agents} ({stall_rate:.2%})"),
                 ]),
                 ("actions", [("mean", format_float_list(mean_action)), ("delta", format_float_list(mean_delta))]),
@@ -1002,7 +1362,8 @@ def run_async_sac(
                     ("replay", f"{len(buffer)}/{args.replay_capacity}"),
                     ("critic_updates", len(critic1_losses)),
                     ("policy_updates", len(actor_losses)),
-                    ("warmup_left", warmup_left),
+                    ("replay_warmup_left", replay_warmup_left),
+                    ("critic_warmup_left", critic_warmup_left),
                     ("actor_loss", f"{float(np.mean(actor_losses)) if actor_losses else 0.0:.5f}"),
                     ("critic_loss", f"{float(np.mean(critic1_losses)) if critic1_losses else 0.0:.5f}/{float(np.mean(critic2_losses)) if critic2_losses else 0.0:.5f}"),
                     ("alpha_loss", f"{float(np.mean(alpha_losses)) if alpha_losses else 0.0:.5f}"),
@@ -1192,6 +1553,20 @@ def run_async_multi_policy_sac(
         np.random.default_rng(args.env_seed_base + 100_003 * worker_id)
         for worker_id in range(len(envs))
     ]
+    trainable_states = [
+        state for state in policy_states.values() if state.trainable
+    ]
+    if not trainable_states:
+        raise ValueError("Multi-policy SAC requires at least one trainable policy")
+    replay_ready_event = build_replay_ready_event(
+        trainable_states[0].buffer,
+        args,
+    )
+    if any(
+        replay_warmup_remaining(state.buffer, args) > 0
+        for state in trainable_states
+    ):
+        replay_ready_event.clear()
 
     def action_selector(
         worker_id,
@@ -1259,6 +1634,7 @@ def run_async_multi_policy_sac(
         action_size,
         action_selector,
         policy_assignment=assignment,
+        replay_ready_event=replay_ready_event,
     )
     pool = AsyncCollectorPool(
         envs,
@@ -1345,6 +1721,11 @@ def run_async_multi_policy_sac(
                         if state.trainable:
                             state.buffer.add(*payload)
                             collected += 1
+                if all(
+                    replay_warmup_remaining(state.buffer, args) == 0
+                    for state in trainable_states
+                ):
+                    replay_ready_event.set()
                 budget.consume(collected)
                 updates_due = scheduler.ingest_by_policy(
                     step_events,
@@ -1456,6 +1837,7 @@ def run_async_multi_policy_sac(
                     ("collector", "async"),
                     ("worker", event.worker_id),
                     ("policies", len(policy_states)),
+                    ("exploration", exploration_label(payload)),
                 ]),
                 ("outcome", [
                     (
@@ -1666,6 +2048,8 @@ def run_sync_multi_policy_sac(
             caps_lambda_temporal=args.caps_lambda_temporal,
             caps_lambda_spatial=args.caps_lambda_spatial,
             caps_sigma=args.caps_sigma,
+            actor_anchor_coef=args.actor_anchor_coef,
+            actor_anchor_log_std_coef=args.actor_anchor_log_std_coef,
         )
         recovery = OffPolicyRecoveryRuntime(
             args,
@@ -1771,6 +2155,42 @@ def run_sync_multi_policy_sac(
             f"from episode={start_episode}",
             flush=True,
         )
+        if args.actor_anchor_coef > 0.0:
+            # The first learner instances were built before checkpoint restoration. Rebuild
+            # them now so every policy anchors to its restored actor, not to random startup
+            # weights.
+            for state in policy_states.values():
+                state.learner = build_sac_learner_step(
+                    state.actor,
+                    state.critic1,
+                    state.critic2,
+                    state.target_critic1,
+                    state.target_critic2,
+                    state.actor_optimizer,
+                    state.critic1_optimizer,
+                    state.critic2_optimizer,
+                    state.alpha_optimizer,
+                    state.log_alpha,
+                    target_entropy,
+                    args.gamma,
+                    action_low,
+                    action_high,
+                    args.log_std_min,
+                    args.log_std_max,
+                    compiled=args.tf_compile_learner,
+                    xla=args.tf_xla,
+                    tune_alpha=args.tune_alpha,
+                    min_alpha=args.min_alpha,
+                    grad_clip_norm=args.grad_clip_norm,
+                    grad_clip_adaptive=args.grad_clip_adaptive,
+                    grad_clip_k=args.grad_clip_k,
+                    caps=args.caps,
+                    caps_lambda_temporal=args.caps_lambda_temporal,
+                    caps_lambda_spatial=args.caps_lambda_spatial,
+                    caps_sigma=args.caps_sigma,
+                    actor_anchor_coef=args.actor_anchor_coef,
+                    actor_anchor_log_std_coef=args.actor_anchor_log_std_coef,
+                )
 
     critic_warmup = (
         max(0, int(args.critic_warmup_updates))
@@ -1854,23 +2274,71 @@ def run_sync_multi_policy_sac(
     last_completed_episode = start_episode
     last_saved_episode = None
     interrupted = False
+    # Action selection goes through the traced, CPU-pinned sample graph, like the async paths.
+    # Calling sample_actor eagerly instead makes TF execute RandomStandardNormal as a wrapped
+    # single-op function; with a GPU present that function is multi-device (the shape input is
+    # host-side), and every call instantiates a partitioned function that carries a copy of the
+    # whole function library -- ~74 kB leaked per action, ~5 MB/s at 70 actions/s.
+    sample_fn_cache = {}
+
+    def policy_sample_fn(policy_id, actor):
+        cached = sample_fn_cache.get(policy_id)
+        if cached is None or cached[0] is not actor:
+            # Keyed on the model object so a checkpoint that swaps the actor retraces once.
+            cached = (
+                actor,
+                build_sac_sample_fn(
+                    actor,
+                    obs_dim,
+                    action_low,
+                    action_high,
+                    args.log_std_min,
+                    args.log_std_max,
+                ),
+            )
+            sample_fn_cache[policy_id] = cached
+        return cached[1]
+
+    sync_throttles = {
+        policy_id: SyncUpdateThrottle(args)
+        for policy_id, state in policy_states.items()
+        if state.trainable
+    }
+    sync_learner_updates = {
+        policy_id: int(state.critic1_optimizer.iterations.numpy())
+        for policy_id, state in policy_states.items()
+        if state.trainable
+    }
     try:
         for episode in range(start_episode, args.num_episodes):
-            use_random = episode < max(
-                0,
-                args.random_exploration_episodes,
+            trainable_replay_size = min(
+                (
+                    len(policy.buffer)
+                    for policy in policy_states.values()
+                    if policy.trainable
+                ),
+                default=replay_warmup_threshold(args),
+            )
+            use_random = should_use_random_exploration(
+                episode,
+                args,
+                trainable_replay_size,
             )
             reset_progress_max = curriculum_reset_progress_max(
                 episode,
                 args,
             )
+            # `episode` counts sync BARRIERS here, not episodes -- see the note in the single-policy
+            # sync loop. The scene curriculum needs the global episode count the async path sends.
+            global_episode_base = episode * len(envs)
             env_states = []
             for env_idx, env in enumerate(envs):
                 config = {
-                    "training_episode": episode,
+                    "training_episode": global_episode_base + env_idx,
                     "max_steps": args.max_steps_per_episode,
                     "physics_frames_per_step": args.physics_frames_per_step,
                     "training_mode": True,
+                    **scenario_curriculum_config(args),
                 }
                 if reset_progress_max is not None:
                     config.update(
@@ -1972,9 +2440,8 @@ def run_sync_multi_policy_sac(
                         if env_state["done_mask"][agent_idx]:
                             actions[agent_idx] = action_low
                             continue
-                        policy = policy_states[
-                            assignment.policy_for_agent(agent_id)
-                        ]
+                        agent_policy_id = assignment.policy_for_agent(agent_id)
+                        policy = policy_states[agent_policy_id]
                         if use_random and policy.trainable:
                             selected = sample_exploratory_action(
                                 action_low,
@@ -1987,13 +2454,14 @@ def run_sync_multi_policy_sac(
                                 exploration_high=random_action_high,
                             )
                         else:
-                            selected = select_action(
-                                policy.actor,
+                            selected = select_action_with(
+                                policy_sample_fn(
+                                    agent_policy_id,
+                                    policy.actor,
+                                ),
                                 env_state["obs"][agent_idx],
                                 action_low,
                                 action_high,
-                                args.log_std_min,
-                                args.log_std_max,
                             )
                         actions[agent_idx] = smooth_actions(
                             selected,
@@ -2009,6 +2477,9 @@ def run_sync_multi_policy_sac(
                 ):
                     next_obs, _reward, terminated, truncated, info = step_result
                     done = bool(terminated or truncated)
+                    transitions_by_policy = {
+                        policy_id: 0 for policy_id in sync_throttles
+                    }
                     rewards = np.asarray(
                         info.get("per_agent_rewards"),
                         dtype=np.float32,
@@ -2052,6 +2523,7 @@ def run_sync_multi_policy_sac(
                                 ),
                             )
                             budget.consume(1)
+                            transitions_by_policy[policy_id] += 1
                         env_state["ep_reward"][agent_idx] += rewards[agent_idx]
                         env_state["action_sum"][agent_idx] += actions[agent_idx]
                         env_state["action_count"][agent_idx, 0] += 1.0
@@ -2081,43 +2553,58 @@ def run_sync_multi_policy_sac(
                                 < max(args.replay_warmup, args.batch_size)
                             ):
                                 continue
-                            update_policy = (
-                                policy.recovery.should_update_policy()
-                            )
-                            result = policy.learner(
-                                *policy.buffer.sample(
-                                    args.batch_size,
-                                    action_dtype=np.float32,
+                            updates_due = sync_throttles[
+                                policy_id
+                            ].updates_due(
+                                transitions_by_policy.get(policy_id, 0),
+                                env_steps=(
+                                    1
+                                    if transitions_by_policy.get(
+                                        policy_id, 0
+                                    ) > 0
+                                    else 0
                                 ),
-                                update_policy=update_policy,
                             )
-                            metrics[policy_id]["critic1"].append(result[1])
-                            metrics[policy_id]["critic2"].append(result[2])
-                            policy.recovery.record_critic_update()
-                            if update_policy:
-                                metrics[policy_id]["actor"].append(result[0])
-                                metrics[policy_id]["alpha_loss"].append(
-                                    result[3]
+                            for _update in range(updates_due):
+                                update_policy = (
+                                    policy.recovery.should_update_policy()
                                 )
-                                metrics[policy_id]["alpha"].append(result[4])
-
-                if (step_idx + 1) % args.target_update_every == 0:
-                    for policy in policy_states.values():
-                        if (
-                            policy.trainable
-                            and len(policy.buffer)
-                            >= max(args.replay_warmup, args.batch_size)
-                        ):
-                            soft_update(
-                                policy.target_critic1,
-                                policy.critic1,
-                                args.tau,
-                            )
-                            soft_update(
-                                policy.target_critic2,
-                                policy.critic2,
-                                args.tau,
-                            )
+                                result = policy.learner(
+                                    *policy.buffer.sample(
+                                        args.batch_size,
+                                        action_dtype=np.float32,
+                                    ),
+                                    update_policy=update_policy,
+                                )
+                                metrics[policy_id]["critic1"].append(result[1])
+                                metrics[policy_id]["critic2"].append(result[2])
+                                policy.recovery.record_critic_update()
+                                if update_policy:
+                                    metrics[policy_id]["actor"].append(
+                                        result[0]
+                                    )
+                                    metrics[policy_id]["alpha_loss"].append(
+                                        result[3]
+                                    )
+                                    metrics[policy_id]["alpha"].append(
+                                        result[4]
+                                    )
+                                sync_learner_updates[policy_id] += 1
+                                if (
+                                    sync_learner_updates[policy_id]
+                                    % args.target_update_every
+                                    == 0
+                                ):
+                                    soft_update(
+                                        policy.target_critic1,
+                                        policy.critic1,
+                                        args.tau,
+                                    )
+                                    soft_update(
+                                        policy.target_critic2,
+                                        policy.critic2,
+                                        args.tau,
+                                    )
                 if budget.exhausted:
                     break
 
@@ -2261,10 +2748,17 @@ def main():
     validate_async_arguments(args)
     if args.policy_update_every < 1:
         raise ValueError("--policy-update-every must be at least 1")
+    if args.actor_anchor_coef < 0.0:
+        raise ValueError("--actor-anchor-coef cannot be negative")
+    if args.actor_anchor_log_std_coef < 0.0:
+        raise ValueError("--actor-anchor-log-std-coef cannot be negative")
     best_tracker = BestCheckpointTracker(args, "sac")
     describe_tensorflow_backend(args)
     dashboard = maybe_start_dashboard(args, algorithm="sac")
     training_start_time = time.monotonic()
+    # Architecture is process-wide state, so it must be fixed before the first network is
+    # built -- the seeding block below is the last point where nothing exists yet.
+    set_network_layers(args.network_layers or default_network_layers("sac"))
     random.seed(args.env_seed_base)
     np.random.seed(args.env_seed_base)
     tf.random.set_seed(args.env_seed_base)
@@ -2408,6 +2902,7 @@ def main():
             restored_replay_count = restore_replay_buffer(args, resume_checkpoint, buffer)
         elif args.policy_path:
             loaded_policy = load_policy_into_model(actor, args.policy_path, expected_algorithm="sac")
+            args._replay_warmup_uses_restored_policy = True
             print(
                 f"Warm-started SAC actor from {loaded_policy['source_kind']}: "
                 f"{loaded_policy['path']} (fresh critics, optimizers, replay and alpha, episode=0)",
@@ -2447,6 +2942,31 @@ def main():
                     flush=True,
                 )
 
+        demo_validation = None
+        if getattr(args, "demo_validation_path", None):
+            demo_validation = load_demonstration_arrays(
+                args.demo_validation_path,
+                obs_dim=obs_dim,
+                action_size=action_size,
+                max_transitions=0,
+            )
+            if demo_validation is not None:
+                print(
+                    f"Loaded BC validation demonstrations transitions="
+                    f"{len(demo_validation['actions'])} paths={args.demo_validation_path}",
+                    flush=True,
+                )
+
+        bc_pairs = None
+        if getattr(args, "demo_bc_path", None):
+            bc_pairs = _load_bc_pairs(args.demo_bc_path, obs_dim, action_size)
+            if bc_pairs is not None:
+                print(
+                    f"Loaded imitation-only BC pairs (BC loss ONLY, not replayed) "
+                    f"transitions={len(bc_pairs['actions'])} paths={args.demo_bc_path}",
+                    flush=True,
+                )
+
         if demo_data is not None and args.demo_prefill and restored_replay_count == 0:
             added = buffer.add_many(
                 demo_data["obs"],
@@ -2462,20 +2982,23 @@ def main():
                 flush=True,
             )
 
+        bc_train, bc_groups = _combine_bc_sources(demo_data, bc_pairs)
         run_behavior_cloning = (
-            demo_data is not None
+            bc_train is not None
             and args.demo_bc_epochs > 0
             and (resume_checkpoint is None or args.demo_bc_on_resume)
         )
         if run_behavior_cloning:
             pretrain_actor_behavior_cloning(
                 actor,
-                demo_data,
+                bc_train,
                 epochs=args.demo_bc_epochs,
                 batch_size=args.demo_bc_batch_size,
                 learning_rate=args.demo_bc_learning_rate or args.actor_learning_rate,
                 action_low=action_low,
                 action_high=action_high,
+                demo_validation=demo_validation,
+                group_ids=bc_groups,
             )
         elif demo_data is not None and args.demo_bc_epochs > 0 and resume_checkpoint is not None:
             print(
@@ -2483,12 +3006,54 @@ def main():
                 flush=True,
             )
 
-        critic_warmup_target = max(0, int(args.critic_warmup_updates)) if resume_checkpoint else 0
+        # A freshly-run behavior cloning warm-starts the actor from the demos, so the critics (which
+        # start random) must catch up on the prefilled replay with the actor + alpha FROZEN before
+        # SAC begins -- otherwise the first policy-gradient steps chase a garbage Q and wreck the BC
+        # actor. Resume / actor warm-start trigger the same warmup.
+        critic_warmup_source = (
+            "checkpoint resume"
+            if resume_checkpoint
+            else "actor warm start"
+            if args.policy_path
+            else "behavior cloning"
+            if run_behavior_cloning
+            else None
+        )
+        critic_warmup_target = (
+            max(0, int(args.critic_warmup_updates))
+            if critic_warmup_source is not None
+            else 0
+        )
         if critic_warmup_target > 0:
             print(
-                f"Resume critic warmup: updates={critic_warmup_target} actor=frozen alpha=frozen",
+                f"Critic warmup after {critic_warmup_source}: "
+                f"updates={critic_warmup_target} actor=frozen alpha=frozen",
                 flush=True,
             )
+
+        # Persist the BC-pretrained actor BEFORE any SAC/warmup update touches it.
+        if run_behavior_cloning:
+            bc_actor_path = (
+                args.bc_actor_weights_path
+                or _bc_actor_path_default(args.actor_weights_path)
+            )
+            Path(bc_actor_path).parent.mkdir(parents=True, exist_ok=True)
+            actor.save_weights(bc_actor_path)
+            print(f"Saved BC actor weights (pre-SAC): {bc_actor_path}", flush=True)
+
+        # Gate: BC + frozen evaluation, then STOP before the SAC loop.
+        if args.stop_after_bc:
+            if not run_behavior_cloning:
+                raise SystemExit(
+                    "--stop-after-bc requires behavior cloning to have actually run: pass "
+                    "--demo-path and --demo-bc-epochs>0 (and, on resume, --demo-bc-on-resume). "
+                    "Refusing to report a BC gate when no BC was performed."
+                )
+            _run_stop_after_bc_eval(
+                args, actor, checkpoint, checkpoint_manager, buffer, best_tracker,
+                start_episode,
+            )
+            return
 
         opponent_teams = validate_team_layout(envs, args.opponent_pool)
         opponent_pool = OpponentPool(
@@ -2565,11 +3130,14 @@ def main():
             caps_lambda_temporal=args.caps_lambda_temporal,
             caps_lambda_spatial=args.caps_lambda_spatial,
             caps_sigma=args.caps_sigma,
+            actor_anchor_coef=args.actor_anchor_coef,
+            actor_anchor_log_std_coef=args.actor_anchor_log_std_coef,
         )
         print(
             f"SAC learner: {'compiled graph' if args.tf_compile_learner else 'eager'}"
             f"{' + XLA' if args.tf_compile_learner and args.tf_xla else ''}"
-            f" | grad-clip: {describe_grad_clip(args)}",
+            f" | grad-clip: {describe_grad_clip(args)}"
+            f" | actor-anchor: {args.actor_anchor_coef:g}",
             flush=True,
         )
 
@@ -2598,15 +3166,88 @@ def main():
         if recovery_handler is not None:
             recovery_handler.set_post_restore(recovery_runtime.post_restore)
 
+        # Transition-based update throttle so the sync path runs the SAME updates-per-transition (UTD)
+        # as async (update_every); otherwise sync did 1 update/transition and diverged on high rewards.
+        sync_throttle = SyncUpdateThrottle(args)
+        sync_learner_updates = 0
         last_saved_episode = None
+        # Action selection goes through the traced, CPU-pinned sample graph, like the async path.
+        # Calling sample_actor eagerly instead makes TF execute RandomStandardNormal as a wrapped
+        # single-op function; with a GPU present that function is multi-device (the shape input is
+        # host-side), and every call instantiates a partitioned function carrying a copy of the
+        # whole function library -- ~74 kB leaked per action, ~5 MB/s at 70 actions/s.
+        sync_sample_fns = {}
+
+        def sync_sample_fn(model, deterministic=False):
+            # Keyed on the model object, so a swapped opponent or restored actor retraces once.
+            key = (id(model), bool(deterministic))
+            cached = sync_sample_fns.get(key)
+            if cached is None or cached[0] is not model:
+                cached = (
+                    model,
+                    build_sac_sample_fn(
+                        model,
+                        obs_dim,
+                        action_low,
+                        action_high,
+                        args.log_std_min,
+                        args.log_std_max,
+                        deterministic=deterministic,
+                    ),
+                )
+                sync_sample_fns[key] = cached
+            return cached[1]
+
+        # Envs auto-reset the moment they terminate, exactly like an SB3 VecEnv, instead of idling
+        # until the slowest env in the batch finishes. With an episode-wide barrier a collision on
+        # step 10 parked that env for the remaining 290 steps: measured barrier utilisation was 40%,
+        # and the tail of every barrier was fed by a single trajectory. The batch is therefore only a
+        # step budget now -- episodes are never aligned across envs, and `sync_completed_episodes`
+        # (not the batch index) is what counts toward --num-episodes.
+        # One sync iteration runs every env at once, so `episode` counts BARRIERS, not
+        # episodes. The Godot curriculum keys on a global episode count (openarm_scenario.gd:
+        # "the REAL global episode count"), which is what the async path sends; handing it the
+        # barrier index paces every episode-driven schedule in the scene len(envs) times slower.
+        # Envs auto-reset the moment they terminate, like an SB3 VecEnv, instead of idling until
+        # the slowest env in the batch finishes. With an episode-wide barrier a collision on step
+        # 10 parked that env for the remaining 290 steps: measured batch utilisation was 40%, and
+        # the tail of every batch was fed by a single trajectory. A batch is only a step budget
+        # now -- episodes never align across envs, and `sync_completed_episodes` (not the batch
+        # index) is what counts toward --num-episodes.
+        sync_next_episode = start_episode
+        sync_completed_episodes = start_episode
+        env_states = []
+        # A batch is only a REPORTING window: episodes span batches, so shortening it costs no
+        # telemetry. These accumulators therefore live across batches and are cleared when a
+        # report actually goes out.
+        batch_step_budget = (
+            args.sync_batch_steps
+            if getattr(args, "sync_batch_steps", 0) > 0
+            else args.max_steps_per_episode
+        )
+        sync_log_prob_fn = build_sac_log_prob_fn(
+            actor, obs_dim, args.log_std_min, args.log_std_max)
+        finished_states = []
+        actor_losses = []
+        critic1_losses = []
+        critic2_losses = []
+        alpha_losses = []
+        alphas = []
+        batch_started = time.monotonic()
+        batch_transitions_start = budget.collected
         for episode in range(start_episode, args.num_episodes):
-            opponent_match = opponent_pool.start_episode(actor, episode)
-            use_random_exploration = episode < max(0, args.random_exploration_episodes)
-            reset_progress_max = curriculum_reset_progress_max(episode, args)
-            env_states = []
-            for env_idx, env in enumerate(envs):
+            opponent_match = opponent_pool.start_episode(actor, sync_completed_episodes)
+            use_random_exploration = sync_completed_episodes < max(
+                0, args.random_exploration_episodes)
+            reset_progress_max = curriculum_reset_progress_max(sync_completed_episodes, args)
+            def start_env_episode(env, env_idx, episode_number):
+                """Configure and reset one env for a NEW episode, returning its state dict.
+
+                Called to prime the pool and, mid-batch, the moment an env terminates -- so the
+                scene always gets a distinct global episode number and the env never idles.
+                """
                 scenario_config = {
-                    "training_episode": episode,
+                    "training_episode": episode_number,
                     "max_steps": args.max_steps_per_episode,
                     "physics_frames_per_step": args.physics_frames_per_step,
                     "training_mode": True,
@@ -2614,7 +3255,8 @@ def main():
                 if reset_progress_max is not None:
                     scenario_config.update(reset_progress_min=0.0, reset_progress_max=reset_progress_max)
                 env.configure(**scenario_config)
-                obs, info = env.reset(seed=args.episode_seed_multiplier * episode + env_idx)
+                obs, info = env.reset(
+                    seed=args.episode_seed_multiplier * episode_number + env_idx)
                 if args.multi_agent:
                     agent_count = len(env.agent_ids)
                     done_mask = np.asarray(info.get("per_agent_done", np.zeros((agent_count,), dtype=np.bool_)), dtype=np.bool_)
@@ -2634,7 +3276,7 @@ def main():
                     learner_mask = opponent_pool.learner_mask(
                         env.agent_team_ids,
                         opponent_teams,
-                        episode,
+                        episode_number,
                         env_idx,
                         use_current_policy=opponent_match.use_current_policy,
                     )
@@ -2654,7 +3296,8 @@ def main():
                     stalled_seen = False
                     stalled_count = 0
                     learner_mask = None
-                env_states.append({
+                return {
+                    "env_idx": env_idx,
                     "obs": obs,
                     "done": False,
                     "done_mask": done_mask,
@@ -2672,18 +3315,17 @@ def main():
                     "stalled_seen": stalled_seen,
                     "stalled_count": stalled_count,
                     "learner_mask": learner_mask,
-                })
+                }
 
-            actor_losses = []
-            critic1_losses = []
-            critic2_losses = []
-            alpha_losses = []
-            alphas = []
+            if not env_states:
+                for env_idx, env in enumerate(envs):
+                    env_states.append(start_env_episode(env, env_idx, sync_next_episode))
+                    sync_next_episode += 1
+            # Episodes closed during THIS batch; diagnostics summarise these, not a snapshot of
+            # envs caught mid-episode.
 
-            for step_idx in episode_step_indices(args.max_steps_per_episode):
-                if all(state["done"] for state in env_states):
-                    break
-
+            pending_resets = []
+            for step_idx in episode_step_indices(batch_step_budget):
                 step_requests = []
                 for env, state in zip(envs, env_states):
                     if state["done"]:
@@ -2704,14 +3346,12 @@ def main():
                             )
                             action[state["done_mask"]] = action_low
                         else:
-                            action = select_actions(
-                                actor,
+                            action = select_actions_with(
+                                sync_sample_fn(actor),
                                 state["obs"],
                                 state["done_mask"],
                                 action_low,
                                 action_high,
-                                args.log_std_min,
-                                args.log_std_max,
                             )
                             action = smooth_actions(
                                 action,
@@ -2733,13 +3373,11 @@ def main():
                                 exploration_high=random_action_high,
                             )
                         else:
-                            action = select_action(
-                                actor,
+                            action = select_action_with(
+                                sync_sample_fn(actor),
                                 state["obs"],
                                 action_low,
                                 action_high,
-                                args.log_std_min,
-                                args.log_std_max,
                             )
                             action = smooth_actions(
                                 action,
@@ -2750,15 +3388,15 @@ def main():
                             )
 
                     if args.multi_agent and opponent_match.model is not None:
-                        opponent_action = select_actions(
-                            opponent_match.model,
+                        opponent_action = select_actions_with(
+                            sync_sample_fn(
+                                opponent_match.model,
+                                deterministic=True,
+                            ),
                             state["obs"],
                             state["done_mask"],
                             action_low,
                             action_high,
-                            args.log_std_min,
-                            args.log_std_max,
-                            deterministic=True,
                         )
                         action = opponent_pool.merge_actions(
                             action,
@@ -2819,6 +3457,13 @@ def main():
 
                     state["obs"] = next_obs
                     state["done"] = done
+                    if done:
+                        # Harvest now, reset after the whole step batch has been received:
+                        # `stepper` still has in-flight replies for the other envs, and injecting a
+                        # reset mid-drain would interleave it with them on the lockstep connection.
+                        finished_states.append(dict(state))
+                        sync_completed_episodes += 1
+                        pending_resets.append(state["env_idx"])
 
                     if len(buffer) >= max(args.replay_warmup, args.batch_size):
                         update_policy = recovery_runtime.should_update_policy()
@@ -2841,33 +3486,55 @@ def main():
                 if len(buffer) >= max(args.replay_warmup, args.batch_size) and (step_idx + 1) % args.target_update_every == 0:
                     soft_update(target_critic1, critic1, args.tau)
                     soft_update(target_critic2, critic2, args.tau)
+
+                for env_idx in pending_resets:
+                    env_states[env_idx] = start_env_episode(
+                        envs[env_idx], env_idx, sync_next_episode)
+                    sync_next_episode += 1
+                pending_resets.clear()
                 if budget.exhausted:
                     break
 
+            batch_elapsed = max(time.monotonic() - batch_started, 1e-6)
+            batch_transitions = budget.collected - batch_transitions_start
+            batch_env_steps = max(step_idx + 1, 1)
+            if not finished_states:
+                # No episode closed in this window: keep the accumulators running -- they are only
+                # cleared once a report goes out -- and try again after the next window.
+                continue
+            entropy_gap = None
+            mean_log_prob = None
+            if len(buffer) >= args.batch_size:
+                probe_obs = buffer.sample(args.batch_size, action_dtype=np.float32)[0]
+                mean_log_prob = float(sync_log_prob_fn(
+                    np.asarray(probe_obs, dtype=np.float32)).numpy())
+                # Positive gap pushes alpha UP (policy sharper than the entropy target).
+                entropy_gap = mean_log_prob + float(target_entropy)
             rewards_summary = [
                 state["ep_reward"].tolist() if hasattr(state["ep_reward"], "tolist") else state["ep_reward"]
-                for state in env_states
+                for state in finished_states
             ]
             if args.multi_agent:
                 mean_actions = [
                     (state["action_sum"] / np.maximum(state["action_count"], 1.0)).tolist()
-                    for state in env_states
+                    for state in finished_states
                 ]
             else:
                 mean_actions = [
                     (state["action_sum"] / max(float(state["action_count"]), 1.0)).tolist()
-                    for state in env_states
+                    for state in finished_states
                 ]
-            diagnostics = summarize_episode_diagnostics(env_states, args.multi_agent)
-            reward_stats = summarize_rewards(env_states)
+            diagnostics = summarize_episode_diagnostics(finished_states, args.multi_agent)
+            reward_stats = summarize_rewards(finished_states)
             mean_action_summary = summarize_actions(mean_actions)
-            mean_action_delta_summary = summarize_action_deltas(env_states, args.multi_agent)
-            controlled_agents = sum(len(env.agent_ids) if args.multi_agent else 1 for env in envs)
+            mean_action_delta_summary = summarize_action_deltas(finished_states, args.multi_agent)
+            controlled_agents = sum(len(envs[state['env_idx']].agent_ids) if args.multi_agent else 1
+                for state in finished_states)
             finish_rate = diagnostics["finishes"] / max(controlled_agents, 1)
             collision_rate = diagnostics["collisions"] / max(controlled_agents, 1)
             stall_rate = diagnostics["stalls"] / max(controlled_agents, 1)
             critic_warmup_remaining = recovery_runtime.warmup_left
-            print_episode_metrics(episode, [
+            print_episode_metrics(sync_completed_episodes, [
                 ("mode", [
                     ("exploration", "random" if use_random_exploration else "policy"),
                     ("alpha", f"{float(np.mean(alphas)) if alphas else float(tf.exp(log_alpha).numpy()):.4f}"),
@@ -2899,41 +3566,63 @@ def main():
                     ("critic_loss", f"{float(np.mean(critic1_losses)) if critic1_losses else 0.0:.5f}/{float(np.mean(critic2_losses)) if critic2_losses else 0.0:.5f}"),
                     ("alpha_loss", f"{float(np.mean(alpha_losses)) if alpha_losses else 0.0:.5f}"),
                 ]),
+                ("entropy", [
+                    *(([("log_prob", f"{mean_log_prob:.3f}")]) if mean_log_prob is not None else []),
+                    *(([("entropy_gap", f"{entropy_gap:.3f}")]) if entropy_gap is not None else []),
+                ]),
+                ("throughput", [
+                    ("env_steps_s", f"{batch_transitions / batch_elapsed:.1f}"),
+                    ("transitions_s", f"{batch_transitions / batch_elapsed:.1f}"),
+                    ("transitions_step", f"{batch_transitions / batch_env_steps:.1f}"),
+                    ("updates_s", f"{len(critic1_losses) / batch_elapsed:.1f}"),
+                    ("episodes_batch", len(finished_states)),
+                ]),
             ], args.log_format)
             if args.log_details:
                 print(
                     f"episode={episode:04d} details rewards={rewards_summary} mean_actions={mean_actions}",
                     flush=True,
                 )
-            last_completed_episode = episode + 1
-            snapshot_path = opponent_pool.snapshot(actor, episode + 1)
+            last_completed_episode = sync_completed_episodes
+            snapshot_path = opponent_pool.snapshot(actor, sync_completed_episodes)
             if snapshot_path is not None:
                 print(f"Saved opponent snapshot: {snapshot_path}", flush=True)
 
             apply_ready_best_checkpoint(best_tracker)
-            if args.checkpoint_every > 0 and (episode + 1) % args.checkpoint_every == 0:
+            if args.checkpoint_every > 0 and sync_completed_episodes - (last_saved_episode or start_episode) >= args.checkpoint_every:
                 saved_path = save_training_checkpoint(
                     checkpoint,
                     checkpoint_manager,
                     buffer,
-                    episode + 1,
+                    sync_completed_episodes,
                     args,
                 )
-                last_saved_episode = episode + 1
+                last_saved_episode = sync_completed_episodes
             else:
                 saved_path = None
-            if best_tracker.should_evaluate(episode + 1):
+            if best_tracker.should_evaluate(sync_completed_episodes):
                 if saved_path is None:
                     saved_path = save_training_checkpoint(
-                        checkpoint, checkpoint_manager, buffer, episode + 1, args
+                        checkpoint, checkpoint_manager, buffer, sync_completed_episodes, args
                     )
-                    last_saved_episode = episode + 1
-                request_best_checkpoint_evaluation(best_tracker, saved_path, episode + 1)
+                    last_saved_episode = sync_completed_episodes
+                request_best_checkpoint_evaluation(best_tracker, saved_path, sync_completed_episodes)
+            # A report just went out: start fresh accumulators for the next one.
+            finished_states = []
+            actor_losses = []
+            critic1_losses = []
+            critic2_losses = []
+            alpha_losses = []
+            alphas = []
+            batch_started = time.monotonic()
+            batch_transitions_start = budget.collected
             if budget.exhausted:
                 print(
                     f"Transition budget reached: {budget.collected}/{budget.limit}",
                     flush=True,
                 )
+                break
+            if sync_completed_episodes >= args.num_episodes:
                 break
 
         completed_episode = last_completed_episode if last_completed_episode is not None else start_episode

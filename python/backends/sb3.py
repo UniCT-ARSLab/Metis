@@ -340,6 +340,70 @@ def resolve_load_path(args):
     return None, False
 
 
+## Scene telemetry the native backend logs from the Godot step info but the SB3 callback used to
+## drop, leaving the dashboard with reward and success only -- too little to compare a run against
+## the native backend, where the pose errors are the metrics that actually move first.
+_POSE_FIELDS = (
+    ("position_error_m", "position_error_mean", "{:.5f}"),
+    ("orientation_error_deg", "orientation_error_deg", "{:.3f}"),
+    ("max_joint_speed", "max_joint_speed", "{:.4f}"),
+    ("hold_frames", "hold_frames", "{:.1f}"),
+    ("progress", "progress", "{:.5f}"),
+)
+
+
+## Optimizer-side numbers SB3 keeps in its own logger. Reading them here is what puts alpha and
+## the losses next to the scene telemetry, the way the native backend reports them.
+_TRAINER_FIELDS = (
+    ("train/ent_coef", "alpha", "{:.5f}"),
+    ("train/actor_loss", "actor_loss", "{:.5f}"),
+    ("train/critic_loss", "critic_loss", "{:.5f}"),
+    ("train/learning_rate", "learning_rate", "{:.7f}"),
+    ("train/n_updates", "policy_updates", "{:.0f}"),
+)
+
+
+def _trainer_telemetry(model):
+    fields = []
+    values = getattr(getattr(model, "logger", None), "name_to_value", None) or {}
+    for source, name, fmt in _TRAINER_FIELDS:
+        value = values.get(source)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        fields.append((name, fmt.format(float(value))))
+    buffer = getattr(model, "replay_buffer", None)
+    if buffer is not None:
+        try:
+            # SB3 stores buffer_size // n_envs slots, each holding one transition per env, so both
+            # size() and buffer_size count SLOTS. Scaling by n_envs reports transitions, which is
+            # what the native backend logs and the only figure comparable between the two.
+            envs = max(int(getattr(buffer, "n_envs", 1)), 1)
+            fields.append(("replay", int(buffer.size()) * envs))
+            fields.append(("replay_capacity", int(buffer.buffer_size) * envs))
+        except Exception:
+            pass
+    return fields
+
+
+def _pose_telemetry(info):
+    agent_info = info.get("agent_info", info)
+    if not isinstance(agent_info, dict):
+        return []
+    fields = []
+    for source, name, fmt in _POSE_FIELDS:
+        value = agent_info.get(source)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        fields.append((name, fmt.format(float(value))))
+    collided = agent_info.get("collided")
+    if collided is not None:
+        fields.append(("collision_rate", f"{float(bool(collided)):.5f}"))
+    stalled = agent_info.get("progress_stalled")
+    if stalled is not None:
+        fields.append(("stall_rate", f"{float(bool(stalled)):.5f}"))
+    return fields
+
+
 class MetisSB3Callback(BaseCallback):
     def __init__(self, args, *, start_episode=0):
         super().__init__(verbose=0)
@@ -348,10 +412,27 @@ class MetisSB3Callback(BaseCallback):
         self.started = time.monotonic()
         self.initial_num_timesteps = 0
         self.last_checkpoint_episode = None
+        # Peak progress reached inside each running episode: the final value alone hides an
+        # arm that got close and then drifted away, which is exactly the failure to watch.
+        self._progress_peak = {}
+        self._initial_updates = 0.0
+
+    def _updates_per_second(self):
+        """Gradient steps per second, so the dashboard can show the update rate the way the
+        native backend does. SB3 only exposes a cumulative counter, hence the delta."""
+        values = getattr(getattr(self.model, "logger", None), "name_to_value", None) or {}
+        updates = values.get("train/n_updates")
+        if not isinstance(updates, (int, float)) or isinstance(updates, bool):
+            return 0.0
+        elapsed = max(time.monotonic() - self.started, 1e-6)
+        return max(0.0, float(updates) - self._initial_updates) / elapsed
 
     def _on_training_start(self):
         self.started = time.monotonic()
         self.initial_num_timesteps = int(self.num_timesteps)
+        values = getattr(getattr(self.model, "logger", None), "name_to_value", None) or {}
+        updates = values.get("train/n_updates")
+        self._initial_updates = float(updates) if isinstance(updates, (int, float)) else 0.0
 
     def _checkpoint(self):
         directory = Path(self.args.checkpoint_dir)
@@ -393,9 +474,16 @@ class MetisSB3Callback(BaseCallback):
     def _on_step(self):
         dones = np.asarray(self.locals.get("dones", []), dtype=np.bool_)
         infos = list(self.locals.get("infos", []))
-        for done, info in zip(dones, infos):
+        for index, info in enumerate(infos):
+            agent_info = info.get("agent_info", info)
+            progress = agent_info.get("progress") if isinstance(agent_info, dict) else None
+            if isinstance(progress, (int, float)) and not isinstance(progress, bool):
+                self._progress_peak[index] = max(
+                    self._progress_peak.get(index, float(progress)), float(progress))
+        for index, (done, info) in enumerate(zip(dones, infos)):
             if not done:
                 continue
+            progress_peak = self._progress_peak.pop(index, None)
             self.completed_episodes += 1
             episode = info.get("episode", {})
             reward = float(episode.get("r", 0.0))
@@ -406,24 +494,37 @@ class MetisSB3Callback(BaseCallback):
                 0,
                 int(self.num_timesteps) - self.initial_num_timesteps,
             )
+            sections = [
+                ("mode", [("backend", "sb3"), ("algorithm", self.args.algorithm)]),
+                (
+                    "outcome",
+                    [
+                        ("reward", f"{reward:.5f}"),
+                        ("reward_mean", f"{reward:.5f}"),
+                        ("success_rate", f"{float(success):.5f}"),
+                        ("steps_mean", f"{float(length):.1f}"),
+                    ],
+                ),
+            ]
+            pose = _pose_telemetry(info)
+            if progress_peak is not None:
+                pose.append(("progress_max", f"{progress_peak:.5f}"))
+            if pose:
+                sections.append(("pose", pose))
+            trainer = _trainer_telemetry(self.model)
+            if trainer:
+                sections.append(("trainer", trainer))
             print_episode_metrics(
                 self.completed_episodes - 1,
-                [
-                    ("mode", [("backend", "sb3"), ("algorithm", self.args.algorithm)]),
-                    (
-                        "outcome",
-                        [
-                            ("reward_mean", f"{reward:.5f}"),
-                            ("success_rate", f"{float(success):.5f}"),
-                            ("steps_mean", f"{float(length):.1f}"),
-                        ],
-                    ),
+                sections + [
                     (
                         "training",
                         [
                             ("completed", self.completed_episodes),
                             ("total_timesteps", int(self.num_timesteps)),
                             ("transitions_s", f"{invocation_timesteps / elapsed:.1f}"),
+                            ("env_steps_s", f"{invocation_timesteps / elapsed:.1f}"),
+                            ("updates_s", f"{self._updates_per_second():.1f}"),
                         ],
                     ),
                 ],

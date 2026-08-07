@@ -3,11 +3,12 @@
 <p align="center">
   <img src="docs/logo.svg" alt="Metis logo" width="640">
 </p>
-
-**METIS: Modular Environment for Training Intelligent Systems**
+<center>
+<b>METIS: Modular Environment for Training Intelligent Systems</b>
+</center>
 
 <p align="center">
-  Made by  ARSLab of University of Catania 
+  Made by Prof. Federico Fausto Santoro of ARSLab of University of Catania 
 </p>
 <p align="center">
   Powered by Godot Engine, Gymnasium, Keras/TensorFlow, and optional Stable-Baselines3
@@ -18,8 +19,8 @@ Gymnasium and TensorFlow/Keras. Agents, sensors, rewards, episode rules, and wor
 physics live in Godot. Python reads that contract and handles data collection,
 optimization, checkpoints, evaluation, and inference.
 
-The aim is straightforward: changing the task should usually mean building a new
-Godot scene, not writing another Python training program.
+**The aim is straightforward: changing the task should usually mean building a new
+Godot scene, not writing another Python training program.**
 
 Metis is under active development, but it already supports discrete, continuous, and
 hybrid control; multi-agent environments; asynchronous collection; demonstrations;
@@ -79,7 +80,8 @@ authoritative world state. Python connects as a client and decides when the worl
 should reset or advance.
 
 ```text
-python/train.py
+metis train
+(or python/train.py in a source checkout)
     |
     +-- GodotProcessManager -> one or more Godot processes
     +-- ScenarioGymEnv      -> Gymnasium interface
@@ -101,8 +103,25 @@ during training.
 
 ## Installation
 
-The project is tested with Godot 4.6.2. Nearby Godot 4 releases may work, but they are
-not part of the regular test setup.
+The project is tested with Godot 4.7. Nearby Godot 4 releases may work, but they are not part of the regular test setup. You can download it from official web page https://godotengine.org/
+
+### Godot Asset Library release
+
+Copy `addons/metis` from the release into your project and enable **Metis** in
+**Project > Project Settings > Plugins**. The packaged add-on offers to create an
+isolated Python runtime in `res://.metis/venv`; the same setup is available later from
+**Tools > Metis Runtime Setup...**. It never modifies system Python or installs
+dependencies without confirmation. Release files are checksum-verified before
+installation, and the runtime is accepted only after its Python version, Metis
+version, dependencies, Godot executable, and requested accelerator have been
+validated.
+
+Once configured, use `.metis/venv/bin/metis` on Linux/macOS or
+`.metis\venv\Scripts\metis.exe` on Windows. See
+[Distribution and installation](docs/reference/distribution.md) for profiles,
+existing environments, and release contents.
+
+### Source checkout
 
 Create the virtual environment from the repository root:
 
@@ -136,20 +155,30 @@ will be used:
 python/.venv/bin/python -m pip install -r python/requirements-dashboard.txt
 ```
 
-Stable-Baselines3 is optional. A separate environment keeps its PyTorch dependencies
-away from the TensorFlow installation:
+Stable-Baselines3 is an optional backend in the same Metis runtime:
 
 ```bash
-python3 -m venv python/.venv-sb3
-python/.venv-sb3/bin/python -m pip install --upgrade pip
-python/.venv-sb3/bin/python -m pip install -r python/requirements-sb3.txt
+python/.venv/bin/python -m pip install -r python/requirements-sb3.txt
 ```
+
+For tightly controlled backend benchmarks, a separate `.venv-sb3` remains useful to
+isolate PyTorch from TensorFlow, but it is not required by Metis.
 
 Set `GODOT_BIN` if Godot is not on `PATH`:
 
 ```bash
 export GODOT_BIN=/path/to/Godot
 ```
+
+Installing the source tree in editable mode also exposes the CLI:
+
+```bash
+python/.venv/bin/python -m pip install -e python --no-deps
+python/.venv/bin/metis doctor --godot-bin "$GODOT_BIN"
+```
+
+The direct `python/train.py`, `python/run.py`, `python/recorder.py`, and
+`python/export.py` commands remain supported for repository development.
 
 ## A first run
 
@@ -182,7 +211,7 @@ python/.venv/bin/python python/train.py \
 `--backend metis` is implicit. A compatible scene can be trained with SB3:
 
 ```bash
-python/.venv-sb3/bin/python python/train.py \
+python/.venv/bin/python python/train.py \
   --backend sb3 \
   --algorithm dqn \
   --godot-project godot \
@@ -288,6 +317,10 @@ See the [Godot reference](docs/reference/godot.md) for the complete node contrac
 With `--algorithm auto`, Metis selects DQN for discrete spaces, DDPG for continuous
 spaces, and PPO for hybrid spaces. Select other algorithms explicitly; action shape
 alone is not enough to choose the best learner for a task.
+
+The [algorithm guide](docs/algorithms/README.md) explains when to use each learner,
+the tradeoffs to expect, every learner-specific flag, shared runtime flags, and
+complete command examples.
 
 The SB3 adapter supports DQN for discrete actions, PPO for discrete, continuous, or
 hybrid actions, and DDPG, TD3, or SAC for continuous actions. Hybrid PPO uses an
@@ -578,6 +611,10 @@ an exact checkpoint. `--policy-path` only warm-starts the policy network; optimi
 critics, replay data, and episode counters start fresh. It accepts Metis bundles,
 `.keras`, full `.h5` models, and `.weights.h5` files.
 
+`python/run.py --checkpoint-path ... --export-policy-dir ... --export-policy-only`
+extracts the policy from an exact checkpoint. This is the safe route for transferring
+a best actor to a changed task without carrying over stale critic or optimizer state.
+
 Trainers can evaluate frozen checkpoints and keep the best candidate under
 `CHECKPOINT_DIR/best/`. Automatic scoring prefers success rate and uses mean reward as
 a tie-breaker or as the primary metric when a scene exposes no success signal.
@@ -657,12 +694,14 @@ These are extension points rather than hidden assumptions. See
 
 ```text
 godot/
-  agents/       reusable agent scenes
-  scenarios/    environments and task rules
-  scripts/      bridge and Metis components
-  addons/       editor plugins and third-party Godot add-ons
+  addons/metis/ canonical runtime, editor tools, URDF/STL integrations
+  agents/       reusable example agent scenes
+  scenarios/    example environments and task rules
+  tests/        Godot regression tests
 
 python/
+  pyproject.toml Python package metadata and CLI entry points
+  metis_cli.py  grouped `metis` command
   train.py      training entry point
   run.py        inference and evaluation
   recorder.py   manual demonstrations
@@ -679,6 +718,9 @@ docs/
   tutorials/    complete task walkthroughs
   guides/       reusable procedures and extension points
   reference/    runtime contracts and architecture
+
+packaging/
+  build_release.py  deterministic wheel and Asset Library ZIP builder
 ```
 
 Run the Python tests with:
@@ -729,6 +771,7 @@ documentation or source repositories; each project remains subject to its own li
 - Linux GPU installations follow TensorFlow's
   [CUDA pip guide](https://www.tensorflow.org/install/pip). Apple Silicon acceleration
   uses Apple's [tensorflow-metal plugin](https://developer.apple.com/metal/tensorflow-plugin/).
+- All 2D/3D assets used in the tutorials and videos are from [Kenney](https://kenney.nl/)
 
 ### Bundled Godot add-ons
 
@@ -736,12 +779,13 @@ documentation or source repositories; each project remains subject to its own li
   Sulaimanov and Andreas Bresser, imports robot descriptions and meshes. Metis carries
   a modified copy with additional mimic-joint handling. Upstream development is hosted
   on [Codeberg](https://codeberg.org/brean/godot_urdf); its BSD 3-Clause license is
-  preserved in [godot/LICENSE](godot/LICENSE).
+  preserved in
+  [godot/addons/metis/integrations/urdf/LICENSE](godot/addons/metis/integrations/urdf/LICENSE).
 - [STL-IO](https://github.com/onze/godot-stl-io), by Valentin Bisson, supplies STL mesh
   import and export for URDF assets. Its MIT license is preserved in
-  [godot/addons/stl-io/license.txt](godot/addons/stl-io/license.txt).
-- `metis_inspector` is part of Metis rather than a third-party dependency. It provides
-  the editor pickers used by observation and reward components.
+  [godot/addons/metis/integrations/stl/license.txt](godot/addons/metis/integrations/stl/license.txt).
+- The Inspector helpers are part of the main Metis add-on. They provide the method and
+  property pickers used by observation and reward components.
 
 ### Algorithm foundations
 

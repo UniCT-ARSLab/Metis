@@ -1,0 +1,23 @@
+{
+  "schema": "openarm-reach-hold-safedagger-clean/1",
+  "plans": "python/demos/openarm_reach_hold_dagger_r1/plan_dagger.json",
+  "clone": "checkpoints/openarm_reach_hold_m6_td3bc_final/actor_bc_final.weights.h5",
+  "n_poses": 88,
+  "n_kept_episodes": 63,
+  "n_corrective_transitions": 1968,
+  "per_cell_transitions": {
+    "17": 273,
+    "18": 248,
+    "22": 197,
+    "25": 174,
+    "28": 160,
+    "29": 155,
+    "30": 149,
+    "31": 156,
+    "33": 124,
+    "34": 217,
+    "41": 115
+  },
+  "reached_episodes": 65,
+  "collided_episodes": 21
+}

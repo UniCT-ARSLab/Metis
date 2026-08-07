@@ -5,6 +5,15 @@
 checkpoints
 .runtime/
 .research/
-
+.metis/
+dist/
+python/build/
+python/dist/
+python/*.egg-info/
+python/.venv/
+python/.venv-sb3/
+experiments
+tmp
+research
 *.h5
 *.log

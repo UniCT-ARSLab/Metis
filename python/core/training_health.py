@@ -408,7 +408,14 @@ class TrainingHealthMonitor:
             )
         if any(
             self._contains_non_finite(summary.get(key))
-            for key in ("success_rate", "reward_mean", "steps_mean")
+            for key in (
+                "success_rate",
+                "reward_mean",
+                "steps_mean",
+                "progress_mean",
+                "position_error_mean",
+                "orientation_error_mean",
+            )
         ):
             self.state = "critical"
             self.reason = "Frozen policy evaluation produced a non-finite metric."
@@ -521,6 +528,26 @@ class TrainingHealthMonitor:
             return
         self.phase = "finished"
         self._emit("training_finished", self.last_evaluation_episode, severity="info")
+
+    def reset_evaluation_baseline(self, reason):
+        """Forget cross-stage comparisons after a curriculum promotion."""
+        if not self.enabled:
+            return
+        self.state = "warming_up"
+        self.phase = "curriculum"
+        self.reason = str(reason)
+        self.bad_evaluations = 0
+        self.critical_evaluations = 0
+        self.evaluations_without_improvement = 0
+        self.healthy_evaluations_since_recovery = 0
+        self.current_evaluation = None
+        self.best_evaluation = None
+        self.verification_pending = False
+        self._emit(
+            "curriculum_promoted",
+            self.last_evaluation_episode,
+            severity="info",
+        )
 
     def _maybe_recover(self, episode, reason, checkpoint_path=None, force=False):
         if not self.auto_recovery:
@@ -666,7 +693,7 @@ class TrainingHealthMonitor:
             getattr(self.args, "recovery_require_success_baseline", True)
         )
         metric = str(getattr(self.args, "best_metric", "auto"))
-        if require_success and metric != "reward_mean":
+        if require_success and metric == "success_rate":
             best_success = float((self.best_evaluation or {}).get("success_rate", 0.0))
             minimum_success = float(
                 getattr(self.args, "health_min_success_baseline", 0.05)
@@ -700,8 +727,19 @@ class TrainingHealthMonitor:
 
     def _quality_drop(self, current, best):
         metric = str(getattr(self.args, "best_metric", "auto"))
-        best_success = float(best.get("success_rate", 0.0))
-        current_success = float(current.get("success_rate", 0.0))
+        uses_selection_success = (
+            "selection_success_rate" in best
+            or "selection_success_rate" in current
+        )
+        best_success = float(
+            best.get("selection_success_rate", best.get("success_rate", 0.0))
+        )
+        current_success = float(
+            current.get(
+                "selection_success_rate",
+                current.get("success_rate", 0.0),
+            )
+        )
         minimum_success = float(
             getattr(self.args, "health_min_success_baseline", 0.05)
         )
@@ -711,7 +749,23 @@ class TrainingHealthMonitor:
                     0.0,
                     (best_success - current_success) / max(best_success, 1e-9),
                 ),
-                "success rate",
+                (
+                    "selection success rate"
+                    if uses_selection_success
+                    else "success rate"
+                ),
+            )
+
+        if metric in {"auto", "task_progress"} and "progress_mean" in best:
+            best_progress = float(best.get("progress_mean", 0.0))
+            current_progress = float(current.get("progress_mean", 0.0))
+            return (
+                max(
+                    0.0,
+                    (best_progress - current_progress)
+                    / max(abs(best_progress), 0.05),
+                ),
+                "task progress",
             )
 
         best_reward = float(best.get("reward_mean", 0.0))
@@ -725,12 +779,76 @@ class TrainingHealthMonitor:
 
     @staticmethod
     def _evaluation_view(summary, episode):
+        success_rate = float(
+            summary.get(
+                "selection_success_rate",
+                summary.get("success_rate", 0.0),
+            )
+        )
         return {
             "episode": int(episode),
             "checkpoint": summary.get("checkpoint"),
-            "success_rate": float(summary.get("success_rate", 0.0)),
-            "reward_mean": float(summary.get("reward_mean", 0.0)),
+            "success_rate": success_rate,
+            "overall_success_rate": float(summary.get("success_rate", success_rate)),
+            "reward_mean": float(
+                summary.get("regular_reward_mean", summary.get("reward_mean", 0.0))
+            ),
+            "overall_reward_mean": float(summary.get("reward_mean", 0.0)),
             "steps_mean": float(summary.get("steps_mean", 0.0)),
+            **(
+                {
+                    "progress_mean": float(
+                        summary.get(
+                            "regular_progress_mean",
+                            summary.get("progress_mean", 0.0),
+                        )
+                    )
+                }
+                if "progress_mean" in summary or "regular_progress_mean" in summary
+                else {}
+            ),
+            **(
+                {
+                    "position_error_mean": float(
+                        summary.get(
+                            "regular_position_error_mean",
+                            summary.get("position_error_mean", 0.0),
+                        )
+                    )
+                }
+                if (
+                    "position_error_mean" in summary
+                    or "regular_position_error_mean" in summary
+                )
+                else {}
+            ),
+            **(
+                {
+                    "orientation_error_mean": float(
+                        summary.get(
+                            "regular_orientation_error_mean",
+                            summary.get("orientation_error_mean", 0.0),
+                        )
+                    )
+                }
+                if (
+                    "orientation_error_mean" in summary
+                    or "regular_orientation_error_mean" in summary
+                )
+                else {}
+            ),
+            **(
+                {
+                    "hold_frames_max": float(
+                        summary.get(
+                            "regular_hold_frames_max",
+                            summary.get("hold_frames_max", 0.0),
+                        )
+                    )
+                }
+                if "hold_frames_max" in summary or "regular_hold_frames_max" in summary
+                else {}
+            ),
         }
 
     @staticmethod

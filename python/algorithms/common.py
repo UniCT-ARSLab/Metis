@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import platform
 import random
@@ -9,6 +10,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty
+from threading import Event
 
 
 def configure_tensorflow_runtime():
@@ -47,7 +49,15 @@ configure_tensorflow_runtime()
 import numpy as np
 import tensorflow as tf
 
-from core.models import build_actor_forward_fn, build_continuous_actor, build_continuous_critic
+from core.critic_audit import format_audit, q_ranking_audit
+from core.curriculum import scenario_curriculum_config
+from core.models import (
+    build_actor_forward_fn,
+    build_continuous_actor,
+    build_continuous_critic,
+    default_network_layers,
+    set_network_layers,
+)
 from core.multi_policy import (
     MultiPolicySnapshot,
     add_multi_policy_arguments,
@@ -65,6 +75,7 @@ from core.training_health import OffPolicyRecoveryRuntime
 from core.training import (
     AsyncCollectorPool,
     AsyncEventScheduler,
+    SyncUpdateThrottle,
     AsyncEpisodeEvent,
     AsyncStepEvent,
     AsyncWorkerDoneEvent,
@@ -149,6 +160,17 @@ def parse_args(trainer_variant):
     parser.add_argument("--replay-capacity", type=int, default=100000)
     parser.add_argument("--critic-warmup-updates", type=int, default=2000)
     parser.add_argument("--target-update-every", type=int, default=1)
+    parser.add_argument(
+        "--network-layers",
+        type=int,
+        nargs="+",
+        default=None,
+        metavar="WIDTH",
+        help="Hidden layer widths for actor/critic/Q networks, e.g. --network-layers 256 256. "
+        "Omitted, each algorithm uses its reference architecture (SAC 256 256, "
+        "TD3/DDPG 400 300, PPO and DQN 64 64). Checkpoints written before these "
+        "defaults used 256 256 128 and need that value passed explicitly.",
+    )
     parser.add_argument("--env-seed-base", type=int, default=100)
     parser.add_argument("--episode-seed-multiplier", type=int, default=1000)
     parser.add_argument("--env-timeout", type=float, default=30.0)
@@ -176,11 +198,56 @@ def parse_args(trainer_variant):
     parser.add_argument("--demo-bc-batch-size", type=int, default=128)
     parser.add_argument("--demo-bc-learning-rate", type=float, default=None)
     parser.add_argument("--demo-bc-on-resume", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--demo-validation-path", action="append", default=[],
+                        help="Held-out demo npz(s): BC keeps the epoch with the lowest validation "
+                        "action MSE (best-checkpoint against overfitting).")
+    parser.add_argument("--bc-actor-weights-path", type=str, default=None,
+                        help="Persist the BC-pretrained actor here BEFORE any RL update "
+                        "(default: the actor weights path with a _bc suffix).")
+    parser.add_argument("--stop-after-bc", action=argparse.BooleanOptionalAction, default=False,
+                        help="Run BC (+ save the BC actor) then ONE frozen evaluation at the "
+                        "current curriculum level, and STOP before the RL loop. A deterministic "
+                        "BC gate; errors if BC did not actually run.")
+    parser.add_argument("--stop-after-critic-warmup", action=argparse.BooleanOptionalAction,
+                        default=False,
+                        help="Run the critic warmup with the actor FROZEN, then a Q-ranking audit on "
+                        "the validation batch (min(Q1,Q2) for expert/clone/perturbed/random/saturated "
+                        "actions), SAVE state and STOP before the first actor update. The audit gate "
+                        "must pass (critic values expert+clone above random+saturated) before any "
+                        "actor update is allowed.")
+    parser.add_argument("--gradient-telemetry-every", type=int, default=0,
+                        help="Collect separate Q-term / BC-term gradient norms + cosine similarity + "
+                        "actor-vs-BC deviation every N policy updates (0 = never). Adds two extra "
+                        "backward passes on those steps.")
+    parser.add_argument("--critic-audit-win-rate", type=float, default=0.9,
+                        help="stop-after-critic-warmup gate: each good-vs-bad action pair must beat "
+                        "the bad family on at least this fraction of validation samples.")
+    parser.add_argument("--critic-audit-cell-margin-tol", type=float, default=0.0,
+                        help="stop-after-critic-warmup gate: a cell fails if its MEAN good-vs-bad "
+                        "margin is below -tol (0 = no clearly-negative cell allowed).")
+    # Generic dataset separation (task-agnostic):
+    #   --demo-path             complete transitions -> BC AND replay.
+    #   --demo-replay-only-path complete transitions -> replay ONLY (never in the BC sampler).
+    #   --demo-bc-path          (obs, action) pairs   -> BC imitation loss ONLY (never in replay).
+    parser.add_argument("--demo-replay-only-path", action="append", default=[],
+                        help="Complete-transition npz(s) added ONLY to the replay buffer, never to "
+                        "BC (e.g. DAgger recovery: expert-applied transitions valid for the critics "
+                        "but which must not bias the imitation target).")
+    parser.add_argument("--demo-bc-path", action="append", default=[],
+                        help="(obs, action) npz(s) added ONLY to the BC imitation loss, never to "
+                        "replay (their next_obs was produced by a different policy).")
+    parser.add_argument("--demo-q-filter-start-policy-updates", type=int, default=0,
+                        help="Enable the TD3+BC Q-filter only after this many policy updates have "
+                        "run SINCE the critic warmup ended (0 = filter from the first update). "
+                        "Before it, the demo BC term is unfiltered.")
     parser.set_defaults(
         critic2_weights_path="generic_td3_critic2.weights.h5",
         demo_bc_weight_start=1.0,
         demo_bc_weight_end=0.05,
         demo_bc_decay_updates=100000,
+        demo_q_weight_start=0.0,
+        demo_q_weight_end=1.0,
+        demo_q_weight_ramp_updates=50000,
         demo_q_filter=False,
         td3_policy_delay=2,
         td3_target_policy_noise=0.2,
@@ -192,11 +259,36 @@ def parse_args(trainer_variant):
         ddpgfd_demo_priority_bonus=1.0,
         ddpgfd_actor_priority_weight=1e-3,
     )
-    if variant_uses_joint_bc(trainer_variant):
+    if variant_uses_joint_bc(trainer_variant) or str(trainer_variant) == "ddpgfd":
         parser.add_argument("--demo-bc-weight-start", type=float, default=1.0)
         parser.add_argument("--demo-bc-weight-end", type=float, default=0.05)
         parser.add_argument("--demo-bc-decay-updates", type=int, default=100000)
+        # Separate Q-term schedule: grow the TD3 Q-maximisation weight 0 -> end over policy updates
+        # since the warmup, so it is NOT applied at full strength the instant the actor unfreezes.
+        parser.add_argument("--demo-q-weight-start", type=float, default=0.0)
+        parser.add_argument("--demo-q-weight-end", type=float, default=1.0)
+        parser.add_argument("--demo-q-weight-ramp-updates", type=int, default=50000)
         parser.add_argument("--demo-q-filter", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--grad-clip-norm",
+        type=float,
+        default=10.0,
+        help="Hard global gradient-norm cap for critic/actor updates (0 disables). Safety "
+        "net against the deadly-triad Q-value divergence that otherwise blows critics up.",
+    )
+    parser.add_argument(
+        "--grad-clip-adaptive",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Clip each network at --grad-clip-k * EMA(gradient-norm), bounded by "
+        "--grad-clip-norm.",
+    )
+    parser.add_argument(
+        "--grad-clip-k",
+        type=float,
+        default=3.0,
+        help="Multiplier on the running-mean gradient norm when --grad-clip-adaptive is set.",
+    )
     if variant_uses_td3(trainer_variant):
         parser.add_argument("--critic2-weights-path", default="generic_td3_critic2.weights.h5")
         parser.add_argument("--td3-policy-delay", type=int, default=2)
@@ -237,6 +329,16 @@ def parse_args(trainer_variant):
     add_godot_render_argument(parser)
     args = parser.parse_args()
     args.trainer_variant = trainer_variant
+    # scheduled_q_weight is wired into every deterministic loop. The critic-warmup audit and the
+    # separate-gradient telemetry are implemented for the SINGLE-policy loops only; fail loudly
+    # rather than silently ignore the flag on a multi-policy run.
+    if getattr(args, "multi_policy", False):
+        if getattr(args, "stop_after_critic_warmup", False):
+            parser.error("--stop-after-critic-warmup is not supported with --multi-policy "
+                         "(single-policy only); remove one of them.")
+        if int(getattr(args, "gradient_telemetry_every", 0) or 0) > 0:
+            parser.error("--gradient-telemetry-every is not supported with --multi-policy "
+                         "(single-policy only); set it to 0.")
     return args
 
 
@@ -460,21 +562,112 @@ def curriculum_reset_progress_max(episode, args):
     return start_value + ratio * (end_value - start_value)
 
 
+def replay_warmup_threshold(args):
+    return max(int(args.replay_warmup), int(args.batch_size))
+
+
+def replay_warmup_remaining(buffer, args):
+    return max(0, replay_warmup_threshold(args) - len(buffer))
+
+
+def should_use_random_exploration(episode, args, replay_size):
+    if (
+        bool(getattr(args, "_replay_warmup_uses_restored_policy", False))
+        and int(replay_size) < replay_warmup_threshold(args)
+    ):
+        return False
+    return (
+        int(episode) < max(0, int(args.random_exploration_episodes))
+        or int(replay_size) < replay_warmup_threshold(args)
+    )
+
+
+def build_replay_ready_event(buffer, args):
+    ready = Event()
+    if (
+        replay_warmup_remaining(buffer, args) == 0
+        or bool(getattr(args, "_replay_warmup_uses_restored_policy", False))
+    ):
+        ready.set()
+    return ready
+
+
+def exploration_label(state):
+    if not state.get("use_random_exploration", False):
+        return "policy"
+    if state.get("replay_warmup_exploration", False):
+        return "warmup_random"
+    return "scheduled_random"
+
+
+def _record_collision_timing(state, finish_reached, agent_idx=None):
+    if agent_idx is None:
+        had_success = bool(state["finish_reached"])
+        timing = (
+            "after_success"
+            if had_success
+            else "at_success"
+            if finish_reached
+            else "before_success"
+        )
+        key = f"collision_{timing}_count"
+        state[key] = int(state.get(key, 0)) + 1
+        return
+
+    had_success = bool(state["finish_reached"][agent_idx])
+    timing = (
+        "after_success"
+        if had_success
+        else "at_success"
+        if finish_reached
+        else "before_success"
+    )
+    key = f"collision_{timing}_count"
+    values = state.setdefault(
+        key,
+        np.zeros(np.asarray(state["finish_reached"]).shape, dtype=np.int32),
+    )
+    values[agent_idx] += 1
+
+
 def update_episode_diagnostics(state, agent_info, agent_idx=None):
     progress = float(agent_info.get("track_progress", 0.0))
     finish_reached = bool(agent_info.get("finish_reached", agent_info.get("target_reached", False)))
     progress_stalled = bool(agent_info.get("progress_stalled", False))
     local_terms = agent_info.get("local_term_rewards", {}) or {}
-    collision_term = float(local_terms.get("collision", 0.0))
-    collision_seen = abs(collision_term) > 1e-9
+    scenario_terms = agent_info.get("scenario_terms", {}) or {}
+    scenario_component_values = scenario_terms.get("component_values", {}) or {}
+    events = agent_info.get("events", {}) or {}
+    terminal_reason = str(agent_info.get("terminal_reason", "")).strip().lower()
+    # ScenarioRewardSystem stores scalar component outputs below `component_values`; component
+    # diagnostics such as progress_stalled remain top-level dictionaries. Accept both shapes and
+    # the explicit event/terminal signals so collision accounting does not depend on reward weight.
+    collision_term = (
+        float(local_terms.get("collision", 0.0))
+        + float(scenario_terms.get("collision", 0.0))
+        + float(scenario_component_values.get("collision", 0.0))
+    )
+    collision_seen = bool(
+        abs(collision_term) > 1e-9
+        or events.get("collision", False)
+        or agent_info.get("collided", False)
+        or terminal_reason == "collision"
+    )
 
     if agent_idx is None:
         state["max_track_progress"] = max(float(state["max_track_progress"]), progress)
         state["last_track_progress"] = progress
-        state["finish_reached"] = bool(state["finish_reached"] or finish_reached)
         if collision_seen and not state["collision_seen"]:
+            _record_collision_timing(state, finish_reached)
             state["collision_count"] += 1
             state["collision_seen"] = True
+            collision_source = str(agent_info.get("collision_source", "")).strip()
+            if collision_source:
+                state["collision_source"] = collision_source
+            collision_details = agent_info.get("collision_details")
+            if isinstance(collision_details, dict) and collision_details:
+                state["collision_details"] = dict(collision_details)
+        state["finish_reached"] = bool(state["finish_reached"] or finish_reached)
         if progress_stalled and not state["stalled_seen"]:
             state["stalled_count"] += 1
             state["stalled_seen"] = True
@@ -499,10 +692,25 @@ def update_episode_diagnostics(state, agent_info, agent_idx=None):
 
     state["max_track_progress"][agent_idx] = max(float(state["max_track_progress"][agent_idx]), progress)
     state["last_track_progress"][agent_idx] = progress
-    state["finish_reached"][agent_idx] = bool(state["finish_reached"][agent_idx] or finish_reached)
     if collision_seen and not state["collision_seen"][agent_idx]:
+        _record_collision_timing(state, finish_reached, agent_idx=agent_idx)
         state["collision_count"][agent_idx] += 1
         state["collision_seen"][agent_idx] = True
+        collision_source = str(agent_info.get("collision_source", "")).strip()
+        if collision_source:
+            sources = state.setdefault(
+                "collision_sources",
+                np.full(np.asarray(state["finish_reached"]).shape, "", dtype=object),
+            )
+            sources[agent_idx] = collision_source
+        collision_details = agent_info.get("collision_details")
+        if isinstance(collision_details, dict) and collision_details:
+            details = state.setdefault(
+                "collision_details",
+                np.full(np.asarray(state["finish_reached"]).shape, None, dtype=object),
+            )
+            details[agent_idx] = dict(collision_details)
+    state["finish_reached"][agent_idx] = bool(state["finish_reached"][agent_idx] or finish_reached)
     if progress_stalled and not state["stalled_seen"][agent_idx]:
         state["stalled_count"][agent_idx] += 1
         state["stalled_seen"][agent_idx] = True
@@ -537,6 +745,34 @@ def summarize_episode_diagnostics(env_states, multi_agent):
             "progress_mean": float(np.mean(np.concatenate(last_progress_arrays))),
             "finishes": int(sum(np.count_nonzero(values) for values in finish_arrays)),
             "collisions": int(sum(np.sum(values) for values in collision_arrays)),
+            "collisions_before_success": int(sum(
+                np.sum(state.get("collision_before_success_count", 0))
+                for state in env_states
+            )),
+            "collisions_at_success": int(sum(
+                np.sum(state.get("collision_at_success_count", 0))
+                for state in env_states
+            )),
+            "collisions_after_success": int(sum(
+                np.sum(state.get("collision_after_success_count", 0))
+                for state in env_states
+            )),
+            "collision_sources": sorted({
+                str(source)
+                for state in env_states
+                for source in np.asarray(
+                    state.get("collision_sources", []), dtype=object
+                ).reshape(-1)
+                if str(source)
+            }),
+            "collision_pairs": sorted({
+                _collision_detail_label(details)
+                for state in env_states
+                for details in np.asarray(
+                    state.get("collision_details", []), dtype=object
+                ).reshape(-1)
+                if isinstance(details, dict) and details
+            }),
             "stalls": int(sum(np.sum(values) for values in stalled_arrays)),
             "max_joint_speed": float(np.mean([
                 np.mean(state.get("max_joint_speed_last", 0.0))
@@ -557,6 +793,29 @@ def summarize_episode_diagnostics(env_states, multi_agent):
         "progress_mean": float(np.mean([state["last_track_progress"] for state in env_states])),
         "finishes": int(sum(1 for state in env_states if state["finish_reached"])),
         "collisions": int(sum(state["collision_count"] for state in env_states)),
+        "collisions_before_success": int(sum(
+            state.get("collision_before_success_count", 0)
+            for state in env_states
+        )),
+        "collisions_at_success": int(sum(
+            state.get("collision_at_success_count", 0)
+            for state in env_states
+        )),
+        "collisions_after_success": int(sum(
+            state.get("collision_after_success_count", 0)
+            for state in env_states
+        )),
+        "collision_sources": sorted({
+            str(state.get("collision_source", ""))
+            for state in env_states
+            if str(state.get("collision_source", ""))
+        }),
+        "collision_pairs": sorted({
+            _collision_detail_label(state["collision_details"])
+            for state in env_states
+            if isinstance(state.get("collision_details"), dict)
+            and state["collision_details"]
+        }),
         "stalls": int(sum(state["stalled_count"] for state in env_states)),
         "max_joint_speed": float(np.mean([
             state.get("max_joint_speed_last", 0.0) for state in env_states])),
@@ -566,7 +825,36 @@ def summarize_episode_diagnostics(env_states, multi_agent):
             state.get("position_error_last", 0.0) for state in env_states])),
         "orientation_error_deg": float(np.mean([
             state.get("orientation_error_last", 0.0) for state in env_states])),
-    }
+}
+
+
+def _collision_detail_label(details):
+    source = str(details.get("source", "unknown"))
+    checker = str(
+        details.get("checker_link", details.get("checker_shape", "?"))
+    )
+    collider = str(
+        details.get("collider", details.get("body_link", "?"))
+    )
+    return f"{source}:{checker}->{collider}"
+
+
+def format_collision_diagnostics(diagnostics, controlled_agents):
+    total = int(diagnostics["collisions"])
+    rate = total / max(int(controlled_agents), 1)
+    before = int(diagnostics.get("collisions_before_success", 0))
+    at_success = int(diagnostics.get("collisions_at_success", 0))
+    after = int(diagnostics.get("collisions_after_success", 0))
+    sources = diagnostics.get("collision_sources", [])
+    pairs = diagnostics.get("collision_pairs", [])
+    result = f"{total}/{controlled_agents} ({rate:.2%})"
+    if total:
+        result += f" timing:{before}/{at_success}/{after}"
+        if sources:
+            result += f" source:{','.join(sources)}"
+        if pairs:
+            result += f" pair:{'|'.join(pairs)}"
+    return result
 
 
 def summarize_rewards(env_states):
@@ -630,6 +918,7 @@ def create_continuous_async_worker(
     action_size,
     action_selector,
     policy_assignment=None,
+    replay_ready_event=None,
 ):
     def begin_episode(worker_id, env, episode):
         reset_progress_max = curriculum_reset_progress_max(episode, args)
@@ -638,17 +927,27 @@ def create_continuous_async_worker(
             "max_steps": args.max_steps_per_episode,
             "physics_frames_per_step": args.physics_frames_per_step,
             "training_mode": True,
+            **scenario_curriculum_config(args),
         }
         if reset_progress_max is not None:
             scenario_config.update(reset_progress_min=0.0, reset_progress_max=reset_progress_max)
         env.configure(**scenario_config)
         obs, info = env.reset(seed=args.episode_seed_multiplier * episode + worker_id)
         agent_count = len(env.agent_ids) if args.multi_agent else 1
+        replay_warmup_exploration = bool(
+            replay_ready_event is not None and not replay_ready_event.is_set()
+        )
+        scheduled_random_exploration = (
+            episode < max(0, args.random_exploration_episodes)
+        )
         state = {
             "obs": obs,
             "done": False,
             "reset_progress_max": reset_progress_max,
-            "use_random_exploration": episode < max(0, args.random_exploration_episodes),
+            "use_random_exploration": (
+                replay_warmup_exploration or scheduled_random_exploration
+            ),
+            "replay_warmup_exploration": replay_warmup_exploration,
         }
         if args.multi_agent:
             state.update({
@@ -766,6 +1065,57 @@ def create_continuous_async_worker(
     )
 
 
+def gradient_clipper(model, role, grad_clip_norm, grad_clip_adaptive, grad_clip_k,
+                     grad_clip_decay=0.99):
+    """Per-network gradient clipper, cached on the model so its EMA survives across updates.
+
+    Mirrors the SAC clipper: the fixed cap is a hard backstop against deadly-triad Q-divergence,
+    while adaptive mode clips at ``grad_clip_k * EMA(grad_norm)`` bounded by that cap, so each
+    network's own gradient scale sets the threshold instead of a hand-tuned constant. Non-finite
+    norms are excluded from the EMA so a NaN cannot poison it.
+    """
+    cache = getattr(model, "_metis_grad_clippers", None)
+    if cache is None:
+        cache = {}
+        setattr(model, "_metis_grad_clippers", cache)
+    key = (role, float(grad_clip_norm), bool(grad_clip_adaptive), float(grad_clip_k))
+    if key in cache:
+        return cache[key]
+
+    has_hard = bool(grad_clip_norm and grad_clip_norm > 0.0)
+    enabled = has_hard or bool(grad_clip_adaptive)
+    hard_c = tf.constant(float(grad_clip_norm) if has_hard else 0.0, dtype=tf.float32)
+    k_c = tf.constant(float(grad_clip_k), dtype=tf.float32)
+    decay_c = tf.constant(float(grad_clip_decay), dtype=tf.float32)
+    warmup_c = tf.constant(25.0, dtype=tf.float32)
+    ema = tf.Variable(0.0, dtype=tf.float32, trainable=False, name=f"clip_ema_{role}")
+    seen = tf.Variable(0.0, dtype=tf.float32, trainable=False, name=f"clip_seen_{role}")
+
+    def clip(grads):
+        if not enabled:
+            return grads
+        if not grad_clip_adaptive:
+            clipped, _ = tf.clip_by_global_norm(grads, hard_c)
+            return clipped
+        gnorm = tf.linalg.global_norm(grads)
+        finite = tf.math.is_finite(gnorm)
+        g_for_ema = tf.where(finite, gnorm, ema)
+        new_ema = tf.where(
+            seen > 0.0, decay_c * ema + (1.0 - decay_c) * g_for_ema, g_for_ema)
+        ema.assign(new_ema)
+        seen.assign_add(1.0)
+        adaptive_cap = k_c * ema
+        cap = tf.minimum(hard_c, adaptive_cap) if has_hard else adaptive_cap
+        warmup_cap = hard_c if has_hard else adaptive_cap
+        cap = tf.where(seen < warmup_c, warmup_cap, cap)  # cold EMA -> don't over-clip
+        cap = tf.maximum(cap, 1e-3)
+        clipped, _ = tf.clip_by_global_norm(grads, cap)
+        return clipped
+
+    cache[key] = clip
+    return clip
+
+
 def soft_update(target_model, source_model, tau):
     target_weights = target_model.weights
     source_weights = source_model.weights
@@ -798,6 +1148,43 @@ def scheduled_bc_weight(update_step, start, end, decay_updates):
     return float(start) + ratio * (float(end) - float(start))
 
 
+def _flatten_grads(grads):
+    """Flatten a list of per-variable gradients into one 1-D tensor (drop the None entries)."""
+    parts = [tf.reshape(g, [-1]) for g in grads if g is not None]
+    if not parts:
+        return None
+    return tf.concat(parts, axis=0)
+
+
+def scheduled_q_weight(update_step, start, end, ramp_updates):
+    """Weight on the TD3 Q-maximisation term, ramped over REAL policy updates since the warmup.
+
+    Starts at ``start`` (0.0 by default) and grows to ``end`` over ``ramp_updates`` policy updates.
+    At policy_updates_since_warmup==0 the Q term is off, so the unfrozen actor is pulled ONLY by the
+    BC anchor and cannot be yanked into a self-collision basin by a full-strength Q-max on a critic
+    that has never scored the actor's own actions (the TD3+BC v4 collapse). Same clamped linear
+    interpolation as scheduled_bc_weight; a separate name because the direction/intent is opposite
+    (grow the Q term in, rather than decay the BC term out)."""
+    ramp_updates = max(1, int(ramp_updates))
+    ratio = min(1.0, max(0.0, float(update_step) / float(ramp_updates)))
+    return float(start) + ratio * (float(end) - float(start))
+
+
+def policy_update_count(counter):
+    """Return a checkpointed policy-update counter as a Python integer."""
+    if hasattr(counter, "numpy"):
+        return int(counter.numpy())
+    return int(counter)
+
+
+def increment_policy_update_count(counter):
+    """Advance either a TensorFlow checkpoint variable or a plain counter."""
+    if hasattr(counter, "assign_add"):
+        counter.assign_add(1)
+        return counter
+    return int(counter) + 1
+
+
 def sample_demo_actions(demo_data, batch_size):
     if demo_data is None or len(demo_data["actions"]) == 0:
         return None
@@ -823,6 +1210,9 @@ def train_deterministic_step(
     actor_drive_target=0.65,
     update_actor=True,
     *,
+    grad_clip_norm=10.0,
+    grad_clip_adaptive=False,
+    grad_clip_k=3.0,
     variant="ddpg",
     learner_update=1,
     critic2=None,
@@ -835,10 +1225,19 @@ def train_deterministic_step(
     demo_batch_size=128,
     bc_weight=0.0,
     demo_q_filter=False,
+    q_filter_active=True,
     td3_bc_alpha=2.5,
+    q_weight=1.0,
+    gradient_telemetry=False,
+    bc_reference_actor=None,
     ddpgfd_actor_priority_weight=1e-3,
 ):
     uses_td3 = variant_uses_td3(variant)
+
+    def _clip(model, role):
+        return gradient_clipper(
+            model, role, grad_clip_norm, grad_clip_adaptive, grad_clip_k)
+
     if uses_td3 and (critic2 is None or target_critic2 is None or critic2_optimizer is None):
         raise ValueError("TD3 variants require a second critic, target critic and optimizer")
     if str(variant) == "ddpgfd":
@@ -876,6 +1275,7 @@ def train_deterministic_step(
         td_error = y - q
         critic_loss = tf.reduce_mean(importance_weights * tf.square(td_error))
     critic_grads = tape.gradient(critic_loss, critic.trainable_variables)
+    critic_grads = _clip(critic, "critic")(critic_grads)
     critic_optimizer.apply_gradients(zip(critic_grads, critic.trainable_variables))
 
     critic2_loss = None
@@ -885,6 +1285,7 @@ def train_deterministic_step(
             td_error2 = y - q2
             critic2_loss = tf.reduce_mean(importance_weights * tf.square(td_error2))
         critic2_grads = tape.gradient(critic2_loss, critic2.trainable_variables)
+        critic2_grads = _clip(critic2, "critic2")(critic2_grads)
         critic2_optimizer.apply_gradients(zip(critic2_grads, critic2.trainable_variables))
 
     if replay_indices is not None:
@@ -900,20 +1301,40 @@ def train_deterministic_step(
     actor_loss_value = None
     q_loss_value = None
     bc_loss_value = None
+    q_scale_value = None
+    scaled_q_loss_value = None
+    q_grad_norm = None
+    bc_grad_norm = None
+    grad_cosine = None
+    actor_bc_deviation_pre_update = None
+    actor_bc_deviation_post_update = None
+    _qf_used = False
+    _qf_mask = None
+    _qf_expert_q = None
+    _qf_policy_q = None
     policy_due = not uses_td3 or int(learner_update) % max(1, int(policy_delay)) == 0
     if update_actor and policy_due:
-        with tf.GradientTape() as tape:
+        with tf.GradientTape(persistent=bool(gradient_telemetry)) as tape:
             policy_actions = scale_action_tensor(actor(obs, training=True), action_low, action_high)
             policy_q = critic([obs, policy_actions], training=False)
             q_loss = -tf.reduce_mean(policy_q)
-            actor_loss = q_loss
             if str(variant) == "td3_bc":
                 q_scale = float(td3_bc_alpha) / tf.maximum(
                     tf.reduce_mean(tf.abs(policy_q)), tf.constant(1e-6, dtype=tf.float32)
                 )
-                actor_loss = tf.stop_gradient(q_scale) * q_loss
+                q_term = tf.stop_gradient(q_scale) * q_loss
+            else:
+                q_scale = tf.constant(1.0, dtype=tf.float32)
+                q_term = q_loss
+            # The Q-maximisation term is gated behind q_weight (a schedule that ramps 0 -> end over
+            # real policy updates). At q_weight==0 the just-unfrozen actor is pulled ONLY by the BC
+            # anchor, so a critic that has never scored the actor's own actions cannot yank it into a
+            # collision basin (the TD3+BC v4 collapse). q_weight defaults to 1.0 (unchanged for the
+            # plain variants and for callers that do not schedule it).
+            weighted_q_term = float(q_weight) * q_term
 
             demo_batch = sample_demo_actions(demo_data, demo_batch_size)
+            bc_term = None
             if variant_uses_joint_bc(variant) and demo_batch is not None and bc_weight > 0.0:
                 demo_obs_np, demo_actions_np = demo_batch
                 demo_obs = tf.convert_to_tensor(demo_obs_np, dtype=tf.float32)
@@ -922,7 +1343,12 @@ def train_deterministic_step(
                     actor(demo_obs, training=True), action_low, action_high
                 )
                 per_sample_bc = tf.reduce_mean(tf.square(demo_policy_actions - demo_actions), axis=1)
-                if demo_q_filter:
+                # Q-filter is DELAYED: only when demo_q_filter AND q_filter_active (the caller keeps
+                # it off until N policy updates after the critic warmup). Before that, imitate every
+                # demo (unfiltered), so a not-yet-reliable critic cannot reject good demo actions.
+                # NOTE: the Q-filter gates the BC term only -- it is NOT a guard against the Q term
+                # collapsing the actor; that is what q_weight is for.
+                if demo_q_filter and q_filter_active:
                     expert_q = critic([demo_obs, demo_actions], training=False)
                     policy_demo_q = critic([demo_obs, demo_policy_actions], training=False)
                     if uses_td3:
@@ -933,21 +1359,78 @@ def train_deterministic_step(
                         )
                     mask = tf.cast(tf.squeeze(expert_q > policy_demo_q, axis=1), tf.float32)
                     bc_loss = tf.reduce_sum(mask * per_sample_bc) / tf.maximum(tf.reduce_sum(mask), 1.0)
+                    _qf_used = True
+                    _qf_mask = mask
+                    _qf_expert_q = expert_q
+                    _qf_policy_q = policy_demo_q
                 else:
                     bc_loss = tf.reduce_mean(per_sample_bc)
-                actor_loss = actor_loss + float(bc_weight) * bc_loss
+                bc_term = float(bc_weight) * bc_loss
             else:
                 bc_loss = None
+            drive_term = None
             if drive_indices and actor_drive_regularization > 0.0:
                 drive_values = tf.gather(policy_actions, drive_indices, axis=1)
                 drive_deficit = tf.nn.relu(float(actor_drive_target) - drive_values)
-                actor_loss = actor_loss + float(actor_drive_regularization) * tf.reduce_mean(tf.square(drive_deficit))
+                drive_term = float(actor_drive_regularization) * tf.reduce_mean(tf.square(drive_deficit))
+
+            actor_loss = weighted_q_term
+            if bc_term is not None:
+                actor_loss = actor_loss + bc_term
+            if drive_term is not None:
+                actor_loss = actor_loss + drive_term
+
+        if gradient_telemetry:
+            q_flat = _flatten_grads(tape.gradient(weighted_q_term, actor.trainable_variables))
+            q_grad_norm = float(tf.norm(q_flat).numpy()) if q_flat is not None else 0.0
+            if bc_term is not None:
+                bc_flat = _flatten_grads(tape.gradient(bc_term, actor.trainable_variables))
+                bc_grad_norm = float(tf.norm(bc_flat).numpy()) if bc_flat is not None else 0.0
+                if q_flat is not None and bc_flat is not None:
+                    denom = tf.maximum(tf.norm(q_flat) * tf.norm(bc_flat), tf.constant(1e-12))
+                    grad_cosine = float((tf.reduce_sum(q_flat * bc_flat) / denom).numpy())
         actor_grads = tape.gradient(actor_loss, actor.trainable_variables)
+        actor_grads = _clip(actor, "actor")(actor_grads)
         actor_optimizer.apply_gradients(zip(actor_grads, actor.trainable_variables))
+        if gradient_telemetry:
+            del tape
         actor_loss_value = float(actor_loss.numpy())
         q_loss_value = float(q_loss.numpy())
+        q_scale_value = float(q_scale.numpy())
+        scaled_q_loss_value = float(weighted_q_term.numpy())
         if bc_loss is not None:
             bc_loss_value = float(bc_loss.numpy())
+        if bc_reference_actor is not None:
+            ref_actions = scale_action_tensor(
+                bc_reference_actor(obs, training=False), action_low, action_high
+            )
+            # policy_actions were computed inside the tape, BEFORE apply_gradients -> pre-update
+            # deviation. Re-run the (now updated) actor for the post-update deviation, so the drift
+            # caused by THIS step is visible, not just the drift before it.
+            actor_bc_deviation_pre_update = float(
+                tf.reduce_mean(tf.norm(policy_actions - ref_actions, axis=1)).numpy()
+            )
+            post_actions = scale_action_tensor(
+                actor(obs, training=False), action_low, action_high
+            )
+            actor_bc_deviation_post_update = float(
+                tf.reduce_mean(tf.norm(post_actions - ref_actions, axis=1)).numpy()
+            )
+
+    # Q-filter telemetry (floats for logs/dashboard/checkpoint). None means "not applicable this
+    # step" (the filter did not run) -- callers must render it as N/A, never as 0.
+    if _qf_used:
+        qf_total = int(_qf_mask.shape[0])
+        qf_selected = int(tf.reduce_sum(_qf_mask).numpy())
+        qf_fraction = (qf_selected / qf_total) if qf_total else None
+        qf_expert_q_mean = float(tf.reduce_mean(_qf_expert_q).numpy())
+        qf_policy_q_mean = float(tf.reduce_mean(_qf_policy_q).numpy())
+    else:
+        qf_total = 0
+        qf_selected = 0
+        qf_fraction = None
+        qf_expert_q_mean = None
+        qf_policy_q_mean = None
 
     target_update_due = (
         int(learner_update) % max(1, int(policy_delay)) == 0
@@ -962,6 +1445,22 @@ def train_deterministic_step(
         "critic2_loss": float(critic2_loss.numpy()) if critic2_loss is not None else None,
         "target_update_due": target_update_due,
         "policy_updated": actor_loss_value is not None,
+        "q_filter_active": bool(_qf_used),
+        "q_filter_selected_fraction": qf_fraction,
+        "q_filter_selected_count": qf_selected,
+        "q_filter_total_count": qf_total,
+        "expert_q_mean": qf_expert_q_mean,
+        "policy_q_mean": qf_policy_q_mean,
+        # Separate Q/BC telemetry (None when the actor did not update this step).
+        "raw_q_loss": q_loss_value,
+        "td3_bc_q_scale": q_scale_value,
+        "scaled_q_loss": scaled_q_loss_value,
+        "q_weight": float(q_weight),
+        "q_grad_norm": q_grad_norm,
+        "bc_grad_norm": bc_grad_norm,
+        "grad_cosine": grad_cosine,
+        "actor_bc_deviation_pre_update": actor_bc_deviation_pre_update,
+        "actor_bc_deviation_post_update": actor_bc_deviation_post_update,
     }
 
 
@@ -982,6 +1481,9 @@ def build_deterministic_learner_step(
     action_low,
     action_high,
     *,
+    grad_clip_norm=10.0,
+    grad_clip_adaptive=False,
+    grad_clip_k=3.0,
     variant="ddpg",
     drive_indices=None,
     actor_drive_regularization=0.0,
@@ -1022,7 +1524,9 @@ def build_deterministic_learner_step(
             flush=True,
         )
 
-        def learner_step(buffer, *, update_actor, learner_update, bc_weight=0.0):
+        def learner_step(buffer, *, update_actor, learner_update, bc_weight=0.0,
+                         q_filter_active=True, q_weight=1.0, gradient_telemetry=False,
+                         bc_reference_actor=None):
             return train_deterministic_step(
                 actor,
                 critic,
@@ -1051,8 +1555,15 @@ def build_deterministic_learner_step(
                 demo_batch_size=demo_batch_size,
                 bc_weight=bc_weight,
                 demo_q_filter=demo_q_filter,
+                q_filter_active=q_filter_active,
                 td3_bc_alpha=td3_bc_alpha,
+                q_weight=q_weight,
+                gradient_telemetry=gradient_telemetry,
+                bc_reference_actor=bc_reference_actor,
                 ddpgfd_actor_priority_weight=ddpgfd_actor_priority_weight,
+                grad_clip_norm=grad_clip_norm,
+                grad_clip_adaptive=grad_clip_adaptive,
+                grad_clip_k=grad_clip_k,
             )
 
         return learner_step
@@ -1085,12 +1596,23 @@ def build_deterministic_learner_step(
             target_q = tf.minimum(target_q, target_critic2([next_obs, next_actions], training=False))
         return tf.stop_gradient(rewards + (1.0 - dones) * gamma_c * target_q)
 
+    clip_critic = gradient_clipper(
+        critic, "critic", grad_clip_norm, grad_clip_adaptive, grad_clip_k)
+    clip_actor = gradient_clipper(
+        actor, "actor", grad_clip_norm, grad_clip_adaptive, grad_clip_k)
+    clip_critic2 = (
+        gradient_clipper(
+            critic2, "critic2", grad_clip_norm, grad_clip_adaptive, grad_clip_k)
+        if critic2 is not None
+        else clip_critic)
+
     def _update_critics_impl(obs, actions, rewards, next_obs, dones):
         y = _compute_targets(rewards, next_obs, dones)
         with tf.GradientTape() as tape:
             q = critic([obs, actions], training=True)
             critic_loss = tf.reduce_mean(tf.square(y - q))
         grads = tape.gradient(critic_loss, critic.trainable_variables)
+        grads = clip_critic(grads)
         critic_optimizer.apply_gradients(zip(grads, critic.trainable_variables))
         critic2_loss = tf.constant(0.0, dtype=tf.float32)
         if uses_td3:
@@ -1098,6 +1620,7 @@ def build_deterministic_learner_step(
                 q2 = critic2([obs, actions], training=True)
                 critic2_loss = tf.reduce_mean(tf.square(y - q2))
             grads2 = tape.gradient(critic2_loss, critic2.trainable_variables)
+            grads2 = clip_critic2(grads2)
             critic2_optimizer.apply_gradients(zip(grads2, critic2.trainable_variables))
         return critic_loss, critic2_loss
 
@@ -1113,6 +1636,7 @@ def build_deterministic_learner_step(
                 drive_deficit = tf.nn.relu(drive_target - drive_values)
                 actor_loss = actor_loss + drive_reg * tf.reduce_mean(tf.square(drive_deficit))
         grads = tape.gradient(actor_loss, actor.trainable_variables)
+        grads = clip_actor(grads)
         actor_optimizer.apply_gradients(zip(grads, actor.trainable_variables))
         return actor_loss, q_loss, critic_loss, critic2_loss
 
@@ -1123,7 +1647,11 @@ def build_deterministic_learner_step(
         update_critics = _update_critics_impl
         update_all = _update_all_impl
 
-    def learner_step(buffer, *, update_actor, learner_update, bc_weight=0.0):
+    def learner_step(buffer, *, update_actor, learner_update, bc_weight=0.0,
+                     q_filter_active=True, q_weight=1.0, gradient_telemetry=False,
+                     bc_reference_actor=None):
+        # The compiled path serves the plain ddpg/td3 variants only (no BC, no Q-schedule); the
+        # demo/telemetry kwargs are accepted for a uniform call signature and ignored.
         obs, actions, rewards, next_obs, dones = buffer.sample(batch_size, action_dtype=np.float32)
         obs = tf.convert_to_tensor(obs, dtype=tf.float32)
         actions = tf.convert_to_tensor(actions, dtype=tf.float32)
@@ -1151,6 +1679,21 @@ def build_deterministic_learner_step(
             "critic2_loss": float(critic2_loss.numpy()) if uses_td3 else None,
             "target_update_due": target_update_due,
             "policy_updated": actor_loss_value is not None,
+            "q_filter_active": False,
+            "q_filter_selected_fraction": None,
+            "q_filter_selected_count": 0,
+            "q_filter_total_count": 0,
+            "expert_q_mean": None,
+            "policy_q_mean": None,
+            "raw_q_loss": q_loss_value,
+            "td3_bc_q_scale": None,
+            "scaled_q_loss": q_loss_value,
+            "q_weight": float(q_weight),
+            "q_grad_norm": None,
+            "bc_grad_norm": None,
+            "grad_cosine": None,
+            "actor_bc_deviation_pre_update": None,
+            "actor_bc_deviation_post_update": None,
         }
 
     return learner_step
@@ -1196,6 +1739,8 @@ def load_demonstration_arrays(paths, obs_dim, action_size, max_transitions=0):
     next_obs_parts = []
     done_parts = []
     agent_id_parts = []
+    group_parts = []
+    group_offset = 0
     has_agent_ids = True
     remaining = int(max_transitions)
 
@@ -1217,6 +1762,14 @@ def load_demonstration_arrays(paths, obs_dim, action_size, max_transitions=0):
                 if "agent_ids" in data
                 else None
             )
+            # Opaque per-transition trajectory id for group-balanced BC sampling (task-agnostic):
+            # an explicit group_ids key, else episode_indices, else all-zero for this file.
+            if "group_ids" in data:
+                file_groups = np.asarray(data["group_ids"]).astype(np.int64)
+            elif "episode_indices" in data:
+                file_groups = np.asarray(data["episode_indices"]).astype(np.int64)
+            else:
+                file_groups = np.zeros(len(actions), dtype=np.int64)
 
         if action_type != "continuous":
             raise ValueError(f"Demo {path!r} has action_type={action_type!r}; DDPG requires continuous demos")
@@ -1242,6 +1795,10 @@ def load_demonstration_arrays(paths, obs_dim, action_size, max_transitions=0):
         reward_parts.append(rewards[:count])
         next_obs_parts.append(next_obs[:count])
         done_parts.append(dones[:count])
+        # Offset each file's group ids so trajectories stay disjoint across concatenated files.
+        file_g = file_groups[:count] + group_offset
+        group_parts.append(file_g)
+        group_offset = int(file_g.max()) + 1 if len(file_g) else group_offset
         if agent_ids is None:
             has_agent_ids = False
         else:
@@ -1262,6 +1819,7 @@ def load_demonstration_arrays(paths, obs_dim, action_size, max_transitions=0):
     }
     if has_agent_ids and len(agent_id_parts) == len(obs_parts):
         result["agent_ids"] = np.concatenate(agent_id_parts, axis=0)
+    result["group_ids"] = np.concatenate(group_parts, axis=0)
     return result
 
 
@@ -1304,6 +1862,86 @@ def partition_demonstrations_by_policy(demo_data, assignment):
     return partitioned
 
 
+def _run_critic_warmup_audit(args, checkpoint, checkpoint_manager, buffer, episode,
+                             actor, critic, critic2, demo_validation,
+                             action_low, action_high):
+    """Q-ranking audit at the end of the critic warmup (actor still frozen), then STOP.
+
+    Prints ``CRITIC_WARMUP_AUDIT`` + a machine-readable ``CRITIC_WARMUP_AUDIT_JSON`` line, saves the
+    checkpoint (critic warmed, actor = BC clone) and exits BEFORE any actor update. Fail-closed:
+    exits non-zero if the validation batch is missing or the gate fails (critic does NOT value
+    expert+clone above random+saturated), so no downstream step can mistake a bad critic for a
+    green light to unfreeze the actor.
+    """
+    if demo_validation is None or "obs" not in demo_validation or len(demo_validation.get("actions", [])) == 0:
+        raise SystemExit(
+            "stop-after-critic-warmup: no validation batch (pass --demo-validation-path); "
+            "cannot audit the critic. STOPPING fail-closed."
+        )
+    obs = np.asarray(demo_validation["obs"], dtype=np.float32)
+    expert_actions = np.asarray(demo_validation["actions"], dtype=np.float32)
+    # Per-sample cell/group ids for the per-cell worst-margin gate. Prefer the loaded dict; fall
+    # back to reading `cells` straight from the validation npz(s) (load_demonstration_arrays may
+    # not carry it). Gate degrades gracefully (win-rate only) if absent.
+    group_ids = demo_validation.get("cells") if isinstance(demo_validation, dict) else None
+    if group_ids is None:
+        parts = []
+        for path in (getattr(args, "demo_validation_path", None) or []):
+            try:
+                with np.load(path, allow_pickle=True) as z:
+                    if "cells" in z:
+                        parts.append(np.asarray(z["cells"]))
+            except Exception:
+                pass
+        if parts:
+            group_ids = np.concatenate(parts)
+    if group_ids is not None and len(group_ids) != len(obs):
+        group_ids = None  # length mismatch -> do not risk mislabelling; win-rate gate still applies
+
+    def _actor_fn(o):
+        return actor(o, training=False).numpy()
+
+    def _critic_fn(oa):
+        return critic(oa, training=False).numpy()
+
+    _critic2_fn = None
+    if critic2 is not None:
+        def _critic2_fn(oa):
+            return critic2(oa, training=False).numpy()
+
+    report = q_ranking_audit(
+        _critic_fn, _actor_fn, obs, expert_actions, action_low, action_high,
+        critic2=_critic2_fn, group_ids=group_ids,
+        win_rate_threshold=float(getattr(args, "critic_audit_win_rate", 0.9)),
+        cell_margin_tol=float(getattr(args, "critic_audit_cell_margin_tol", 0.0)),
+    )
+    print(format_audit(report), flush=True)
+    print("CRITIC_WARMUP_AUDIT_JSON " + json.dumps({
+        "episode": int(episode),
+        "critic_updates": int(getattr(args, "critic_warmup_updates", 0)),
+        **{f"q_{k}": v for k, v in report["q_mean"].items()},
+        "pairs": {k: {kk: vv for kk, vv in v.items() if kk != "cell_means"}
+                  for k, v in report["pairs"].items()},
+        "gate": report["gate"],
+        "gate_passed": report["gate_passed"],
+        "n": report["n"],
+    }), flush=True)
+
+    save_training_checkpoint(
+        checkpoint, checkpoint_manager, buffer, episode,
+        getattr(args, "exploration_noise", 0.0), args, final=True,
+    )
+    if report["gate_passed"]:
+        print("stop-after-critic-warmup: GATE PASSED -- critic ranks expert+clone above "
+              "random+saturated. Actor updates would be allowed. STOPPING as requested.", flush=True)
+        raise SystemExit(0)
+    raise SystemExit(
+        "stop-after-critic-warmup: GATE FAILED -- critic does NOT value expert/clone above "
+        "random/saturated actions. Actor updates are BLOCKED (they would collapse the clone). "
+        "STOPPING fail-closed."
+    )
+
+
 def run_async_ddpg(
     args,
     envs,
@@ -1325,11 +1963,13 @@ def run_async_ddpg(
     random_action_high,
     actor_drive_indices,
     critic_warmup_target,
+    policy_update_counter,
     budget=None,
     critic2=None,
     target_critic2=None,
     critic2_optimizer=None,
     demo_data=None,
+    demo_validation=None,
 ):
     validate_async_arguments(args)
     budget = budget or TrainingBudget(getattr(args, "total_timesteps", 0))
@@ -1352,6 +1992,7 @@ def run_async_ddpg(
             lambda: snapshot.publish(actor.get_weights())
         )
     rngs = [np.random.default_rng(args.env_seed_base + 100_003 * idx) for idx in range(len(envs))]
+    replay_ready_event = build_replay_ready_event(buffer, args)
 
     def noise_for_episode(episode):
         elapsed = max(0, int(episode) - int(start_episode))
@@ -1416,6 +2057,7 @@ def run_async_ddpg(
         snapshot,
         action_size,
         action_selector,
+        replay_ready_event=replay_ready_event,
     )
     pool = AsyncCollectorPool(
         envs,
@@ -1490,6 +2132,9 @@ def run_async_ddpg(
         batch_size=args.batch_size,
         compiled=args.tf_compile_learner,
         xla=args.tf_xla,
+        grad_clip_norm=args.grad_clip_norm,
+        grad_clip_adaptive=args.grad_clip_adaptive,
+        grad_clip_k=args.grad_clip_k,
     )
     completed = int(start_episode)
     done_workers = 0
@@ -1498,6 +2143,17 @@ def run_async_ddpg(
     critic_losses = []
     critic2_losses = []
     bc_losses = []
+    # Q-filter is enabled only after this many REAL policy updates since the critic warmup ended.
+    q_filter_start = max(0, int(getattr(args, "demo_q_filter_start_policy_updates", 0)))
+    last_bc_weight = 0.0
+    qf_last = {"active": False, "fraction": None, "selected": 0, "total": 0,
+               "expert_q": None, "policy_q": None}
+    # Frozen snapshot of the warm-started (BC-clone) actor, used only for the actor-vs-BC deviation
+    # telemetry. Built lazily/cheaply here so the running actor can drift while this stays put.
+    bc_reference_actor = None
+    if getattr(args, "gradient_telemetry_every", 0) > 0 and variant_uses_joint_bc(args.trainer_variant):
+        bc_reference_actor = tf.keras.models.clone_model(actor)
+        bc_reference_actor.set_weights(actor.get_weights())
     last_saved_episode = None
     interrupted = False
     pool.start()
@@ -1526,6 +2182,8 @@ def run_async_ddpg(
                     for transition in step_event.transitions:
                         buffer.add(*transition)
                         collected_transitions += 1
+                if len(buffer) >= replay_warmup_threshold(args):
+                    replay_ready_event.set()
                 budget.consume(collected_transitions)
                 updates_due = scheduler.ingest(step_events)
                 updates_performed = 0
@@ -1533,24 +2191,76 @@ def run_async_ddpg(
                     for _update in range(updates_due):
                         update_actor = recovery_runtime.should_update_policy()
                         next_update = int(critic_optimizer.iterations.numpy()) + 1
+                        # BC weight decays over POLICY updates since the warmup ended -- NOT over
+                        # critic updates. During the warmup (policy_updates_since_warmup == 0) it
+                        # stays at the start weight, so BC is not silently annealed before a single
+                        # policy step has run.
+                        policy_updates_since_warmup = policy_update_count(
+                            policy_update_counter
+                        )
                         bc_weight = scheduled_bc_weight(
-                            next_update,
+                            policy_updates_since_warmup,
                             args.demo_bc_weight_start,
                             args.demo_bc_weight_end,
                             args.demo_bc_decay_updates,
                         )
+                        # Delay the Q-filter: keep it OFF until enough real policy updates have run
+                        # since the warmup (before that the critic is not yet trustworthy).
+                        q_filter_active = policy_updates_since_warmup >= q_filter_start
+                        # Ramp the Q-maximisation term in from q_weight_start (0) over policy updates
+                        # so it is not applied at full strength the instant the actor unfreezes.
+                        q_weight = (
+                            scheduled_q_weight(
+                                policy_updates_since_warmup,
+                                args.demo_q_weight_start,
+                                args.demo_q_weight_end,
+                                args.demo_q_weight_ramp_updates,
+                            )
+                            if variant_uses_joint_bc(args.trainer_variant)
+                            else 1.0
+                        )
+                        grad_tele = (
+                            args.gradient_telemetry_every > 0
+                            and policy_updates_since_warmup % args.gradient_telemetry_every == 0
+                        )
+                        last_bc_weight = bc_weight
                         result = det_learner(
                             buffer,
                             update_actor=update_actor,
                             learner_update=next_update,
                             bc_weight=bc_weight,
+                            q_filter_active=q_filter_active,
+                            q_weight=q_weight,
+                            gradient_telemetry=grad_tele,
+                            bc_reference_actor=bc_reference_actor,
                         )
+                        if result["policy_updated"]:
+                            increment_policy_update_count(policy_update_counter)
+                        if result.get("q_filter_active"):
+                            qf_last = {
+                                "active": True,
+                                "fraction": result["q_filter_selected_fraction"],
+                                "selected": result["q_filter_selected_count"],
+                                "total": result["q_filter_total_count"],
+                                "expert_q": result["expert_q_mean"],
+                                "policy_q": result["policy_q_mean"],
+                            }
+                        elif result["policy_updated"]:
+                            qf_last["active"] = False  # updating, filter not yet enabled -> N/A
                         critic_losses.append(result["critic_loss"])
                         if result["critic2_loss"] is not None:
                             critic2_losses.append(result["critic2_loss"])
                         if result["bc_loss"] is not None:
                             bc_losses.append(result["bc_loss"])
-                        recovery_runtime.record_critic_update()
+                        warmup_completed = recovery_runtime.record_critic_update()
+                        if warmup_completed and getattr(args, "stop_after_critic_warmup", False):
+                            # The critic warmup just finished and the actor is still the frozen BC
+                            # clone. Audit the critic and STOP before the first actor update.
+                            _run_critic_warmup_audit(
+                                args, checkpoint, checkpoint_manager, buffer, completed,
+                                actor, critic, critic2, demo_validation,
+                                action_low, action_high,
+                            )
                         learner_updates = int(critic_optimizer.iterations.numpy())
                         updates_performed += 1
                         if result["actor_loss"] is not None:
@@ -1591,14 +2301,15 @@ def run_async_ddpg(
                 controlled_agents = 1
             mean_action = summarize_actions(mean_actions)
             mean_delta = summarize_action_deltas([state], args.multi_agent)
-            warmup_left = recovery_runtime.warmup_left
+            replay_warmup_left = replay_warmup_remaining(buffer, args)
+            critic_warmup_left = recovery_runtime.warmup_left
             throughput = scheduler.throughput(pool)
             print_episode_metrics(event.episode, [
                 ("mode", [
                     ("collector", "async"),
                     ("algorithm", args.trainer_variant),
                     ("worker", event.worker_id),
-                    ("exploration", "random" if state["use_random_exploration"] else "policy"),
+                    ("exploration", exploration_label(state)),
                     ("noise", f"{noise_std:.3f}"),
                 ]),
                 ("outcome", [
@@ -1607,7 +2318,8 @@ def run_async_ddpg(
                 ]),
                 ("agents", [
                     ("finish", f"{diagnostics['finishes']}/{controlled_agents}"),
-                    ("collision", f"{diagnostics['collisions']}/{controlled_agents}"),
+                    ("collision", format_collision_diagnostics(
+                        diagnostics, controlled_agents)),
                     ("stall", f"{diagnostics['stalls']}/{controlled_agents}"),
                 ]),
                 ("actions", [("mean", format_float_list(mean_action)), ("delta", format_float_list(mean_delta))]),
@@ -1619,13 +2331,32 @@ def run_async_ddpg(
                     *(([("protected_demos", buffer.protected_demo_count)]) if args.trainer_variant == "ddpgfd" else []),
                     ("critic_updates", len(critic_losses)),
                     ("policy_updates", len(actor_losses)),
-                    ("warmup_left", warmup_left),
+                    ("replay_warmup_left", replay_warmup_left),
+                    ("critic_warmup_left", critic_warmup_left),
                     ("actor_loss", f"{float(np.mean(actor_losses)) if actor_losses else 0.0:.5f}"),
                     ("critic_loss", f"{float(np.mean(critic_losses)) if critic_losses else 0.0:.5f}"),
                     *(([("critic2_loss", f"{float(np.mean(critic2_losses)):.5f}")]) if critic2_losses else []),
                     *(([("bc_loss", f"{float(np.mean(bc_losses)):.5f}")]) if bc_losses else []),
                     ("policy_version", snapshot.version),
                 ]),
+                *(([("bc_qfilter", [
+                    ("bc_weight", f"{last_bc_weight:.3f}"),
+                    (
+                        "policy_updates_since_warmup",
+                        policy_update_count(policy_update_counter),
+                    ),
+                    ("q_filter_active", qf_last["active"]),
+                    ("q_filter_selected_fraction",
+                     "n/a" if qf_last["fraction"] is None else f"{qf_last['fraction']:.3f}"),
+                    ("q_filter_selected_count", qf_last["selected"]),
+                    ("q_filter_total_count", qf_last["total"]),
+                    ("expert_q_mean",
+                     "n/a" if qf_last["expert_q"] is None else f"{qf_last['expert_q']:.3f}"),
+                    ("policy_q_mean",
+                     "n/a" if qf_last["policy_q"] is None else f"{qf_last['policy_q']:.3f}"),
+                    ("action_saturation",
+                     f"{float(np.mean(np.abs(np.asarray(mean_action)) > 0.95)):.3f}"),
+                ])]) if variant_uses_joint_bc(args.trainer_variant) else []),
                 ("throughput", [
                     ("env_steps_s", f"{throughput['env_steps_s']:.1f}"),
                     ("transitions_s", f"{throughput['transitions_s']:.1f}"),
@@ -1678,7 +2409,103 @@ def run_async_ddpg(
     return completed, noise_std
 
 
-def pretrain_actor_behavior_cloning(actor, demo_data, epochs, batch_size, learning_rate, action_low, action_high):
+def _run_stop_after_bc_eval_common(args, checkpoint, checkpoint_manager, best_tracker,
+                                   start_episode, buffer):
+    """Save a BC checkpoint, run ONE frozen (deterministic) evaluation at the current curriculum
+    level, then stop before RL. Task-agnostic (initial level means Stage A only for tasks that
+    define it so). A failed/empty evaluation exits NON-ZERO instead of a passing gate; the summary
+    includes whatever generic reset/cell breakdowns the evaluation produced."""
+    print("stop-after-bc: saving BC checkpoint + a frozen evaluation at the current curriculum "
+          "level (RL NOT started)...", flush=True)
+    saved_path = save_training_checkpoint(
+        checkpoint, checkpoint_manager, buffer, start_episode, 0.0, args,
+        final=True, save_replay=False)
+    result = None
+    try:
+        result = best_tracker.evaluate(str(saved_path), start_episode)
+    except Exception as exc:
+        print(f"stop-after-bc: frozen evaluation raised: {exc}", flush=True)
+    if result is None or not getattr(result, "summary", None):
+        raise SystemExit("stop-after-bc: frozen evaluation produced no summary (failed/timeout); "
+                         "exiting non-zero without a gate result.")
+    s = result.summary
+    breakdown = {k: s[k] for k in ("reset_modes", "target_regions", "target_cells",
+                 "region_success_floor", "regular_success_rate") if k in s}
+    print("BC_FROZEN_EVAL " + json.dumps({
+        "success_rate": float(s.get("success_rate", 0.0)),
+        "selection_success_rate": float(s.get("selection_success_rate", s.get("success_rate", 0.0))),
+        "position_error_mean": s.get("position_error_mean"),
+        "orientation_error_mean": s.get("orientation_error_mean"),
+        "hold_frames_max": s.get("hold_frames_max"),
+        "episodes": int(getattr(args, "best_evaluation_episodes", 0)),
+        "curriculum_level": s.get("curriculum_level"),
+        "breakdown": breakdown}), flush=True)
+    print("stop-after-bc: STOPPED before RL.", flush=True)
+
+
+def _load_bc_pairs(paths, obs_dim, action_size):
+    """Imitation-only (obs, actions) pairs (no rewards/next_obs/dones). None if paths empty."""
+    obs_parts, act_parts = [], []
+    for path in paths:
+        with np.load(path) as d:
+            if "obs" not in d or "actions" not in d:
+                raise ValueError(f"BC-pairs file {path!r} must contain obs and actions arrays")
+            o = np.asarray(d["obs"], dtype=np.float32)
+            a = np.asarray(d["actions"], dtype=np.float32)
+        if o.ndim != 2 or o.shape[1] != obs_dim:
+            raise ValueError(f"BC-pairs {path!r} obs shape {o.shape} != obs_dim {obs_dim}")
+        if a.ndim != 2 or a.shape[1] != action_size:
+            raise ValueError(f"BC-pairs {path!r} actions shape {a.shape} != action_size {action_size}")
+        obs_parts.append(o)
+        act_parts.append(a)
+    if not obs_parts:
+        return None
+    return {"obs": np.concatenate(obs_parts, axis=0), "actions": np.concatenate(act_parts, axis=0)}
+
+
+def _combine_bc_sources(demo_data, bc_pairs):
+    """Concatenate complete-transition demos (--demo-path) and imitation-only pairs (--demo-bc-path)
+    into one BC training set. Replay-only demos are intentionally NOT included here."""
+    obs_parts, act_parts = [], []
+    for src in (demo_data, bc_pairs):
+        if src is None or len(src.get("actions", [])) == 0:
+            continue
+        obs_parts.append(np.asarray(src["obs"], dtype=np.float32))
+        act_parts.append(np.asarray(src["actions"], dtype=np.float32))
+    if not obs_parts:
+        return None
+    return {"obs": np.concatenate(obs_parts, axis=0), "actions": np.concatenate(act_parts, axis=0)}
+
+
+def _bc_actor_path_default(actor_weights_path):
+    """…foo.weights.h5 -> …foo_bc.weights.h5 (persist the BC actor apart from RL weights)."""
+    p = str(actor_weights_path or "bc_actor.weights.h5")
+    if p.endswith(".weights.h5"):
+        return p[: -len(".weights.h5")] + "_bc.weights.h5"
+    root, dot, ext = p.rpartition(".")
+    return f"{root}_bc.{ext}" if dot else f"{p}_bc"
+
+
+def _bc_validation_mse(actor, obs, actions, low_t, high_t, batch_size):
+    """Held-out action MSE for a deterministic (DDPG/TD3) actor, batched."""
+    total = 0.0
+    n = len(actions)
+    for start in range(0, n, batch_size):
+        stop = min(start + batch_size, n)
+        pred = scale_action_tensor(
+            actor(tf.convert_to_tensor(obs[start:stop], dtype=tf.float32), training=False),
+            low_t, high_t)
+        err = tf.reduce_sum(tf.square(
+            tf.convert_to_tensor(actions[start:stop], dtype=tf.float32) - pred))
+        total += float(err.numpy())
+    return total / max(n * int(actions.shape[1]), 1)
+
+
+def pretrain_actor_behavior_cloning(actor, demo_data, epochs, batch_size, learning_rate,
+                                    action_low, action_high, demo_validation=None):
+    """Behavior-clone a deterministic actor onto the demo actions. With a validation set, restore
+    the epoch with the lowest validation MSE (best-checkpoint / early-stop against overfitting).
+    Returns {"best_epoch", "best_val_mse"}."""
     optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
     obs = demo_data["obs"]
     actions = demo_data["actions"]
@@ -1686,6 +2513,14 @@ def pretrain_actor_behavior_cloning(actor, demo_data, epochs, batch_size, learni
     action_high_tensor = tf.convert_to_tensor(np.asarray(action_high, dtype=np.float32).reshape(1, -1), dtype=tf.float32)
     count = len(actions)
 
+    val_obs = val_act = None
+    if demo_validation is not None and len(demo_validation.get("actions", [])) > 0:
+        val_obs = demo_validation["obs"]
+        val_act = np.asarray(demo_validation["actions"], dtype=np.float32)
+
+    best_val = None
+    best_epoch = -1
+    best_weights = None
     for epoch in range(int(epochs)):
         order = np.random.permutation(count)
         losses = []
@@ -1707,11 +2542,26 @@ def pretrain_actor_behavior_cloning(actor, demo_data, epochs, batch_size, learni
             optimizer.apply_gradients(zip(grads, actor.trainable_variables))
             losses.append(float(loss.numpy()))
 
+        val_msg = ""
+        if val_act is not None:
+            val_mse = _bc_validation_mse(
+                actor, val_obs, val_act, action_low_tensor, action_high_tensor, batch_size)
+            val_msg = f" val_mse={val_mse:.6f}"
+            if best_val is None or val_mse < best_val:
+                best_val = val_mse
+                best_epoch = epoch + 1
+                best_weights = actor.get_weights()
         print(
             f"demo_bc_epoch={epoch + 1:04d}/{epochs:04d} "
-            f"actor_mse={float(np.mean(losses)):.6f}",
+            f"actor_mse={float(np.mean(losses)):.6f}{val_msg}",
             flush=True,
         )
+
+    if best_weights is not None:
+        actor.set_weights(best_weights)
+        print(f"BC best epoch={best_epoch}/{epochs} val_mse={best_val:.6f} "
+              "(restored best-validation weights)", flush=True)
+    return {"best_epoch": best_epoch, "best_val_mse": best_val}
 
 
 def apply_variant_defaults(args):
@@ -1768,6 +2618,9 @@ class DeterministicPolicyState:
     critic2: object = None
     target_critic2: object = None
     critic2_optimizer: object = None
+    # REAL policy updates since this policy's critic warmup ended -- drives BC-weight decay and the
+    # Q-filter delay (NOT the critic-update count, which advances during the warmup).
+    policy_updates_since_warmup: object = None
 
 
 def _save_multi_policy_deterministic_checkpoint(
@@ -1797,6 +2650,9 @@ def _save_multi_policy_deterministic_checkpoint(
             policy_id: {
                 "noise_std": float(state.noise_std.numpy()),
                 "replay_size": len(state.buffer),
+                "policy_updates_since_warmup": policy_update_count(
+                    state.policy_updates_since_warmup
+                ),
             }
             for policy_id, state in policy_states.items()
         },
@@ -1879,6 +2735,20 @@ def run_async_multi_policy_deterministic(
         policy_id: float(state.noise_std.numpy())
         for policy_id, state in policy_states.items()
     }
+    trainable_states = [
+        state for state in policy_states.values() if state.trainable
+    ]
+    if not trainable_states:
+        raise ValueError("Multi-policy training requires at least one trainable policy")
+    replay_ready_event = build_replay_ready_event(
+        trainable_states[0].buffer,
+        args,
+    )
+    if any(
+        replay_warmup_remaining(state.buffer, args) > 0
+        for state in trainable_states
+    ):
+        replay_ready_event.clear()
 
     def noise_for(policy_id, episode):
         if not policy_states[policy_id].trainable:
@@ -1995,6 +2865,7 @@ def run_async_multi_policy_deterministic(
         action_size,
         action_selector,
         policy_assignment=assignment,
+        replay_ready_event=replay_ready_event,
     )
     pool = AsyncCollectorPool(
         envs,
@@ -2081,6 +2952,11 @@ def run_async_multi_policy_deterministic(
                         policy_id, *payload = transition
                         policy_states[policy_id].buffer.add(*payload)
                         collected += 1
+                if all(
+                    replay_warmup_remaining(state.buffer, args) == 0
+                    for state in trainable_states
+                ):
+                    replay_ready_event.set()
                 budget.consume(collected)
                 updates_due = scheduler.ingest_by_policy(
                     step_events,
@@ -2099,12 +2975,36 @@ def run_async_multi_policy_deterministic(
                             < max(args.replay_warmup, args.batch_size)
                         ):
                             continue
+                        q_filter_start = max(
+                            0,
+                            int(getattr(
+                                args,
+                                "demo_q_filter_start_policy_updates",
+                                0,
+                            )),
+                        )
                         for _update in range(due):
                             update_number = (
                                 int(
                                     state.critic_optimizer.iterations.numpy()
                                 )
                                 + 1
+                            )
+                            policy_updates_since_warmup = policy_update_count(
+                                state.policy_updates_since_warmup
+                            )
+                            q_filter_active = (
+                                policy_updates_since_warmup >= q_filter_start
+                            )
+                            q_weight = (
+                                scheduled_q_weight(
+                                    policy_updates_since_warmup,
+                                    args.demo_q_weight_start,
+                                    args.demo_q_weight_end,
+                                    args.demo_q_weight_ramp_updates,
+                                )
+                                if variant_uses_joint_bc(args.trainer_variant)
+                                else 1.0
                             )
                             result = state.learner(
                                 state.buffer,
@@ -2114,7 +3014,7 @@ def run_async_multi_policy_deterministic(
                                 learner_update=update_number,
                                 bc_weight=(
                                     scheduled_bc_weight(
-                                        update_number,
+                                        policy_updates_since_warmup,
                                         args.demo_bc_weight_start,
                                         args.demo_bc_weight_end,
                                         args.demo_bc_decay_updates,
@@ -2124,7 +3024,13 @@ def run_async_multi_policy_deterministic(
                                     )
                                     else 0.0
                                 ),
+                                q_filter_active=q_filter_active,
+                                q_weight=q_weight,
                             )
+                            if result["policy_updated"]:
+                                increment_policy_update_count(
+                                    state.policy_updates_since_warmup
+                                )
                             state.recovery.record_critic_update()
                             metrics[policy_id]["critic"].append(
                                 result["critic_loss"]
@@ -2220,6 +3126,7 @@ def run_async_multi_policy_deterministic(
                     ("algorithm", args.trainer_variant),
                     ("worker", event.worker_id),
                     ("policies", len(policy_states)),
+                    ("exploration", exploration_label(payload)),
                 ]),
                 ("outcome", [
                     (
@@ -2475,6 +3382,9 @@ def run_sync_multi_policy_deterministic(
             batch_size=args.batch_size,
             compiled=args.tf_compile_learner,
             xla=args.tf_xla,
+            grad_clip_norm=args.grad_clip_norm,
+            grad_clip_adaptive=args.grad_clip_adaptive,
+            grad_clip_k=args.grad_clip_k,
         )
 
         def refill_demo_replay(
@@ -2511,6 +3421,15 @@ def run_sync_multi_policy_deterministic(
             else 0.0,
             dtype=tf.float32,
             name=f"noise_{assignment.key_for(policy_id)}",
+        )
+        policy_updates_since_warmup = tf.Variable(
+            0,
+            dtype=tf.int64,
+            trainable=False,
+            name=(
+                "policy_updates_since_warmup_"
+                f"{assignment.key_for(policy_id)}"
+            ),
         )
         metadata = build_policy_metadata(
             args.trainer_variant,
@@ -2551,6 +3470,7 @@ def run_sync_multi_policy_deterministic(
             critic2=critic2,
             target_critic2=target_critic2,
             critic2_optimizer=critic2_optimizer,
+            policy_updates_since_warmup=policy_updates_since_warmup,
         )
         policy_states[policy_id] = state
         trackable = {
@@ -2561,6 +3481,7 @@ def run_sync_multi_policy_deterministic(
             "actor_optimizer": actor_optimizer,
             "critic_optimizer": critic_optimizer,
             "noise_std": noise_std,
+            "policy_updates_since_warmup": policy_updates_since_warmup,
         }
         if critic2 is not None:
             trackable.update({
@@ -2622,11 +3543,19 @@ def run_sync_multi_policy_deterministic(
             flush=True,
         )
 
-    warmup = (
-        max(0, int(args.critic_warmup_updates))
-        if resume_checkpoint
-        else 0
+    # Critic warmup runs (actor frozen) after ANY warm start of the actor: a checkpoint resume, a
+    # --policy-path load, OR a freshly-run behavior cloning. Otherwise random critics would wreck
+    # the warm-started actor on the first policy-gradient step.
+    bc_will_run = bool(args.demo_bc_epochs > 0 and (not resume_checkpoint or args.demo_bc_on_resume))
+    warmup_source = (
+        "checkpoint resume" if resume_checkpoint
+        else "actor warm start" if getattr(args, "policy_path", None)
+        else "behavior cloning" if bc_will_run
+        else None
     )
+    warmup = max(0, int(args.critic_warmup_updates)) if warmup_source is not None else 0
+    if warmup > 0:
+        print(f"Critic warmup after {warmup_source}: updates={warmup} actor=frozen", flush=True)
     for state in policy_states.values():
         state.actor_optimizer.learning_rate.assign(args.actor_learning_rate)
         state.critic_optimizer.learning_rate.assign(
@@ -2637,6 +3566,16 @@ def run_sync_multi_policy_deterministic(
                 args.critic_learning_rate
             )
         state.recovery.critic_warmup_target = warmup if state.trainable else 0
+
+    _bc_demo_validation = None
+    if getattr(args, "demo_validation_path", None):
+        _bc_demo_validation = load_demonstration_arrays(
+            args.demo_validation_path, obs_dim, action_size, max_transitions=0)
+        if _bc_demo_validation is not None:
+            print(f"Loaded BC validation transitions={len(_bc_demo_validation['actions'])} "
+                  f"paths={args.demo_validation_path}", flush=True)
+    _bc_ran_policies = []
+    _bc_gate_state = None
 
     for policy_id, state in policy_states.items():
         policy_demo = demos_by_policy.get(policy_id)
@@ -2672,8 +3611,18 @@ def run_sync_multi_policy_deterministic(
                 ),
                 action_low=action_low,
                 action_high=action_high,
+                demo_validation=_bc_demo_validation,
             )
             state.target_actor.set_weights(state.actor.get_weights())
+            # Persist the BC-pretrained actor BEFORE any RL/warmup update touches it.
+            _bc_ran_policies.append(policy_id)
+            _bc_actor_path = (args.bc_actor_weights_path
+                              or _bc_actor_path_default(args.actor_weights_path))
+            if len(_bc_ran_policies) == 1:  # single-policy pilot: one BC actor artifact
+                Path(_bc_actor_path).parent.mkdir(parents=True, exist_ok=True)
+                state.actor.save_weights(_bc_actor_path)
+                print(f"Saved BC actor weights (pre-RL): {_bc_actor_path}", flush=True)
+                _bc_gate_state = state
         if (
             args.trainer_variant == "ddpgfd"
             and restored_replays.get(policy_id, 0) == 0
@@ -2749,6 +3698,18 @@ def run_sync_multi_policy_deterministic(
         flush=True,
     )
 
+    # Deterministic BC gate: after BC (+ saved BC actor), run ONE frozen evaluation and STOP
+    # before any RL update. Fails closed if BC did not actually run.
+    if getattr(args, "stop_after_bc", False):
+        if not _bc_ran_policies:
+            raise SystemExit(
+                "--stop-after-bc requires behavior cloning to have actually run: pass "
+                "--demo-path and --demo-bc-epochs>0 (and, on resume, --demo-bc-on-resume).")
+        _run_stop_after_bc_eval_common(
+            args, checkpoint, checkpoint_manager, best_tracker, start_episode,
+            getattr(_bc_gate_state, "buffer", None))
+        return
+
     if args.collector_mode == "async":
         return run_async_multi_policy_deterministic(
             args,
@@ -2769,11 +3730,25 @@ def run_sync_multi_policy_deterministic(
     last_completed_episode = start_episode
     last_saved_episode = None
     interrupted = False
+    sync_throttles = {
+        policy_id: SyncUpdateThrottle(args)
+        for policy_id, policy in policy_states.items()
+        if policy.trainable
+    }
     try:
         for episode in range(start_episode, args.num_episodes):
-            use_random = episode < max(
-                0,
-                args.random_exploration_episodes,
+            trainable_replay_size = min(
+                (
+                    len(policy.buffer)
+                    for policy in policy_states.values()
+                    if policy.trainable
+                ),
+                default=replay_warmup_threshold(args),
+            )
+            use_random = should_use_random_exploration(
+                episode,
+                args,
+                trainable_replay_size,
             )
             reset_progress_max = curriculum_reset_progress_max(episode, args)
             env_states = []
@@ -2783,6 +3758,7 @@ def run_sync_multi_policy_deterministic(
                     "max_steps": args.max_steps_per_episode,
                     "physics_frames_per_step": args.physics_frames_per_step,
                     "training_mode": True,
+                    **scenario_curriculum_config(args),
                 }
                 if reset_progress_max is not None:
                     config.update(
@@ -2905,6 +3881,9 @@ def run_sync_multi_policy_deterministic(
                 ):
                     next_obs, _reward, terminated, truncated, info = step_result
                     done = bool(terminated or truncated)
+                    transitions_by_policy = {
+                        policy_id: 0 for policy_id in sync_throttles
+                    }
                     rewards = np.asarray(
                         info.get("per_agent_rewards"),
                         dtype=np.float32,
@@ -2945,6 +3924,7 @@ def run_sync_multi_policy_deterministic(
                                 ),
                             )
                             budget.consume(1)
+                            transitions_by_policy[policy_id] += 1
                         env_state["ep_reward"][agent_idx] += rewards[agent_idx]
                         env_state["action_sum"][agent_idx] += actions[agent_idx]
                         env_state["action_count"][agent_idx, 0] += 1.0
@@ -2971,62 +3951,103 @@ def run_sync_multi_policy_deterministic(
                                 < max(args.replay_warmup, args.batch_size)
                             ):
                                 continue
-                            update_number = int(
-                                policy.critic_optimizer.iterations.numpy()
-                            ) + 1
-                            result = policy.learner(
-                                policy.buffer,
-                                update_actor=policy.recovery.should_update_policy(),
-                                learner_update=update_number,
-                                bc_weight=(
-                                    scheduled_bc_weight(
-                                        update_number,
-                                        args.demo_bc_weight_start,
-                                        args.demo_bc_weight_end,
-                                        args.demo_bc_decay_updates,
+                            transitions_added = transitions_by_policy.get(
+                                policy_id,
+                                0,
+                            )
+                            updates_due = sync_throttles[
+                                policy_id
+                            ].updates_due(
+                                transitions_added,
+                                env_steps=1 if transitions_added > 0 else 0,
+                            )
+                            q_filter_start = max(
+                                0,
+                                int(getattr(
+                                    args,
+                                    "demo_q_filter_start_policy_updates",
+                                    0,
+                                )),
+                            )
+                            for _update in range(updates_due):
+                                update_number = int(
+                                    policy.critic_optimizer.iterations.numpy()
+                                ) + 1
+                                policy_updates_since_warmup = policy_update_count(
+                                    policy.policy_updates_since_warmup
+                                )
+                                q_filter_active = (
+                                    policy_updates_since_warmup >= q_filter_start
+                                )
+                                q_weight = (
+                                    scheduled_q_weight(
+                                        policy_updates_since_warmup,
+                                        args.demo_q_weight_start,
+                                        args.demo_q_weight_end,
+                                        args.demo_q_weight_ramp_updates,
                                     )
-                                    if variant_uses_joint_bc(
-                                        args.trainer_variant
+                                    if variant_uses_joint_bc(args.trainer_variant)
+                                    else 1.0
+                                )
+                                result = policy.learner(
+                                    policy.buffer,
+                                    update_actor=policy.recovery.should_update_policy(),
+                                    learner_update=update_number,
+                                    bc_weight=(
+                                        scheduled_bc_weight(
+                                            policy_updates_since_warmup,
+                                            args.demo_bc_weight_start,
+                                            args.demo_bc_weight_end,
+                                            args.demo_bc_decay_updates,
+                                        )
+                                        if variant_uses_joint_bc(
+                                            args.trainer_variant
+                                        )
+                                        else 0.0
+                                    ),
+                                    q_filter_active=q_filter_active,
+                                    q_weight=q_weight,
+                                )
+                                if result["policy_updated"]:
+                                    increment_policy_update_count(
+                                        policy.policy_updates_since_warmup
                                     )
-                                    else 0.0
-                                ),
-                            )
-                            metrics[policy_id]["critic"].append(
-                                result["critic_loss"]
-                            )
-                            if result["critic2_loss"] is not None:
-                                metrics[policy_id]["critic2"].append(
-                                    result["critic2_loss"]
+                                metrics[policy_id]["critic"].append(
+                                    result["critic_loss"]
                                 )
-                            policy.recovery.record_critic_update()
-                            if result["actor_loss"] is not None:
-                                metrics[policy_id]["actor"].append(
-                                    result["actor_loss"]
+                                if result["critic2_loss"] is not None:
+                                    metrics[policy_id]["critic2"].append(
+                                        result["critic2_loss"]
+                                    )
+                                policy.recovery.record_critic_update()
+                                if result["actor_loss"] is not None:
+                                    metrics[policy_id]["actor"].append(
+                                        result["actor_loss"]
+                                    )
+                                target_due = (
+                                    result["target_update_due"]
+                                    if variant_uses_td3(args.trainer_variant)
+                                    else update_number
+                                    % args.target_update_every
+                                    == 0
                                 )
-                            target_due = (
-                                result["target_update_due"]
-                                if variant_uses_td3(args.trainer_variant)
-                                else update_number
-                                % args.target_update_every
-                                == 0
-                            )
-                            if target_due:
-                                soft_update(
-                                    policy.target_actor,
-                                    policy.actor,
-                                    args.tau,
-                                )
-                                soft_update(
-                                    policy.target_critic,
-                                    policy.critic,
-                                    args.tau,
-                                )
-                                if policy.critic2 is not None:
+                                if target_due:
                                     soft_update(
-                                        policy.target_critic2,
-                                        policy.critic2,
+                                        policy.target_actor,
+                                        policy.actor,
                                         args.tau,
                                     )
+                                    soft_update(
+                                        policy.target_critic,
+                                        policy.critic,
+                                        args.tau,
+                                    )
+                                    if policy.critic2 is not None:
+                                        soft_update(
+                                            policy.target_critic2,
+                                            policy.critic2,
+                                            args.tau,
+                                        )
                 if budget.exhausted:
                     break
 
@@ -3165,6 +4186,9 @@ def main(trainer_variant):
     dashboard = maybe_start_dashboard(args)
     training_start_time = time.monotonic()
     print(f"Deterministic trainer variant: {args.trainer_variant}", flush=True)
+    # Architecture is process-wide state, so it must be fixed before the first network is
+    # built -- the seeding block below is the last point where nothing exists yet.
+    set_network_layers(args.network_layers or default_network_layers(trainer_variant))
     random.seed(args.env_seed_base)
     np.random.seed(args.env_seed_base)
     tf.random.set_seed(args.env_seed_base)
@@ -3312,6 +4336,11 @@ def main(trainer_variant):
             critic_optimizer=critic_optimizer,
             episode=tf.Variable(0, dtype=tf.int64),
             noise_std=tf.Variable(args.exploration_noise, dtype=tf.float32),
+            policy_updates_since_warmup=tf.Variable(
+                0,
+                dtype=tf.int64,
+                trainable=False,
+            ),
             trainer_variant=tf.Variable(args.trainer_variant, dtype=tf.string, trainable=False),
         )
         if critic2 is not None:
@@ -3361,6 +4390,7 @@ def main(trainer_variant):
                 args.policy_path,
                 expected_algorithm=args.trainer_variant,
             )
+            args._replay_warmup_uses_restored_policy = True
             target_actor.set_weights(actor.get_weights())
             print(
                 f"Warm-started {args.trainer_variant} actor from {loaded_policy['source_kind']}: "
@@ -3408,20 +4438,55 @@ def main(trainer_variant):
             )
             print(f"Prefilled replay buffer with demonstration transitions={added}", flush=True)
 
+        # Replay-ONLY demos: complete transitions added to the critics' replay but NEVER to BC.
+        if getattr(args, "demo_replay_only_path", None) and args.demo_prefill and restored_replay_count == 0:
+            replay_only = load_demonstration_arrays(
+                args.demo_replay_only_path, obs_dim, action_size, max_transitions=0)
+            if replay_only is not None:
+                added_ro = buffer.add_many(
+                    replay_only["obs"], replay_only["actions"], replay_only["rewards"],
+                    replay_only["next_obs"], replay_only["dones"],
+                    is_demo=args.trainer_variant == "ddpgfd",
+                    protect=args.trainer_variant == "ddpgfd")
+                print(f"Prefilled REPLAY-ONLY transitions (not in BC)={added_ro} "
+                      f"paths={args.demo_replay_only_path}", flush=True)
+
         if demo_data is not None and args.demo_prefill and restored_replay_count > 0:
             print("Skipped demonstration prefill because the checkpoint replay was restored.", flush=True)
 
-        if demo_data is not None and args.demo_bc_epochs > 0 and (not resume_checkpoint or args.demo_bc_on_resume):
+        # BC training set = --demo-path + --demo-bc-path (imitation-only pairs); replay-only excluded.
+        _bc_pairs = _load_bc_pairs(args.demo_bc_path, obs_dim, action_size) if getattr(
+            args, "demo_bc_path", None) else None
+        if _bc_pairs is not None:
+            print(f"Loaded imitation-only BC pairs (BC loss ONLY, not replayed) "
+                  f"transitions={len(_bc_pairs['actions'])} paths={args.demo_bc_path}", flush=True)
+        _bc_train = _combine_bc_sources(demo_data, _bc_pairs)
+        _bc_ran = False
+        _bc_demo_validation = None
+        if getattr(args, "demo_validation_path", None):
+            _bc_demo_validation = load_demonstration_arrays(
+                args.demo_validation_path, obs_dim, action_size, max_transitions=0)
+            if _bc_demo_validation is not None:
+                print(f"Loaded BC validation transitions={len(_bc_demo_validation['actions'])} "
+                      f"paths={args.demo_validation_path}", flush=True)
+        if _bc_train is not None and args.demo_bc_epochs > 0 and (not resume_checkpoint or args.demo_bc_on_resume):
             pretrain_actor_behavior_cloning(
                 actor,
-                demo_data,
+                _bc_train,
                 epochs=args.demo_bc_epochs,
                 batch_size=args.demo_bc_batch_size,
                 learning_rate=args.demo_bc_learning_rate or args.actor_learning_rate,
                 action_low=action_low,
                 action_high=action_high,
+                demo_validation=_bc_demo_validation,
             )
             target_actor.set_weights(actor.get_weights())
+            _bc_ran = True
+            _bc_actor_path = (args.bc_actor_weights_path
+                              or _bc_actor_path_default(args.actor_weights_path))
+            Path(_bc_actor_path).parent.mkdir(parents=True, exist_ok=True)
+            actor.save_weights(_bc_actor_path)
+            print(f"Saved BC actor weights (pre-RL): {_bc_actor_path}", flush=True)
 
         if (
             args.trainer_variant == "ddpgfd"
@@ -3453,6 +4518,9 @@ def main(trainer_variant):
                     variant="ddpgfd",
                     learner_update=pretrain_update,
                     ddpgfd_actor_priority_weight=args.ddpgfd_actor_priority_weight,
+                    grad_clip_norm=args.grad_clip_norm,
+                    grad_clip_adaptive=args.grad_clip_adaptive,
+                    grad_clip_k=args.grad_clip_k,
                 )
                 if pretrain_update % args.target_update_every == 0:
                     soft_update(target_actor, actor, args.tau)
@@ -3464,10 +4532,36 @@ def main(trainer_variant):
                         flush=True,
                     )
 
-        critic_warmup_target = max(0, int(args.critic_warmup_updates)) if resume_checkpoint else 0
+        critic_warmup_source = (
+            "checkpoint resume"
+            if resume_checkpoint
+            else "actor warm start"
+            if args.policy_path
+            else "behavior cloning"
+            if _bc_ran
+            else None
+        )
+        critic_warmup_target = (
+            max(0, int(args.critic_warmup_updates))
+            if critic_warmup_source is not None
+            else 0
+        )
+
+        # Deterministic BC gate: after BC (+ saved BC actor), ONE frozen evaluation, then STOP
+        # before any RL update. Fails closed if BC did not actually run.
+        if getattr(args, "stop_after_bc", False):
+            if not _bc_ran:
+                raise SystemExit(
+                    "--stop-after-bc requires behavior cloning to have actually run: pass "
+                    "--demo-path and --demo-bc-epochs>0 (and, on resume, --demo-bc-on-resume).")
+            _run_stop_after_bc_eval_common(
+                args, checkpoint, checkpoint_manager, best_tracker, start_episode, buffer)
+            return
+
         if critic_warmup_target > 0:
             print(
-                f"Resume critic warmup: updates={critic_warmup_target} actor=frozen",
+                f"Critic warmup after {critic_warmup_source}: "
+                f"updates={critic_warmup_target} actor=frozen",
                 flush=True,
             )
 
@@ -3507,11 +4601,13 @@ def main(trainer_variant):
                 random_action_high,
                 actor_drive_indices,
                 critic_warmup_target,
+                checkpoint.policy_updates_since_warmup,
                 budget,
                 critic2=critic2,
                 target_critic2=target_critic2,
                 critic2_optimizer=critic2_optimizer,
                 demo_data=demo_data,
+                demo_validation=_bc_demo_validation,
             )
             actor.save_weights(args.actor_weights_path)
             critic.save_weights(args.critic_weights_path)
@@ -3550,6 +4646,9 @@ def main(trainer_variant):
             batch_size=args.batch_size,
             compiled=args.tf_compile_learner,
             xla=args.tf_xla,
+            grad_clip_norm=args.grad_clip_norm,
+            grad_clip_adaptive=args.grad_clip_adaptive,
+            grad_clip_k=args.grad_clip_k,
         )
 
         def refill_recovery_replay():
@@ -3582,10 +4681,25 @@ def main(trainer_variant):
         if recovery_handler is not None:
             recovery_handler.set_post_restore(recovery_runtime.post_restore)
 
+        sync_throttle = SyncUpdateThrottle(args)
+        # Q-filter is enabled only after this many REAL policy updates since the critic warmup ended.
+        q_filter_start = max(0, int(getattr(args, "demo_q_filter_start_policy_updates", 0)))
+        policy_update_counter = checkpoint.policy_updates_since_warmup
+        last_bc_weight = 0.0
+        qf_last = {"active": False, "fraction": None, "selected": 0, "total": 0,
+                   "expert_q": None, "policy_q": None}
+        bc_reference_actor = None
+        if getattr(args, "gradient_telemetry_every", 0) > 0 and variant_uses_joint_bc(args.trainer_variant):
+            bc_reference_actor = tf.keras.models.clone_model(actor)
+            bc_reference_actor.set_weights(actor.get_weights())
         last_saved_episode = None
         for episode in range(start_episode, args.num_episodes):
             opponent_match = opponent_pool.start_episode(actor, episode)
-            use_random_exploration = episode < max(0, args.random_exploration_episodes)
+            use_random_exploration = should_use_random_exploration(
+                episode,
+                args,
+                len(buffer),
+            )
             reset_progress_max = curriculum_reset_progress_max(episode, args)
             env_states = []
             for env_idx, env in enumerate(envs):
@@ -3594,6 +4708,7 @@ def main(trainer_variant):
                     "max_steps": args.max_steps_per_episode,
                     "physics_frames_per_step": args.physics_frames_per_step,
                     "training_mode": True,
+                    **scenario_curriculum_config(args),
                 }
                 if reset_progress_max is not None:
                     scenario_config.update(reset_progress_min=0.0, reset_progress_max=reset_progress_max)
@@ -3758,6 +4873,7 @@ def main(trainer_variant):
                 for env, state, action, step_result in stepper.step(step_requests):
                     next_obs, reward, terminated, truncated, info = step_result
                     done = bool(terminated or truncated)
+                    transitions_added = 0
 
                     if args.multi_agent:
                         per_agent_rewards = np.asarray(info.get("per_agent_rewards"), dtype=np.float32)
@@ -3780,6 +4896,7 @@ def main(trainer_variant):
                                     bool(per_agent_terminated[agent_idx] or terminated),
                                 )
                                 budget.consume(1)
+                                transitions_added += 1
                             state["ep_reward"][agent_idx] += per_agent_rewards[agent_idx]
                             state["action_sum"][agent_idx] += action[agent_idx]
                             state["action_count"][agent_idx, 0] += 1.0
@@ -3793,6 +4910,7 @@ def main(trainer_variant):
                         update_episode_diagnostics(state, info.get("agent_info", {}))
                         buffer.add(state["obs"], action, float(reward), next_obs, bool(terminated))
                         budget.consume(1)
+                        transitions_added += 1
                         state["ep_reward"] += float(reward)
                         state["action_sum"] += action
                         state["action_count"] += 1.0
@@ -3804,46 +4922,101 @@ def main(trainer_variant):
                     state["obs"] = next_obs
                     state["done"] = done
 
-                    if len(buffer) >= max(args.replay_warmup, args.batch_size):
-                        update_actor = recovery_runtime.should_update_policy()
-                        learner_update = int(critic_optimizer.iterations.numpy()) + 1
-                        bc_weight = scheduled_bc_weight(
-                            learner_update,
-                            args.demo_bc_weight_start,
-                            args.demo_bc_weight_end,
-                            args.demo_bc_decay_updates,
+                    if (
+                        len(buffer) >= max(args.replay_warmup, args.batch_size)
+                        and not best_tracker.health_monitor.verification_pending
+                    ):
+                        updates_due = sync_throttle.updates_due(
+                            transitions_added,
+                            env_steps=1,
                         )
-                        result = det_learner(
-                            buffer,
-                            update_actor=update_actor,
-                            learner_update=learner_update,
-                            bc_weight=bc_weight,
-                        )
-                        critic_losses.append(result["critic_loss"])
-                        if result["critic2_loss"] is not None:
-                            critic2_losses.append(result["critic2_loss"])
-                        if result["bc_loss"] is not None:
-                            bc_losses.append(result["bc_loss"])
-                        warmup_completed = recovery_runtime.record_critic_update()
-                        if result["actor_loss"] is not None:
-                            actor_losses.append(result["actor_loss"])
-                        elif warmup_completed:
-                            print(
-                                f"Critic warmup complete after updates={recovery_runtime.critic_updates}; "
-                                "actor will be unfrozen on the next update.",
-                                flush=True,
+                        for _update in range(updates_due):
+                            update_actor = recovery_runtime.should_update_policy()
+                            learner_update = int(critic_optimizer.iterations.numpy()) + 1
+                            # BC weight decays over POLICY updates since the warmup ended -- NOT over
+                            # critic updates -- so it stays at the start weight during the warmup.
+                            policy_updates_since_warmup = policy_update_count(
+                                policy_update_counter
                             )
+                            bc_weight = scheduled_bc_weight(
+                                policy_updates_since_warmup,
+                                args.demo_bc_weight_start,
+                                args.demo_bc_weight_end,
+                                args.demo_bc_decay_updates,
+                            )
+                            # Delay the Q-filter until enough real policy updates have run.
+                            q_filter_active = policy_updates_since_warmup >= q_filter_start
+                            q_weight = (
+                                scheduled_q_weight(
+                                    policy_updates_since_warmup,
+                                    args.demo_q_weight_start,
+                                    args.demo_q_weight_end,
+                                    args.demo_q_weight_ramp_updates,
+                                )
+                                if variant_uses_joint_bc(args.trainer_variant)
+                                else 1.0
+                            )
+                            grad_tele = (
+                                args.gradient_telemetry_every > 0
+                                and policy_updates_since_warmup % args.gradient_telemetry_every == 0
+                            )
+                            last_bc_weight = bc_weight
+                            result = det_learner(
+                                buffer,
+                                update_actor=update_actor,
+                                learner_update=learner_update,
+                                bc_weight=bc_weight,
+                                q_filter_active=q_filter_active,
+                                q_weight=q_weight,
+                                gradient_telemetry=grad_tele,
+                                bc_reference_actor=bc_reference_actor,
+                            )
+                            if result["policy_updated"]:
+                                increment_policy_update_count(
+                                    policy_update_counter
+                                )
+                            if result.get("q_filter_active"):
+                                qf_last = {
+                                    "active": True,
+                                    "fraction": result["q_filter_selected_fraction"],
+                                    "selected": result["q_filter_selected_count"],
+                                    "total": result["q_filter_total_count"],
+                                    "expert_q": result["expert_q_mean"],
+                                    "policy_q": result["policy_q_mean"],
+                                }
+                            elif result["policy_updated"]:
+                                qf_last["active"] = False
+                            critic_losses.append(result["critic_loss"])
+                            if result["critic2_loss"] is not None:
+                                critic2_losses.append(result["critic2_loss"])
+                            if result["bc_loss"] is not None:
+                                bc_losses.append(result["bc_loss"])
+                            warmup_completed = recovery_runtime.record_critic_update()
+                            if warmup_completed and getattr(args, "stop_after_critic_warmup", False):
+                                _run_critic_warmup_audit(
+                                    args, checkpoint, checkpoint_manager, buffer, episode,
+                                    actor, critic, critic2, _bc_demo_validation,
+                                    action_low, action_high,
+                                )
+                            if result["actor_loss"] is not None:
+                                actor_losses.append(result["actor_loss"])
+                            elif warmup_completed:
+                                print(
+                                    f"Critic warmup complete after updates={recovery_runtime.critic_updates}; "
+                                    "actor will be unfrozen on the next update.",
+                                    flush=True,
+                                )
 
-                        target_due = (
-                            result["target_update_due"]
-                            if variant_uses_td3(args.trainer_variant)
-                            else learner_update % args.target_update_every == 0
-                        )
-                        if target_due:
-                            soft_update(target_actor, actor, args.tau)
-                            soft_update(target_critic, critic, args.tau)
-                            if critic2 is not None:
-                                soft_update(target_critic2, critic2, args.tau)
+                            target_due = (
+                                result["target_update_due"]
+                                if variant_uses_td3(args.trainer_variant)
+                                else learner_update % args.target_update_every == 0
+                            )
+                            if target_due:
+                                soft_update(target_actor, actor, args.tau)
+                                soft_update(target_critic, critic, args.tau)
+                                if critic2 is not None:
+                                    soft_update(target_critic2, critic2, args.tau)
                 if budget.exhausted:
                     break
 
@@ -3870,11 +5043,19 @@ def main(trainer_variant):
             finish_rate = diagnostics["finishes"] / max(controlled_agents, 1)
             collision_rate = diagnostics["collisions"] / max(controlled_agents, 1)
             stall_rate = diagnostics["stalls"] / max(controlled_agents, 1)
-            critic_warmup_remaining = recovery_runtime.warmup_left
+            replay_warmup_left = replay_warmup_remaining(buffer, args)
+            critic_warmup_left = recovery_runtime.warmup_left
             print_episode_metrics(episode, [
                 ("mode", [
                     ("algorithm", args.trainer_variant),
-                    ("exploration", "random" if use_random_exploration else "policy"),
+                    (
+                        "exploration",
+                        "warmup_random"
+                        if replay_warmup_left > 0
+                        else "scheduled_random"
+                        if use_random_exploration
+                        else "policy",
+                    ),
                     ("noise", f"{noise_std:.3f}"),
                     ("opponent", opponent_match.label),
                     *(([("reset_progress_max", f"{reset_progress_max:.3f}")]) if reset_progress_max is not None else []),
@@ -3885,7 +5066,8 @@ def main(trainer_variant):
                 ]),
                 ("agents", [
                     ("finish", f"{diagnostics['finishes']}/{controlled_agents} ({finish_rate:.2%})"),
-                    ("collision", f"{diagnostics['collisions']}/{controlled_agents} ({collision_rate:.2%})"),
+                    ("collision", format_collision_diagnostics(
+                        diagnostics, controlled_agents)),
                     ("stall", f"{diagnostics['stalls']}/{controlled_agents} ({stall_rate:.2%})"),
                 ]),
                 ("actions", [
@@ -3898,12 +5080,21 @@ def main(trainer_variant):
                     *(([("protected_demos", buffer.protected_demo_count)]) if args.trainer_variant == "ddpgfd" else []),
                     ("critic_updates", len(critic_losses)),
                     ("policy_updates", len(actor_losses)),
-                    ("warmup_left", critic_warmup_remaining),
+                    ("replay_warmup_left", replay_warmup_left),
+                    ("critic_warmup_left", critic_warmup_left),
                     ("actor_loss", f"{float(np.mean(actor_losses)) if actor_losses else 0.0:.5f}"),
                     ("critic_loss", f"{float(np.mean(critic_losses)) if critic_losses else 0.0:.5f}"),
                     *(([("critic2_loss", f"{float(np.mean(critic2_losses)):.5f}")]) if critic2_losses else []),
                     *(([("bc_loss", f"{float(np.mean(bc_losses)):.5f}")]) if bc_losses else []),
-                    *(([("bc_weight", f"{scheduled_bc_weight(int(critic_optimizer.iterations.numpy()), args.demo_bc_weight_start, args.demo_bc_weight_end, args.demo_bc_decay_updates):.4f}")]) if variant_uses_joint_bc(args.trainer_variant) else []),
+                    *(([
+                        ("bc_weight", f"{last_bc_weight:.4f}"),
+                        (
+                            "policy_updates_since_warmup",
+                            policy_update_count(policy_update_counter),
+                        ),
+                        ("q_filter_active", qf_last["active"]),
+                        ("q_filter_selected_fraction", "n/a" if qf_last["fraction"] is None else f"{qf_last['fraction']:.3f}"),
+                    ]) if variant_uses_joint_bc(args.trainer_variant) else []),
                 ]),
             ], args.log_format)
             if args.log_details:

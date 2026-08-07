@@ -41,6 +41,15 @@ class RunGenericPolicyTests(unittest.TestCase):
         self.assertFalse(parse_args(["--no-initial-reset"]).initial_reset)
         self.assertTrue(parse_args([]).initial_reset)
 
+    def test_policy_export_flags_are_explicit(self):
+        args = parse_args([
+            "--export-policy-dir",
+            "checkpoints/exported",
+            "--export-policy-only",
+        ])
+        self.assertEqual(args.export_policy_dir, "checkpoints/exported")
+        self.assertTrue(args.export_policy_only)
+
     def test_no_reset_preserves_state_after_every_terminal_boundary(self):
         args = parse_args(["--no-initial-reset", "--no-reset"])
         self.assertTrue(should_preserve_state(args, 0))

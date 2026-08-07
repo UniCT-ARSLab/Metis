@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "metis-rl"
+version = "0.5.0"
+description = "Python training runtime for the Metis Godot reinforcement-learning framework."
+readme = "PACKAGE.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [
+    {name = "Metis contributors"},
+]
+dependencies = [
+    "gymnasium",
+    "numpy",
+]
+
+[project.optional-dependencies]
+native = ["tensorflow"]
+dashboard = ["flask==3.0.3", "flask-sock==0.7.0"]
+export = ["tf2onnx==1.17.0"]
+sb3 = [
+    "stable-baselines3==2.8.0",
+    "tensorboard",
+]
+
+[project.scripts]
+metis = "metis_cli:main"
+metis-train = "train:main"
+metis-run = "run:main"
+metis-record = "recorder:main"
+metis-export = "export:main"
+metis-doctor = "core.doctor:main"
+
+[tool.setuptools]
+py-modules = ["train", "run", "recorder", "export", "metis_cli"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["algorithms*", "backends*", "core*", "dashboard*", "envs*", "tools*"]
+exclude = ["tests*"]
+

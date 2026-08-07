@@ -1,0 +1,401 @@
+[gd_scene format=3 uid="uid://c0reachhold1abz"]
+
+[ext_resource type="Script" uid="uid://8vdp3j6ux5cb" path="res://scenarios/robotarms/openarm_scenario.gd" id="1_c7otc"]
+[ext_resource type="Script" uid="uid://d38lybllmy6tq" path="res://addons/metis/runtime/bridge_server.gd" id="2_p4l8n"]
+[ext_resource type="Script" uid="uid://cun4ha1fidr8n" path="res://addons/metis/runtime/agent/ScenarioController.gd" id="3_t56ga"]
+[ext_resource type="Script" uid="uid://dwsnfjalr8jc7" path="res://addons/metis/runtime/agent/progress/MethodProgressProvider.gd" id="4_dyl7y"]
+[ext_resource type="Script" uid="uid://b47ph323gt6gl" path="res://addons/metis/runtime/agent/events/ScenarioEventSystem.gd" id="5_ufwgr"]
+[ext_resource type="Script" uid="uid://botsx3bwjduj2" path="res://addons/metis/runtime/agent/events/ManualScenarioEventSource.gd" id="6_05p7a"]
+[ext_resource type="Script" uid="uid://tn1jug3aq4ll" path="res://addons/metis/runtime/agent/ScenarioRewardSystem.gd" id="7_qnrhf"]
+[ext_resource type="Script" uid="uid://bmmjchpjospjo" path="res://addons/metis/runtime/agent/scenario_reward_components/ProgressDeltaScenarioReward.gd" id="8_f4m3y"]
+[ext_resource type="Script" uid="uid://5rg0xs5vr24r" path="res://addons/metis/runtime/agent/scenario_reward_components/ProgressStallScenarioReward.gd" id="9_ohtnr"]
+[ext_resource type="Script" uid="uid://b0mpnu83er6il" path="res://addons/metis/runtime/agent/scenario_reward_components/EventScenarioReward.gd" id="10_8jpep"]
+[ext_resource type="Script" uid="uid://cftry1v3ck1xm" path="res://addons/metis/runtime/agent/scenario_reward_components/ProximityScenarioReward.gd" id="11_6bsc0"]
+[ext_resource type="PackedScene" uid="uid://creachholdagent1" path="res://agents/RobotArms/openarm/openarm_reach_hold_agent.tscn" id="12_c7otc"]
+[ext_resource type="Script" uid="uid://gy2re8a7p5iv" path="res://addons/metis/runtime/agent/scenario_reward_components/TargetDistanceDeltaScenarioReward.gd" id="13_distance"]
+[ext_resource type="Script" uid="uid://ckl71en3qhivm" path="res://addons/metis/runtime/agent/scenario_reward_components/TerminalProgressScenarioReward.gd" id="14_terminal"]
+[ext_resource type="Script" uid="uid://c447l2hwj2tlw" path="res://addons/metis/runtime/agent/sampling/TargetSamplingRegion3D.gd" id="15_region"]
+[ext_resource type="Script" uid="uid://dhlltklovd0jh" path="res://addons/metis/runtime/agent/scenario_reward_components/TargetDistancePotentialScenarioReward.gd" id="16_precision"]
+[ext_resource type="Script" path="res://scenarios/robotarms/debug_hud.gd" id="17_hud"]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_ko6j8"]
+sky_horizon_color = Color(0.66224277, 0.6717428, 0.6867428, 1)
+ground_horizon_color = Color(0.66224277, 0.6717428, 0.6867428, 1)
+
+[sub_resource type="Sky" id="Sky_f23b0"]
+sky_material = SubResource("ProceduralSkyMaterial_ko6j8")
+
+[sub_resource type="Environment" id="Environment_721ns"]
+background_mode = 2
+sky = SubResource("Sky_f23b0")
+tonemap_mode = 2
+glow_enabled = true
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_iyblc"]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_wchse"]
+albedo_color = Color(0.31599998, 0.6, 0.17400002, 1)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_m16lm"]
+size = Vector3(2, 0.001, 2)
+
+[sub_resource type="SphereMesh" id="SphereMesh_jfawp"]
+radius = 0.01
+height = 0.02
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_w0qjo"]
+albedo_color = Color(1, 0, 0.8000002, 1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_jfawp"]
+size = Vector3(0.3, 0.45, 0.39)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_c7otc"]
+size = Vector3(0.3, 0.45, 0.39)
+
+[sub_resource type="BoxMesh" id="BoxMesh_h6m26"]
+size = Vector3(0.2734375, 0.14, 0.20019531)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_p4l8n"]
+size = Vector3(0.2734375, 0.14, 0.20019531)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_h6m26"]
+size = Vector3(0.2, 0.17, 0.29)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_t56ga"]
+size = Vector3(0.2, 0.17, 0.29)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_dyl7y"]
+size = Vector3(0.2, 0.17, 0.29)
+
+[node name="OpenArmScenario" type="Node3D" unique_id=575438428 node_paths=PackedStringArray("target_spawns", "target_spawns_root", "easy_target_region", "medium_target_region", "hard_target_region", "bootstrap_target_pose")]
+script = ExtResource("1_c7otc")
+target_spawns = [NodePath("Spawns/Marker3D"), NodePath("Spawns/Marker3D2"), NodePath("Spawns/Marker3D3"), NodePath("Spawns/Marker3D4"), NodePath("Spawns/Marker3D5"), NodePath("Spawns/Marker3D6"), NodePath("Spawns/Marker3D7"), NodePath("Spawns/Marker3D8")]
+target_spawns_root = NodePath("Spawns")
+easy_target_region = NodePath("EasyArea")
+medium_target_region = NodePath("MediumArea")
+hard_target_region = NodePath("HardArea")
+adaptive_medium_region_initial_weight = 0.5
+per_region_gate_enabled = true
+reverse_curriculum_enabled = false
+bootstrap_target_pose = NodePath("BootstrapTargetPose")
+bootstrap_joint_positions = PackedFloat32Array()
+bootstrap_pose_joints = Array[PackedFloat32Array]([])
+adaptive_reach_stage_a_distance = 0.04
+adaptive_reach_stage_a_angle = 45.0
+adaptive_hold_physics_frames = 20
+adaptive_hold_max_joint_speed = 0.3
+adaptive_orientation_initial_weight = 0.1
+use_discrete_stage_curriculum = true
+bootstrap_pose_targets = Array[Vector3]([Vector3(0.356819, 0.57581, 0.140207), Vector3(0.439822, 0.594364, 0.120037), Vector3(0.37119, 0.577251, 0.123339)])
+bootstrap_curriculum_start_episode = 500
+bootstrap_curriculum_full_episode = 6000
+bootstrap_min_regular_reset_fraction = 0.15
+continuous_target_sampling = false
+continuous_target_sampling_start_episode = 4000
+spatial_curriculum_start_episode = 4000
+spatial_curriculum_full_episode = 6500
+intermediate_joint_jitter_degrees = 0.0
+late_joint_jitter_degrees = 0.0
+continuous_pose_tracking = false
+target_yaw_randomization_degrees = 0.0
+relocate_target_during_training = false
+hold_curriculum_stage1_until = 3200
+hold_curriculum_stage2_until = 5200
+
+[node name="BridgeServer" type="Node" parent="." unique_id=831052347]
+script = ExtResource("2_p4l8n")
+controller_path = NodePath("../ScenarioController")
+metadata/_custom_type_script = "uid://d38lybllmy6tq"
+
+[node name="ScenarioController" type="Node" parent="." unique_id=1131101038 node_paths=PackedStringArray("controlled_agents")]
+script = ExtResource("3_t56ga")
+controlled_agents = [NodePath("../OpenarmAgent")]
+physics_frames_per_step = 3
+max_steps = 300
+continue_after_success = false
+metadata/_custom_type_script = "uid://cun4ha1fidr8n"
+
+[node name="ProgressProvider" type="Node" parent="ScenarioController" unique_id=1761560080]
+script = ExtResource("4_dyl7y")
+metadata/_custom_type_script = "uid://dwsnfjalr8jc7"
+
+[node name="ScenarioEventSystem" type="Node" parent="ScenarioController" unique_id=1938388571]
+script = ExtResource("5_ufwgr")
+metadata/_custom_type_script = "uid://b47ph323gt6gl"
+
+[node name="GoalReached" type="Node" parent="ScenarioController/ScenarioEventSystem" unique_id=80227875]
+script = ExtResource("6_05p7a")
+event_name = "target_reached"
+metadata/_custom_type_script = "uid://botsx3bwjduj2"
+
+[node name="Collision" type="Node" parent="ScenarioController/ScenarioEventSystem" unique_id=735569373]
+script = ExtResource("6_05p7a")
+event_name = "collision"
+terminal_reason = "collision"
+metadata/_custom_type_script = "uid://botsx3bwjduj2"
+
+[node name="SelfCollision" type="Node" parent="ScenarioController/ScenarioEventSystem" unique_id=735569374]
+script = ExtResource("6_05p7a")
+event_name = "self_collision"
+terminal_reason = "self_collision"
+metadata/_custom_type_script = "uid://botsx3bwjduj2"
+
+[node name="ScenarioRewardSystem" type="Node" parent="ScenarioController" unique_id=1091240584]
+script = ExtResource("7_qnrhf")
+metadata/_custom_type_script = "uid://tn1jug3aq4ll"
+
+[node name="Progress" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=1358041893]
+script = ExtResource("8_f4m3y")
+term_name = "target_progress"
+metadata/_custom_type_script = "uid://bmmjchpjospjo"
+
+[node name="NearTargetPrecision" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=2019440179]
+script = ExtResource("16_precision")
+term_name = "target_distance_precision"
+
+[node name="NoProgress" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=264087218]
+script = ExtResource("9_ohtnr")
+terminate_on_stalled_progress = true
+stalled_progress_window_steps = 120
+stalled_progress_penalty = 0.0
+no_progress_step_penalty = 0.0
+no_progress_penalty_grace_steps = 30
+ignore_stall_above_progress = 0.95
+metadata/_custom_type_script = "uid://5rg0xs5vr24r"
+
+[node name="GoalReward" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=13240732]
+script = ExtResource("10_8jpep")
+event_name = "target_reached"
+reward = 50.0
+metadata/_custom_type_script = "uid://b0mpnu83er6il"
+
+[node name="CollisionPenalty" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=35669876]
+script = ExtResource("10_8jpep")
+event_name = "collision"
+reward = -25.0
+term_name = "collision"
+metadata/_custom_type_script = "uid://b0mpnu83er6il"
+
+[node name="SelfCollisionPenalty" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=35669877]
+script = ExtResource("10_8jpep")
+event_name = "self_collision"
+reward = -35.0
+term_name = "self_collision"
+metadata/_custom_type_script = "uid://b0mpnu83er6il"
+
+[node name="TerminalFailure" type="Node" parent="ScenarioController/ScenarioRewardSystem" unique_id=1291806604]
+script = ExtResource("14_terminal")
+base_failure_penalty = -10.0
+remaining_progress_penalty = 0.0
+failure_terminal_reasons = PackedStringArray("progress_stalled")
+penalize_truncation = false
+penalize_unclassified_terminal = false
+term_name = "terminal_failure"
+
+[node name="Environment" type="Node3D" parent="." unique_id=2095345585]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="Environment" unique_id=1848979732]
+environment = SubResource("Environment_721ns")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="Environment" unique_id=1714061833]
+transform = Transform3D(-0.8660254, -0.43301278, 0.25, 0, 0.49999997, 0.86602545, -0.50000006, 0.75, -0.43301266, 0, 0, 0)
+shadow_enabled = true
+
+[node name="Floor" type="StaticBody3D" parent="Environment" unique_id=1953206477]
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Environment/Floor" unique_id=2036448328]
+mesh = SubResource("PlaneMesh_iyblc")
+surface_material_override/0 = SubResource("StandardMaterial3D_wchse")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Environment/Floor" unique_id=1159525261]
+shape = SubResource("BoxShape3D_m16lm")
+
+[node name="Camera3D" type="Camera3D" parent="Environment" unique_id=1342671084]
+transform = Transform3D(0.73256814, -0.37220475, 0.56991893, 0, 0.837262, 0.54680204, -0.68069375, -0.4005698, 0.6133514, 0.7173967, 0.93429035, 0.5928596)
+
+[node name="OpenarmAgent" parent="." unique_id=1614782724 node_paths=PackedStringArray("target", "target_pose") instance=ExtResource("12_c7otc")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.14644837, 0)
+default_joint_speed = 0.05
+target = NodePath("../Target")
+target_pose = NodePath("../Target/GraspPose")
+workspace_scale = 1.0
+distance_progress_mode = 1
+pose_progress_mode = 1
+self_body_link_names = []
+self_check_link_names = []
+
+[node name="Target" type="MeshInstance3D" parent="." unique_id=1913792666]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.39823195, 0.49620575, 0.10192487)
+mesh = SubResource("SphereMesh_jfawp")
+surface_material_override/0 = SubResource("StandardMaterial3D_w0qjo")
+
+[node name="GraspPose" type="Marker3D" parent="Target" unique_id=1111347321]
+
+[node name="BootstrapTargetPose" type="Marker3D" parent="." unique_id=38383699]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.356819, 0.57581, 0.140207)
+
+[node name="Workcell" type="Node3D" parent="." unique_id=637885706]
+
+[node name="Table" type="StaticBody3D" parent="Workcell" unique_id=131585194 groups=["robot_obstacle"]]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.47082388, 0.22550002, 0)
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Workcell/Table" unique_id=1505930290]
+mesh = SubResource("BoxMesh_jfawp")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Workcell/Table" unique_id=1233347521]
+shape = SubResource("BoxShape3D_c7otc")
+
+[node name="Support" type="StaticBody3D" parent="Workcell" unique_id=1703251834]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.070390224, 0)
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Workcell/Support" unique_id=384732176]
+mesh = SubResource("BoxMesh_h6m26")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Workcell/Support" unique_id=805769561]
+shape = SubResource("BoxShape3D_p4l8n")
+
+[node name="Spawns" type="Node3D" parent="." unique_id=1894243734]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.18397185, 0.40925577, 0)
+visible = false
+
+[node name="Marker3D" type="Marker3D" parent="Spawns" unique_id=863117836]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.20857948, 0.12542307, 0.07814151)
+
+[node name="Marker3D2" type="Marker3D" parent="Spawns" unique_id=1756042663]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.20857948, 0.12542307, 0.03946642)
+
+[node name="Marker3D3" type="Marker3D" parent="Spawns" unique_id=946833682]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.20857948, 0.12542307, 0.014478788)
+
+[node name="Marker3D4" type="Marker3D" parent="Spawns" unique_id=1074538314]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.20857948, 0.12542307, -0.029518962)
+
+[node name="Marker3D5" type="Marker3D" parent="Spawns" unique_id=720042448]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.20857948, 0.12542307, -0.07385257)
+
+[node name="Marker3D21" type="Marker3D" parent="Spawns" unique_id=1672307945]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.26018572, 0.12542307, 0.07814151)
+
+[node name="Marker3D22" type="Marker3D" parent="Spawns" unique_id=528787388]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.26018572, 0.12542307, 0.03946642)
+
+[node name="Marker3D23" type="Marker3D" parent="Spawns" unique_id=384057309]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.26018572, 0.12542307, 0.014478788)
+
+[node name="Marker3D24" type="Marker3D" parent="Spawns" unique_id=1453713590]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.26018572, 0.12542307, -0.029518962)
+
+[node name="Marker3D25" type="Marker3D" parent="Spawns" unique_id=1901765550]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.26018572, 0.12542307, -0.07385257)
+
+[node name="Marker3D6" type="Marker3D" parent="Spawns" unique_id=1049433676]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.18545917, 0.12542307, -0.07385257)
+
+[node name="Marker3D7" type="Marker3D" parent="Spawns" unique_id=1055857737]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.18545917, 0.12542307, 0.09063281)
+
+[node name="Marker3D8" type="Marker3D" parent="Spawns" unique_id=2008720210]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.18545917, 0.12542307, 0.021793649)
+
+[node name="Marker3D9" type="Marker3D" parent="Spawns" unique_id=2008720211]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.225, 0.12542307, 0.02)
+
+[node name="Marker3D10" type="Marker3D" parent="Spawns" unique_id=2008720212]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.225, 0.12542307, 0.07)
+
+[node name="Marker3D11" type="Marker3D" parent="Spawns" unique_id=2008720213]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.225, 0.12542307, -0.05)
+
+[node name="Marker3D12" type="Marker3D" parent="Spawns" unique_id=2008720214]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.17, 0.12542307, 0.02)
+
+[node name="Marker3D13" type="Marker3D" parent="Spawns" unique_id=2008720215]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.17, 0.12542307, 0.07)
+
+[node name="Marker3D14" type="Marker3D" parent="Spawns" unique_id=2008720216]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.17, 0.12542307, -0.05)
+
+[node name="Marker3D15" type="Marker3D" parent="Spawns" unique_id=2008720217]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.2, 0.18, 0.02)
+
+[node name="Marker3D16" type="Marker3D" parent="Spawns" unique_id=2008720218]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.2, 0.18, 0.07)
+
+[node name="Marker3D17" type="Marker3D" parent="Spawns" unique_id=2008720219]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.2, 0.18, -0.05)
+
+[node name="Marker3D18" type="Marker3D" parent="Spawns" unique_id=2008720220]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.2, 0.15, 0.02)
+
+[node name="Marker3D19" type="Marker3D" parent="Spawns" unique_id=2008720221]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.2, 0.15, 0.07)
+
+[node name="Marker3D20" type="Marker3D" parent="Spawns" unique_id=2008720222]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.2, 0.15, -0.05)
+
+[node name="EasyArea" type="Area3D" parent="." unique_id=1774951385]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.41, 0.53, 0.14)
+collision_layer = 0
+collision_mask = 0
+monitoring = false
+monitorable = false
+script = ExtResource("15_region")
+region_name = &"easy"
+grid_size = Vector3i(4, 3, 5)
+allowed_cells = PackedInt32Array(17, 18, 22, 25, 28, 29, 30, 31, 33, 34, 41)
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="EasyArea" unique_id=1345184900]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)
+shape = SubResource("BoxShape3D_h6m26")
+debug_color = Color(0, 0.5699619, 0.8213285, 0.70980394)
+
+[node name="MediumArea" type="Area3D" parent="." unique_id=1193002421]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.41, 0.53, 0.14)
+collision_layer = 0
+collision_mask = 0
+monitoring = false
+monitorable = false
+script = ExtResource("15_region")
+region_name = &"medium"
+grid_size = Vector3i(4, 3, 5)
+allowed_cells = PackedInt32Array(16, 19, 21, 23, 32, 35, 40, 44)
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="MediumArea" unique_id=703407154]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)
+shape = SubResource("BoxShape3D_t56ga")
+debug_color = Color(0.6805188, 0.49452484, 1.92523e-07, 0.70980394)
+
+[node name="HardArea" type="Area3D" parent="." unique_id=798237495]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.41, 0.53, 0.14)
+collision_layer = 0
+collision_mask = 0
+monitoring = false
+monitorable = false
+script = ExtResource("15_region")
+region_name = &"hard"
+grid_size = Vector3i(4, 3, 5)
+allowed_cells = PackedInt32Array(6, 7, 8, 9, 10, 11, 20, 48, 52, 53, 56, 57)
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="HardArea" unique_id=762410259]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)
+shape = SubResource("BoxShape3D_dyl7y")
+debug_color = Color(0.95339435, 0.18183893, 0.1715549, 0.70980394)
+
+[node name="DebugHUD" type="CanvasLayer" parent="."]
+script = ExtResource("17_hud")
+
+[node name="BG" type="ColorRect" parent="DebugHUD"]
+offset_left = 6.0
+offset_top = 6.0
+offset_right = 372.0
+offset_bottom = 206.0
+color = Color(0, 0, 0, 0.55)
+
+[node name="Label" type="Label" parent="DebugHUD"]
+offset_left = 14.0
+offset_top = 12.0
+offset_right = 366.0
+offset_bottom = 200.0
+theme_override_colors/font_color = Color(0.65, 1, 0.65, 1)
+theme_override_font_sizes/font_size = 15
+text = "debug hud"

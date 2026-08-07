@@ -185,6 +185,10 @@ class GodotProcessManager:
                 args_prefix.append("--debug-navigation")
                 args_prefix.append("--debug-avoidance")
 
+            # Concurrent Godot 4.7 processes can race while rotating the default
+            # user://logs/godot.log. Give every environment its own engine log.
+            engine_log_path = self.logs_dir / f"godot_engine_{port}.log"
+            args_prefix += ["--log-file", str(engine_log_path)]
             args_prefix += ["--path", str(self.project_dir)]
             if self.scene_path:
                 args_prefix.append(str(self.scene_path))
@@ -205,6 +209,7 @@ class GodotProcessManager:
                 "proc": proc,
                 "log_file": log_file,
                 "log_path": log_path,
+                "engine_log_path": engine_log_path,
             })
 
         for item in self.processes:

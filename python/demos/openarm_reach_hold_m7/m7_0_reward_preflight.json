@@ -1,0 +1,1140 @@
+{
+  "config": {
+    "godot_bin": "/home/fedyfausto/Godot/Godot_v4.7.1-stable_linux.x86_64",
+    "port": 6572,
+    "plans": "python/demos/openarm_reach_hold_m7/plan_m7.json",
+    "curriculum_level": 0.4,
+    "near_lo": 0.02,
+    "near_hi": 0.03,
+    "bias_eps": 0.08,
+    "perjoint_eps": 0.08,
+    "bias_window": 25,
+    "max_steps": 300,
+    "max_poses": 44,
+    "out": "python/demos/openarm_reach_hold_m7/m7_0_reward_preflight.json"
+  },
+  "verdict": {
+    "n_probed": 42,
+    "n_stalling": 20,
+    "n_valid_direction": 20,
+    "nudge_directionality_frac": 1.0,
+    "gradient_ordering_frac": 0.85,
+    "toward_better_frac": 0.9,
+    "away_worse_frac": 0.95,
+    "gradient_hard_cells_frac": 1.0,
+    "n_hard": 6,
+    "stall_positive_reward_frac": 0.65,
+    "n_stall_measured": 20,
+    "toward_reaches_success_frac": 0.55,
+    "per_cell": {
+      "17": {
+        "n": 2,
+        "gradient_ok_frac": 1.0
+      },
+      "18": {
+        "n": 2,
+        "gradient_ok_frac": 0.5
+      },
+      "22": {
+        "n": 4,
+        "gradient_ok_frac": 0.75
+      },
+      "28": {
+        "n": 2,
+        "gradient_ok_frac": 1.0
+      },
+      "30": {
+        "n": 4,
+        "gradient_ok_frac": 1.0
+      },
+      "33": {
+        "n": 2,
+        "gradient_ok_frac": 0.5
+      },
+      "41": {
+        "n": 4,
+        "gradient_ok_frac": 1.0
+      }
+    },
+    "PASS": false
+  },
+  "rows": [
+    {
+      "cell": 17,
+      "seed": 4300001,
+      "k": 278,
+      "dist_k": 0.0255482792854309,
+      "ret_composite": 0.1491206075390406,
+      "ret_toward": 1.3862850532123927,
+      "ret_away": -1.7077624941559804,
+      "toward_reached": false,
+      "composite_reached": false,
+      "toward_min_dist": 0.00627691438421607,
+      "composite_min_dist": 0.0228896718472242,
+      "away_min_dist": 0.0255482792854309,
+      "stall_mean_reward": 0.006778209433592755,
+      "perjoint": []
+    },
+    {
+      "cell": 17,
+      "seed": 4300002,
+      "k": 284,
+      "dist_k": 0.0277661047875881,
+      "ret_composite": 0.08759651727181518,
+      "ret_toward": 1.239983162233655,
+      "ret_away": -1.4385069434719275,
+      "toward_reached": false,
+      "composite_reached": false,
+      "toward_min_dist": 0.0100059257820249,
+      "composite_min_dist": 0.0261025708168745,
+      "away_min_dist": 0.0277661047875881,
+      "stall_mean_reward": 0.005474782329488449,
+      "perjoint": []
+    },
+    {
+      "cell": 17,
+      "seed": 4300003,
+      "k": 216,
+      "dist_k": 0.0255292989313602,
+      "ret_composite": 50.481165561434736,
+      "ret_toward": 50.792458352821974,
+      "ret_away": -1.1385206440559776,
+      "toward_reached": true,
+      "composite_reached": true,
+      "toward_min_dist": 0.00586174800992012,
+      "composite_min_dist": 0.0176673736423254,
+      "away_min_dist": 0.0255292989313602,
+      "stall_mean_reward": NaN,
+      "perjoint": []
+    },
+    {
+      "cell": 18,
+      "seed": 4400000,
+      "k": 256,
+      "dist_k": 0.0284206923097372,
+      "ret_composite": -0.0677256936844809,
+      "ret_toward": -0.6443534818551391,
+      "ret_away": -2.008750221694229,
+      "toward_reached": false,
+      "composite_reached": false,
+      "toward_min_dist": 0.00263155973516405,
+      "composite_min_dist": 0.0283093471080065,
+      "away_min_dist": 0.0284206923097372,
+      "stall_mean_reward": -0.0015392203110109297,
+      "perjoint": []
+    },
+    {
+      "cell": 18,
+      "seed": 4400003,
+      "k": 220,
+      "dist_k": 0.028610497713089,
+      "ret_composite": -0.5372434061028641,
+      "ret_toward": 50.96248101525594,
+      "ret_away": -1.1232242185435162,
+      "toward_reached": true,
+      "composite_reached": false,
+      "toward_min_dist": 0.00363152171485126,
+      "composite_min_dist": 0.0286103580147028,
+      "away_min_dist": 0.028610497713089,
+      "stall_mean_reward": -0.006715542576285802,
+      "perjoint": []
+    },
+    {
+      "cell": 22,
+      "seed": 4800000,
+      "k": 236,
+      "dist_k": 0.0251934472471476,
+      "ret_composite": -0.04824250552993831,
+      "ret_toward": -0.13083865379020027,
+      "ret_away": -0.722439946419039,
+      "toward_reached": false,
+      "composite_reached": false,
+      "toward_min_dist": 0.0214712843298912,
+      "composite_min_dist": 0.0246919989585876,
+      "away_min_dist": 0.0251934472471476,
+      "stall_mean_reward": -0.000753789148905286,
+      "perjoint": []
+    },
+    {
+      "cell": 22,
+      "seed": 4800001,
+      "k": 236,
+      "dist_k": 0.022631237283349,
+      "ret_composite": 0.10888031194756877,
+      "ret_toward": 50.88561480057293,
+      "ret_away": -1.1733577543809417,
+      "toward_reached": true,
+      "composite_reached": false,
+      "toward_min_dist": 0.0103577477857471,
+      "composite_min_dist": 0.0200310628861189,
+      "away_min_dist": 0.022631237283349,
+      "stall_mean_reward": 0.001701254874180762,
+      "perjoint": []
+    },
+    {
+      "cell": 22,
+      "seed": 4800002,
+      "k": 154,
+      "dist_k": 0.0238910596817732,
+      "ret_composite": 50.477166186572745,
+      "ret_toward": 50.11620220089603,
+      "ret_away": -0.3600809047762633,
+      "toward_reached": true,
+      "composite_reached": true,
+      "toward_min_dist": 0.00570607045665383,
+      "composite_min_dist": 0.0165172182023525,
+      "away_min_dist": 0.0211149249225855,
+      "stall_mean_reward": NaN,
+      "perjoint": []
+    },
+    {
+      "cell": 22,
+      "seed": 4800003,
+      "k": 222,
+      "dist_k": 0.0229322370141745,
+      "ret_composite": -0.4907585855076583,
+      "ret_toward": 50.046814946791855,
+      "ret_away": -1.2474277936279026,
+      "toward_reached": true,
+      "composite_reached": false,
+      "toward_min_dist": 0.005343665368855,
+      "composite_min_dist": 0.0226582325994968,
+      "away_min_dist": 0.0226582325994968,
+      "stall_mean_reward": -0.00629177673727767,
+      "perjoint": []
+    },
+    {
+      "cell": 22,
+      "seed": 4800004,
+      "k": 154,
+      "dist_k": 0.0243689622730017,
+      "ret_composite": 50.57959447347359,
+      "ret_toward": 50.889293031144895,
+      "ret_away": -0.0004887587683091166,
+      "toward_reached": true,
+      "composite_reached": true,
+      "toward_min_dist": 0.0108790304511786,
+      "composite_min_dist": 0.0155720580369234,
+      "away_min_dist": 0.0176643319427967,
+      "stall_mean_reward": NaN,
+      "perjoint": []
+    },
+    {
+      "cell": 22,
+      "seed": 4800005,
+      "k": 235,
+      "dist_k": 0.0234822500497103,
+      "ret_composite": 0.2010123586046541,
+      "ret_toward": 50.39128543233079,
+      "ret_away": -1.648680093604607,
+      "toward_reached": true,
+      "composite_reached": false,
+      "toward_min_dist": 0.0168099962174892,
+      "composite_min_dist": 0.0194030962884426,
+      "away_min_dist": 0.0234822500497103,
+      "stall_mean_reward": 0.0030924978246869863,
+      "perjoint": []
+    },
+    {
+      "cell": 28,
+      "seed": 5400000,
+      "k": 131,
+      "dist_k": 0.0240399539470673,
+      "ret_composite": 50.423739935131806,
+      "ret_toward": 50.45677925783132,
+      "ret_away": -0.08833160250541353,
+      "toward_reached": true,
+      "composite_reached": true,
+      "toward_min_dist": 0.0166663955897093,
+      "composite_min_dist": 0.01757488027215,
+      "away_min_dist": 0.0220843944698572,
+      "stall_mean_reward": NaN,
+      "perjoint": [
+        {
+          "j": 0,
+          "plus": -0.4021529085561817,
+          "minus": 50.49804033996333
+        },
+        {
+          "j": 1,
+          "plus": 50.67891261656076,
+          "minus": -0.3498244115621709
+        },
+        {
+          "j": 2,
+          "plus": 50.359470900185315,
+          "minus": 50.35100669862149
+        },
+        {
+          "j": 3,
+          "plus": -0.36563178153145437,
+          "minus": 50.916343904263165
+        },
+        {
+          "j": 4,
+          "plus": -0.5179669802788761,
+          "minus": 50.524517128002024
+        },
+        {
+          "j": 5,
+          "plus": 51.14650936839521,
+          "minus": 0.10148436410138309
+        },
+        {
+          "j": 6,
+          "plus": 0.14093599751504626,
+          "minus": 50.741215957114434
+        }
+      ]
+    },
+    {
+      "cell": 28,
+      "seed": 5400001,
+      "k": 219,
+      "dist_k": 0.0202803835272789,
+      "ret_composite": -0.3229085380626804,
+      "ret_toward": 50.94795992644324,
+      "ret_away": -0.5450840182121739,
+      "toward_reached": true,
+      "composite_reached": false,
+      "toward_min_dist": 0.00755619537085295,
+      "composite_min_dist": 0.0199757721275091,
+      "away_min_dist": 0.0202803835272789,
+      "stall_mean_reward": -0.003986525161267659,
+      "perjoint": [
+        {
+          "j": 0,
+          "plus": -2.1059195903762693,
+          "minus": 49.848865320985006
+        },
+        {
+          "j": 1,
+          "plus": -0.2654122470510576,
+          "minus": -0.19047757693943781
+        },
+        {
+          "j": 2,
+          "plus": -0.9134531390549941,
+          "minus": 50.19555744145069
+        },
+        {
+          "j": 3,
+          "plus": -0.5635389931844597,
+          "minus": 50.286432106111356
+        },
+        {
+          "j": 4,
+          "plus": -0.5467555646622694,
+          "minus": 50.22741215884003
+        },
+        {
+          "j": 5,
+          "plus": 51.03646742888418,
+          "minus": 50.057601733719686
+        },
+        {
+          "j": 6,
+          "plus": -1.2969110290593244,
+          "minus": 50.90309829007111
+        }
+      ]
+    },
+    {
+      "cell": 28,
+      "seed": 5400002,
+      "k": 129,
+      "dist_k": 0.0240241512656212,
+      "ret_composite": 50.69913176672862,
+      "ret_toward": 50.58121611609033,
+      "ret_away": 50.11990192258155,
+      "toward_reached": true,
+      "composite_reached": true,
+      "toward_min_dist": 0.0116753960028291,
+      "composite_min_dist": 0.0138214593753219,
+      "away_min_dist": 0.0163378044962883,
+      "stall_mean_reward": NaN,
+      "perjoint": [
+        {
+          "j": 0,
+          "plus": 50.04314604214124,
+          "minus": 50.238440223873965
+        },
+        {
+          "j": 1,
+          "plus": 50.49412878828457,
+          "minus": 50.33327804520221
+        },
+        {
+          "j": 2,
+          "plus": 50.57831095397056,
+          "minus": 50.1106814494992
+        },
+        {
+          "j": 3,
+          "plus": 50.73790867738166,
+          "minus": 50.34608603805439
+        },
+        {
+          "j": 4,
+          "plus": 50.40802748107217,
+          "minus": 50.534004936647904
+        },
+        {
+          "j": 5,
+          "plus": 50.573073984502486,
+          "minus": 50.644518368824485
+        },
+        {
+          "j": 6,
+          "plus": 50.30745689986406,
+          "minus": 50.20169746121207
+        }
+      ]
+    },
+    {
+      "cell": 28,
+      "seed": 5400003,
+      "k": 132,
+      "dist_k": 0.0243852939456701,
+      "ret_composite": 50.769192759439306,
+      "ret_toward": 51.36046104583061,
+      "ret_away": 50.278959522773135,
+      "toward_reached": true,
+      "composite_reached": true,
+      "toward_min_dist": 0.00608258973807096,
+      "composite_min_dist": 0.0132109448313713,
+      "away_min_dist": 0.0179914310574532,
+      "stall_mean_reward": NaN,
+      "perjoint": [
+        {
+          "j": 0,
+          "plus": 50.032014313569874,
+          "minus": 50.585621015781605
+        },
+        {
+          "j": 1,
+          "plus": 50.74442448583029,
+          "minus": 50.15339274446632
+        },
+        {
+          "j": 2,
+          "plus": 50.390807379392605,
+          "minus": 50.169748519762
+        },
+        {
+          "j": 3,
+          "plus": 50.36190738301182,
+          "minus": 50.64321135301193
+        },
+        {
+          "j": 4,
+          "plus": 50.45633623954806,
+          "minus": 50.49008998424555
+        },
+        {
+          "j": 5,
+          "plus": 51.43428499114657,
+          "minus": 50.68449746090993
+        },
+        {
+          "j": 6,
+          "plus": 50.28777365211713,
+          "minus": 50.97211389481206
+        }
+      ]
+    },
+    {
+      "cell": 28,
+      "seed": 5400004,
+      "k": 228,
+      "dist_k": 0.022495711222291,
+      "ret_composite": -0.04397400808953598,
+      "ret_toward": 50.9680018685404,
+      "ret_away": -0.6495087498749473,
+      "toward_reached": true,
+      "composite_reached": false,
+      "toward_min_dist": 0.00906901247799397,
+      "composite_min_dist": 0.0213917456567287,
+      "away_min_dist": 0.022495711222291,
+      "stall_mean_reward": -0.0006107501123546663,
+      "perjoint": [
+        {
+          "j": 0,
+          "plus": -2.138334661848049,
+          "minus": 50.79396347071845
+        },
+        {
+          "j": 1,
+          "plus": -0.13881197920250682,
+          "minus": -0.5526876308453126
+        },
+        {
+          "j": 2,
+          "plus": -0.5641137753541143,
+          "minus": -0.09007987100665549
+        },
+        {
+          "j": 3,
+          "plus": -0.5058953993882191,
+          "minus": 50.35549923473209
+        },
+        {
+          "j": 4,
+          "plus": -0.24078083515930496,
+          "minus": 50.19758983271496
+        },
+        {
+          "j": 5,
+          "plus": 50.61862284602913,
+          "minus": 0.04133325522416517
+        },
+        {
+          "j": 6,
+          "plus": -1.1980997639506865,
+          "minus": 50.4112004144801
+        }
+      ]
+    },
+    {
+      "cell": 28,
+      "seed": 5400005,
+      "k": 133,
+      "dist_k": 0.0241599790751934,
+      "ret_composite": 50.40022987448193,
+      "ret_toward": 50.337998941061585,
+      "ret_away": -0.10209207075821597,
+      "toward_reached": true,
+      "composite_reached": true,
+      "toward_min_dist": 0.0180285647511482,
+      "composite_min_dist": 0.0179928578436375,
+      "away_min_dist": 0.0224901996552944,
+      "stall_mean_reward": NaN,
+      "perjoint": [
+        {
+          "j": 0,
+          "plus": -0.5885384631640147,
+          "minus": 50.518846160478745
+        },
+        {
+          "j": 1,
+          "plus": 50.66571457130974,
+          "minus": -0.3676437139680322
+        },
+        {
+          "j": 2,
+          "plus": 50.30133662521906,
+          "minus": 50.29923487230419
+        },
+        {
+          "j": 3,
+          "plus": -0.33408839529842804,
+          "minus": 50.82815892937098
+        },
+        {
+          "j": 4,
+          "plus": -0.46402631689805796,
+          "minus": 50.524043505794026
+        },
+        {
+          "j": 5,
+          "plus": 51.02218882462301,
+          "minus": 0.08308864552228135
+        },
+        {
+          "j": 6,
+          "plus": 0.01817007119160785,
+          "minus": 50.69369690268508
+        }
+      ]
+    },
+    {
+      "cell": 29,
+      "seed": 5500001,
+      "k": 161,
+      "dist_k": 0.022847842425108,
+      "ret_composite": 50.21039606269519,
+      "ret_toward": 51.258386550956224,
+      "ret_away": -0.21066899312048198,
+      "toward_reached": true,
+      "composite_reached": true,
+      "toward_min_dist": 0.00605230033397675,
+      "composite_min_dist": 0.0188502501696348,
+      "away_min_dist": 0.0221921764314175,
+      "stall_mean_reward": NaN,
+      "perjoint": []
+    },
+    {
+      "cell": 29,
+      "seed": 5500002,
+      "k": 118,
+      "dist_k": 0.0238521862775087,
+      "ret_composite": 50.57668688522667,
+      "ret_toward": 51.48325340437093,
+      "ret_away": 50.141414979729554,
+      "toward_reached": true,
+      "composite_reached": true,
+      "toward_min_dist": 0.00437841797247529,
+      "composite_min_dist": 0.0153074953705072,
+      "away_min_dist": 0.0175998043268919,
+      "stall_mean_reward": NaN,
+      "perjoint": []
+    },
+    {
+      "cell": 29,
+      "seed": 5500003,
+      "k": 115,
+      "dist_k": 0.024055490270257,
+      "ret_composite": 50.69729594473754,
+      "ret_toward": 50.14350239285685,
+      "ret_away": 50.121952887550556,
+      "toward_reached": true,
+      "composite_reached": true,
+      "toward_min_dist": 0.00689927954226732,
+      "composite_min_dist": 0.013876055367291,
+      "away_min_dist": 0.0180554520338774,
+      "stall_mean_reward": NaN,
+      "perjoint": []
+    },
+    {
+      "cell": 29,
+      "seed": 5500004,
+      "k": 110,
+      "dist_k": 0.023724302649498,
+      "ret_composite": 50.794717833444494,
+      "ret_toward": 50.33817341608849,
+      "ret_away": 50.215357922968714,
+      "toward_reached": true,
+      "composite_reached": true,
+      "toward_min_dist": 0.0095753688365221,
+      "composite_min_dist": 0.0123550398275256,
+      "away_min_dist": 0.0177044980227947,
+      "stall_mean_reward": NaN,
+      "perjoint": []
+    },
+    {
+      "cell": 29,
+      "seed": 5500005,
+      "k": 115,
+      "dist_k": 0.0239418633282185,
+      "ret_composite": 50.60126509194227,
+      "ret_toward": 50.44016065375135,
+      "ret_away": 50.13518534195595,
+      "toward_reached": true,
+      "composite_reached": true,
+      "toward_min_dist": 0.00734839355573058,
+      "composite_min_dist": 0.0150300366804004,
+      "away_min_dist": 0.0175910405814648,
+      "stall_mean_reward": NaN,
+      "perjoint": []
+    },
+    {
+      "cell": 30,
+      "seed": 5600001,
+      "k": 226,
+      "dist_k": 0.0239284466952085,
+      "ret_composite": -0.04140103632734044,
+      "ret_toward": 51.2930544879056,
+      "ret_away": -0.5671918840816235,
+      "toward_reached": true,
+      "composite_reached": false,
+      "toward_min_dist": 0.00519490381702781,
+      "composite_min_dist": 0.0234510712325573,
+      "away_min_dist": 0.0239284466952085,
+      "stall_mean_reward": -0.0005594734638829789,
+      "perjoint": []
+    },
+    {
+      "cell": 30,
+      "seed": 5600002,
+      "k": 240,
+      "dist_k": 0.026228990405798,
+      "ret_composite": 0.07583148913576482,
+      "ret_toward": 50.6510252836675,
+      "ret_away": -0.6748449513125826,
+      "toward_reached": true,
+      "composite_reached": false,
+      "toward_min_dist": 0.00338429003022611,
+      "composite_min_dist": 0.0241447035223246,
+      "away_min_dist": 0.026228990405798,
+      "stall_mean_reward": 0.001263858152262747,
+      "perjoint": []
+    },
+    {
+      "cell": 30,
+      "seed": 5600003,
+      "k": 281,
+      "dist_k": 0.0283361673355103,
+      "ret_composite": 0.08283819357766409,
+      "ret_toward": 0.9341439274431758,
+      "ret_away": -0.08285939801377531,
+      "toward_reached": false,
+      "composite_reached": false,
+      "toward_min_dist": 0.014498027972877,
+      "composite_min_dist": 0.026708398014307,
+      "away_min_dist": 0.0283361673355103,
+      "stall_mean_reward": 0.004359904925140215,
+      "perjoint": []
+    },
+    {
+      "cell": 30,
+      "seed": 5600005,
+      "k": 246,
+      "dist_k": 0.0262251570820808,
+      "ret_composite": 0.053763772137338746,
+      "ret_toward": 50.83301745186839,
+      "ret_away": -1.1171948278552186,
+      "toward_reached": true,
+      "composite_reached": false,
+      "toward_min_dist": 0.00463857688009739,
+      "composite_min_dist": 0.024528631940484,
+      "away_min_dist": 0.0262251570820808,
+      "stall_mean_reward": 0.0009956254099507175,
+      "perjoint": []
+    },
+    {
+      "cell": 33,
+      "seed": 5900000,
+      "k": 110,
+      "dist_k": 0.0245973523706198,
+      "ret_composite": 50.73587002203229,
+      "ret_toward": 50.43849254573868,
+      "ret_away": 50.07954095205709,
+      "toward_reached": true,
+      "composite_reached": true,
+      "toward_min_dist": 0.0146306045353413,
+      "composite_min_dist": 0.0138513306155801,
+      "away_min_dist": 0.0180359054356813,
+      "stall_mean_reward": NaN,
+      "perjoint": []
+    },
+    {
+      "cell": 33,
+      "seed": 5900001,
+      "k": 247,
+      "dist_k": 0.0290460418909788,
+      "ret_composite": 0.03086927129137133,
+      "ret_toward": 0.3423449180283784,
+      "ret_away": -0.019232853778166095,
+      "toward_reached": false,
+      "composite_reached": false,
+      "toward_min_dist": 0.0213265791535378,
+      "composite_min_dist": 0.0277152881026268,
+      "away_min_dist": 0.0270095597952604,
+      "stall_mean_reward": 0.0005824390809692704,
+      "perjoint": []
+    },
+    {
+      "cell": 33,
+      "seed": 5900002,
+      "k": 253,
+      "dist_k": 0.0277205519378185,
+      "ret_composite": 0.11094171192191118,
+      "ret_toward": 0.32167839229933665,
+      "ret_away": 0.16350171577448047,
+      "toward_reached": false,
+      "composite_reached": false,
+      "toward_min_dist": 0.0207309387624264,
+      "composite_min_dist": 0.0252192188054323,
+      "away_min_dist": 0.0239591114223003,
+      "stall_mean_reward": 0.0023604619557853444,
+      "perjoint": []
+    },
+    {
+      "cell": 33,
+      "seed": 5900003,
+      "k": 152,
+      "dist_k": 0.0226860288530588,
+      "ret_composite": 50.217540768234144,
+      "ret_toward": 50.391444796278606,
+      "ret_away": -0.39393715433770055,
+      "toward_reached": true,
+      "composite_reached": true,
+      "toward_min_dist": 0.0158361960202456,
+      "composite_min_dist": 0.0187138747423887,
+      "away_min_dist": 0.0226860288530588,
+      "stall_mean_reward": NaN,
+      "perjoint": []
+    },
+    {
+      "cell": 33,
+      "seed": 5900004,
+      "k": 134,
+      "dist_k": 0.0236194357275963,
+      "ret_composite": 50.357523165258776,
+      "ret_toward": 50.24970308957203,
+      "ret_away": -0.07779092252960651,
+      "toward_reached": true,
+      "composite_reached": true,
+      "toward_min_dist": 0.0180351454764605,
+      "composite_min_dist": 0.0179778300225735,
+      "away_min_dist": 0.0198553744703531,
+      "stall_mean_reward": NaN,
+      "perjoint": []
+    },
+    {
+      "cell": 34,
+      "seed": 6000000,
+      "k": 94,
+      "dist_k": 0.0239371675997972,
+      "ret_composite": 50.6664858722709,
+      "ret_toward": 50.22207309471843,
+      "ret_away": 50.40264837355426,
+      "toward_reached": true,
+      "composite_reached": true,
+      "toward_min_dist": 0.015767976641655,
+      "composite_min_dist": 0.0142243364825845,
+      "away_min_dist": 0.0158122256398201,
+      "stall_mean_reward": NaN,
+      "perjoint": []
+    },
+    {
+      "cell": 34,
+      "seed": 6000001,
+      "k": 96,
+      "dist_k": 0.0240320339798927,
+      "ret_composite": 50.75530832969747,
+      "ret_toward": 50.44419140342244,
+      "ret_away": 50.27546545831609,
+      "toward_reached": true,
+      "composite_reached": true,
+      "toward_min_dist": 0.0141636813059449,
+      "composite_min_dist": 0.0131416544318199,
+      "away_min_dist": 0.0168751012533903,
+      "stall_mean_reward": NaN,
+      "perjoint": []
+    },
+    {
+      "cell": 34,
+      "seed": 6000002,
+      "k": 103,
+      "dist_k": 0.0247758775949478,
+      "ret_composite": 51.09670684251606,
+      "ret_toward": 50.64549839983587,
+      "ret_away": 50.499379458083695,
+      "toward_reached": true,
+      "composite_reached": true,
+      "toward_min_dist": 0.0120535958558321,
+      "composite_min_dist": 0.00944720581173897,
+      "away_min_dist": 0.016349820420146,
+      "stall_mean_reward": NaN,
+      "perjoint": []
+    },
+    {
+      "cell": 34,
+      "seed": 6000003,
+      "k": 118,
+      "dist_k": 0.0241743493825197,
+      "ret_composite": 50.6812706986294,
+      "ret_toward": 50.253729569841106,
+      "ret_away": 50.233567955202446,
+      "toward_reached": true,
+      "composite_reached": true,
+      "toward_min_dist": 0.0158482417464256,
+      "composite_min_dist": 0.0141868973150849,
+      "away_min_dist": 0.0170203149318695,
+      "stall_mean_reward": NaN,
+      "perjoint": []
+    },
+    {
+      "cell": 34,
+      "seed": 6000004,
+      "k": 97,
+      "dist_k": 0.0235852841287851,
+      "ret_composite": 50.455309177104155,
+      "ret_toward": 51.33895484440381,
+      "ret_away": 50.57680654908737,
+      "toward_reached": true,
+      "composite_reached": true,
+      "toward_min_dist": 0.00526024075224996,
+      "composite_min_dist": 0.0166401285678148,
+      "away_min_dist": 0.0138454008847475,
+      "stall_mean_reward": NaN,
+      "perjoint": []
+    },
+    {
+      "cell": 34,
+      "seed": 6000005,
+      "k": 99,
+      "dist_k": 0.0240943618118763,
+      "ret_composite": 51.094822191428,
+      "ret_toward": 50.24066711902699,
+      "ret_away": 50.9243415354689,
+      "toward_reached": true,
+      "composite_reached": true,
+      "toward_min_dist": 0.0114782843738794,
+      "composite_min_dist": 0.00893884897232056,
+      "away_min_dist": 0.0100852977484465,
+      "stall_mean_reward": NaN,
+      "perjoint": []
+    },
+    {
+      "cell": 41,
+      "seed": 6700001,
+      "k": 265,
+      "dist_k": 0.0264593809843063,
+      "ret_composite": 0.2094072016194776,
+      "ret_toward": 51.20034327238336,
+      "ret_away": -0.9182443843207021,
+      "toward_reached": true,
+      "composite_reached": false,
+      "toward_min_dist": 0.00741530209779739,
+      "composite_min_dist": 0.0226985737681389,
+      "away_min_dist": 0.0264593809843063,
+      "stall_mean_reward": 0.005983062903413646,
+      "perjoint": [
+        {
+          "j": 0,
+          "plus": -2.503424608760523,
+          "minus": -1.4050121536976983
+        },
+        {
+          "j": 1,
+          "plus": 50.94335695939143,
+          "minus": -1.1594195719760865
+        },
+        {
+          "j": 2,
+          "plus": -0.40155131793289567,
+          "minus": -1.070926759139491
+        },
+        {
+          "j": 3,
+          "plus": -0.5468422442242188,
+          "minus": 50.747289327080594
+        },
+        {
+          "j": 4,
+          "plus": 0.2003130266117863,
+          "minus": -0.01660106897971547
+        },
+        {
+          "j": 5,
+          "plus": 0.43903030432522894,
+          "minus": -0.05912997728941201
+        },
+        {
+          "j": 6,
+          "plus": -1.3374314535965197,
+          "minus": -0.019642501121827687
+        }
+      ]
+    },
+    {
+      "cell": 41,
+      "seed": 6700002,
+      "k": 297,
+      "dist_k": 0.0297107081860304,
+      "ret_composite": 0.017399464230879128,
+      "ret_toward": 0.15245301209584639,
+      "ret_away": -0.13923837318934879,
+      "toward_reached": false,
+      "composite_reached": false,
+      "toward_min_dist": 0.0272108614444733,
+      "composite_min_dist": 0.0293728299438953,
+      "away_min_dist": 0.0297107081860304,
+      "stall_mean_reward": 0.005799821410293043,
+      "perjoint": [
+        {
+          "j": 0,
+          "plus": -0.22906347105503322,
+          "minus": 0.2033646901413062
+        },
+        {
+          "j": 1,
+          "plus": 0.14153158628589751,
+          "minus": -0.1418636732125477
+        },
+        {
+          "j": 2,
+          "plus": 0.0918094386639859,
+          "minus": -0.0921185577213019
+        },
+        {
+          "j": 3,
+          "plus": -0.105558292101307,
+          "minus": 0.1111717939489533
+        },
+        {
+          "j": 4,
+          "plus": -0.0009109213641967993,
+          "minus": 0.023003221663364305
+        },
+        {
+          "j": 5,
+          "plus": 0.0015939798315387802,
+          "minus": 0.03105724283125276
+        },
+        {
+          "j": 6,
+          "plus": -0.0787032794246726,
+          "minus": 0.08261164696737539
+        }
+      ]
+    },
+    {
+      "cell": 41,
+      "seed": 6700003,
+      "k": 124,
+      "dist_k": 0.0211298912763596,
+      "ret_composite": 50.090538825390546,
+      "ret_toward": 50.69295677167713,
+      "ret_away": -0.5294661402592358,
+      "toward_reached": true,
+      "composite_reached": true,
+      "toward_min_dist": 0.0116390716284513,
+      "composite_min_dist": 0.0191410202533007,
+      "away_min_dist": 0.0211298912763596,
+      "stall_mean_reward": NaN,
+      "perjoint": [
+        {
+          "j": 0,
+          "plus": -0.647442124574787,
+          "minus": 50.00522281540207
+        },
+        {
+          "j": 1,
+          "plus": 50.432035829526946,
+          "minus": -0.4227450732743988
+        },
+        {
+          "j": 2,
+          "plus": 50.162466537831186,
+          "minus": 49.852105560520556
+        },
+        {
+          "j": 3,
+          "plus": 49.97187961736962,
+          "minus": 50.06079147267076
+        },
+        {
+          "j": 4,
+          "plus": 50.08482177616153,
+          "minus": 49.994648826837675
+        },
+        {
+          "j": 5,
+          "plus": 50.28476153103546,
+          "minus": -0.058261877013684016
+        },
+        {
+          "j": 6,
+          "plus": 49.95269840434936,
+          "minus": 49.86354573971531
+        }
+      ]
+    },
+    {
+      "cell": 41,
+      "seed": 6700004,
+      "k": 260,
+      "dist_k": 0.0261416900902987,
+      "ret_composite": 0.24096502264834785,
+      "ret_toward": 50.38369135295053,
+      "ret_away": -1.4818382140159698,
+      "toward_reached": true,
+      "composite_reached": false,
+      "toward_min_dist": 0.014146120287478,
+      "composite_min_dist": 0.0218188334256411,
+      "away_min_dist": 0.0261416900902987,
+      "stall_mean_reward": 0.006024125566208696,
+      "perjoint": [
+        {
+          "j": 0,
+          "plus": -2.2261213460724893,
+          "minus": -1.4146919376710287
+        },
+        {
+          "j": 1,
+          "plus": 51.373028182630705,
+          "minus": -1.248529850551439
+        },
+        {
+          "j": 2,
+          "plus": 0.047959662290499555,
+          "minus": -1.56413913209453
+        },
+        {
+          "j": 3,
+          "plus": -0.48278494566409014,
+          "minus": 0.3809163300390338
+        },
+        {
+          "j": 4,
+          "plus": 0.2504082149780303,
+          "minus": -0.2061813313260629
+        },
+        {
+          "j": 5,
+          "plus": 0.0021531781074513277,
+          "minus": -0.07864873084861584
+        },
+        {
+          "j": 6,
+          "plus": -1.0997271444880683,
+          "minus": -0.532357307750808
+        }
+      ]
+    },
+    {
+      "cell": 41,
+      "seed": 6700005,
+      "k": 277,
+      "dist_k": 0.0275180488824844,
+      "ret_composite": 0.13504016661294163,
+      "ret_toward": 0.5098970272250108,
+      "ret_away": -1.4227311227421815,
+      "toward_reached": false,
+      "composite_reached": false,
+      "toward_min_dist": 0.0129596870392561,
+      "composite_min_dist": 0.0250193364918232,
+      "away_min_dist": 0.0275180488824844,
+      "stall_mean_reward": 0.005871311591867027,
+      "perjoint": [
+        {
+          "j": 0,
+          "plus": -2.365770309527677,
+          "minus": -1.2759348651500957
+        },
+        {
+          "j": 1,
+          "plus": 1.2998959561692829,
+          "minus": -1.2534521126095366
+        },
+        {
+          "j": 2,
+          "plus": -0.13367744137794457,
+          "minus": -1.422103405670858
+        },
+        {
+          "j": 3,
+          "plus": -0.6641295393459243,
+          "minus": 0.490962021514548
+        },
+        {
+          "j": 4,
+          "plus": 0.1342475476034843,
+          "minus": -0.179253621552674
+        },
+        {
+          "j": 5,
+          "plus": -0.04831028647659786,
+          "minus": -0.051344978060717125
+        },
+        {
+          "j": 6,
+          "plus": -1.2306288965206142,
+          "minus": -0.1282450395851721
+        }
+      ]
+    }
+  ],
+  "record": {
+    "experiment_id": "M7.0-reward-preflight",
+    "date": "2026-08-05",
+    "operator": "claude-opus",
+    "research_question": "Does the reward distinguish the last mm at 2-3cm to make an online residual TD3 learnable?",
+    "result_classification": "inconclusive-nuanced",
+    "finding": "Reward gradient toward closing is CLEAR (ordering 0.85 global, 1.0 on hard cells 25/28/31/41; toward-comp +51/+25; nudge directionality 1.0). BUT hovering at ~2.14cm earns a tiny positive reward (median +0.0015, max +0.0068) in 65% of stalling poses -> strict no-positive-hover check FAILS weakly (negligible vs +50 success bonus).",
+    "decision": "Signal DISTINGUISHES the last mm (primary gate) -> TD3 is learnable. Strict stall-reward gate fails weakly. Await user: proceed to M7.1 critic warmup, or first authorize a tiny reward-shaping tweak to remove the near-target positive plateau. NO autonomous reward change; NO training launched."
+  }
+}

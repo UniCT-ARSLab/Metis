@@ -1,0 +1,165 @@
+[gd_scene format=3 uid="uid://ctoolframeagent1"]
+
+[ext_resource type="Script" uid="uid://cgg74e466ew1n" path="res://agents/RobotArms/urdf_robot_arm_agent.gd" id="1_body"]
+[ext_resource type="Script" uid="uid://byrdvsguqdev3" path="res://addons/metis/runtime/agent/Agent.gd" id="2_agent"]
+[ext_resource type="Script" uid="uid://bjhxcss2ima54" path="res://addons/metis/runtime/agent/action_space/ActionSpace.gd" id="3_actionspace"]
+[ext_resource type="Script" uid="uid://clefx53jebtj3" path="res://addons/metis/runtime/agent/observations/ObservationSystem.gd" id="4_obs"]
+[ext_resource type="Script" uid="uid://d1xuba84xevcv" path="res://addons/metis/runtime/agent/RewardSystem.gd" id="5_reward"]
+[ext_resource type="PackedScene" uid="uid://bnah04d4y572a" path="res://assets/urdf/openarm/openarm_bimanual.urdf" id="6_urdf"]
+[ext_resource type="Script" uid="uid://bvoj0o4atoby" path="res://addons/metis/runtime/agent/action_space/ContinuousAction.gd" id="7_continuous"]
+[ext_resource type="Script" uid="uid://cys7i0vchrdlo" path="res://addons/metis/runtime/agent/observations/MethodObservationSource.gd" id="8_method"]
+[ext_resource type="Script" uid="uid://bgx7jh6lg35yv" path="res://addons/metis/runtime/agent/reward_components/FunctionRewardComponent.gd" id="9_function_reward"]
+[ext_resource type="Script" uid="uid://c71jq6uyg03h3" path="res://addons/metis/runtime/agent/reward_components/ActionSmoothnessPenaltyReward.gd" id="10_smoothness"]
+[ext_resource type="Script" uid="uid://dyq1fjgcu1wqu" path="res://addons/metis/runtime/agent/reward_components/StepPenaltyReward.gd" id="11_time"]
+
+[sub_resource type="SphereMesh" id="SphereMesh_openarm"]
+radius = 0.01
+height = 0.02
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_c7otc"]
+albedo_color = Color(1, 0, 0, 1)
+
+[node name="OpenarmAgent" type="Node3D" unique_id=1614782724]
+script = ExtResource("1_body")
+robot_path = NodePath("openarm")
+controlled_joint_names = PackedStringArray("openarm_right_joint1", "openarm_right_joint2", "openarm_right_joint3", "openarm_right_joint4", "openarm_right_joint5", "openarm_right_joint6", "openarm_right_joint7")
+joint_home_positions = PackedFloat32Array(0, 0, 0, 0, 0, 0, 0)
+default_joint_speed = 0.1
+max_joint_speed_override = 0.5
+tcp_link_name = "openarm_right_hand"
+tcp_local_offset = Vector3(0, 0.08, 0)
+workspace_scale = 0.5
+success_distance = 0.02
+hold_stillness_speed_reference = 0.0
+terminate_on_success = false
+collision_terminates = true
+hold_activation_distance = 0.1
+self_body_collision_enabled = true
+self_collision_debug = true
+self_body_link_names = PackedStringArray("openarm_body_link0")
+self_check_link_names = PackedStringArray("openarm_right_link3", "openarm_right_link4", "openarm_right_link5", "openarm_right_link6", "openarm_right_link7", "openarm_right_left_finger", "openarm_right_right_finger")
+manual_extra_joint_names = PackedStringArray("openarm_right_finger_joint1")
+manual_gripper_joint_name = &"openarm_right_finger_joint1"
+ik_manual_enabled = true
+ik_manual_mode = "teleop"
+
+[node name="Agent" type="Node" parent="." unique_id=56391477]
+script = ExtResource("2_agent")
+metadata/_custom_type_script = "uid://byrdvsguqdev3"
+
+[node name="ActionSpace" type="Node" parent="Agent" unique_id=1774908178]
+script = ExtResource("3_actionspace")
+metadata/_custom_type_script = "uid://bjhxcss2ima54"
+
+[node name="JointVelocity" type="Node" parent="Agent/ActionSpace" unique_id=957338224]
+script = ExtResource("7_continuous")
+action_name = "joint_velocity"
+size = 7
+exploration_low = -0.35
+exploration_high = 0.35
+use_custom_exploration_bounds = true
+
+[node name="ObservationSystem" type="Node" parent="Agent" unique_id=1095010103]
+script = ExtResource("4_obs")
+metadata/_custom_type_script = "uid://clefx53jebtj3"
+
+[node name="JointPositions" type="Node" parent="Agent/ObservationSystem" unique_id=1608505217]
+script = ExtResource("8_method")
+observation_name = "joint_positions"
+method_name = &"get_joint_position_observation"
+
+[node name="JointVelocities" type="Node" parent="Agent/ObservationSystem" unique_id=1879127050]
+script = ExtResource("8_method")
+observation_name = "joint_velocities"
+method_name = &"get_joint_velocity_observation"
+
+[node name="TargetError" type="Node" parent="Agent/ObservationSystem" unique_id=1420784958]
+script = ExtResource("8_method")
+observation_name = "target_error_base"
+method_name = &"get_target_error_observation"
+
+[node name="TargetOrientationError" type="Node" parent="Agent/ObservationSystem" unique_id=78770803]
+script = ExtResource("8_method")
+observation_name = "target_orientation_error"
+method_name = &"get_target_orientation_error_observation"
+
+[node name="PreviousAction" type="Node" parent="Agent/ObservationSystem" unique_id=1324850493]
+script = ExtResource("8_method")
+observation_name = "previous_action"
+method_name = &"get_previous_action_observation"
+
+[node name="RewardSystem" type="Node" parent="Agent" unique_id=536478537]
+script = ExtResource("5_reward")
+metadata/_custom_type_script = "uid://d1xuba84xevcv"
+
+[node name="JointMotion" type="Node" parent="Agent/RewardSystem" unique_id=1662626792 node_paths=PackedStringArray("node_caller")]
+script = ExtResource("9_function_reward")
+term_name = "joint_motion"
+weight = 0.005
+method_name = &"get_joint_motion_penalty"
+node_caller = NodePath("../../..")
+
+[node name="JointLimit" type="Node" parent="Agent/RewardSystem" unique_id=218170610 node_paths=PackedStringArray("node_caller")]
+script = ExtResource("9_function_reward")
+term_name = "joint_limit"
+weight = 0.02
+method_name = &"get_joint_limit_penalty"
+node_caller = NodePath("../../..")
+
+[node name="HoldStillness" type="Node" parent="Agent/RewardSystem" unique_id=700000004 node_paths=PackedStringArray("node_caller")]
+script = ExtResource("9_function_reward")
+term_name = "hold_stillness"
+weight = 0.05
+method_name = &"get_hold_stillness_reward"
+node_caller = NodePath("../../..")
+
+[node name="NearTargetSpeed" type="Node" parent="Agent/RewardSystem" unique_id=700000005 node_paths=PackedStringArray("node_caller")]
+script = ExtResource("9_function_reward")
+term_name = "near_target_speed"
+weight = 0.05
+method_name = &"get_near_target_speed_penalty"
+node_caller = NodePath("../../..")
+
+[node name="PoseTracking" type="Node" parent="Agent/RewardSystem" unique_id=818546406 node_paths=PackedStringArray("node_caller")]
+script = ExtResource("9_function_reward")
+term_name = "pose_tracking"
+weight = 0.1
+method_name = &"get_pose_tracking_reward"
+node_caller = NodePath("../../..")
+
+[node name="HoldProgress" type="Node" parent="Agent/RewardSystem" unique_id=700000006 node_paths=PackedStringArray("node_caller")]
+script = ExtResource("9_function_reward")
+term_name = "hold_progress"
+weight = 0.25
+method_name = &"get_hold_progress_reward"
+node_caller = NodePath("../../..")
+
+[node name="NearTargetDistancePenalty" type="Node" parent="Agent/RewardSystem" unique_id=700000007 node_paths=PackedStringArray("node_caller")]
+script = ExtResource("9_function_reward")
+term_name = "near_target_distance"
+weight = 0.1
+method_name = &"get_near_target_distance_penalty"
+node_caller = NodePath("../../..")
+
+[node name="Smoothness" type="Node" parent="Agent/RewardSystem" unique_id=1438737165]
+script = ExtResource("10_smoothness")
+input_names = PackedStringArray("joint_velocity_0", "joint_velocity_1", "joint_velocity_2", "joint_velocity_3", "joint_velocity_4", "joint_velocity_5", "joint_velocity_6")
+penalty_scale = -0.005
+normalize_by_input_count = true
+term_name = "action_smoothness"
+
+[node name="Time" type="Node" parent="Agent/RewardSystem" unique_id=1426812261]
+script = ExtResource("11_time")
+term_name = "time"
+
+[node name="openarm" parent="." unique_id=1614215578 instance=ExtResource("6_urdf")]
+control_mode = 1
+
+[node name="EndEffector" type="Marker3D" parent="." unique_id=1520264945]
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="EndEffector" unique_id=1017964206]
+mesh = SubResource("SphereMesh_openarm")
+surface_material_override/0 = SubResource("StandardMaterial3D_c7otc")
+
+[node name="ToolPose" type="Marker3D" parent="EndEffector" unique_id=1478404502]
+transform = Transform3D(0, 1, 0, 1, 0, 0, 0, 0, -1, 0, 0, 0)

@@ -45,6 +45,29 @@ The algorithm is read from `policy.json`. To load a specific file:
 `run.py` can still validate input size, but ambiguous architectures such as discrete
 PPO versus DQN may require `--algorithm`.
 
+## Extracting a policy from an exact checkpoint
+
+The root `policy.keras` follows the most recently saved checkpoint, while the best
+checkpoint may live under `best/`. To extract precisely that policy without restoring
+its critic, replay buffer, optimizers, or entropy state:
+
+```bash
+python/.venv/bin/python python/run.py \
+  --algorithm sac \
+  --load-from checkpoint \
+  --checkpoint-path checkpoints/my_run/best/ckpt-1200 \
+  --export-policy-dir checkpoints/my_run/best/actor_policy \
+  --export-policy-only \
+  --godot-bin /path/to/Godot \
+  --godot-project godot \
+  --godot-scene res://scenarios/my_scenario.tscn \
+  --headless
+```
+
+This writes `actor_policy/policy.keras` and its matching `policy.json`. The scenario
+is opened only to validate the observation and action contract. The resulting bundle
+can be run directly or passed to a new training job with `--policy-path`.
+
 ## Warm-starting a new training run
 
 ```bash
@@ -60,7 +83,9 @@ python/.venv/bin/python python/train.py \
 This is a warm start. Episode counters, optimizers, replay, critics, target networks,
 and exploration schedules start fresh. Use `--resume` or `--resume-checkpoint` to
 continue the original training state. Metis rejects combining resume and
-`--policy-path` because that would create an ambiguous state.
+`--policy-path` because that would create an ambiguous state. Off-policy trainers
+also honor `--critic-warmup-updates` after an actor-only warm start, keeping the
+imported actor frozen while the new critic learns the new reward scale.
 
 ## TensorFlow Lite
 

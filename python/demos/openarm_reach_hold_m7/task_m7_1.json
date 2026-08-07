@@ -1,0 +1,20 @@
+{
+  "name": "openarm_reach_hold",
+  "godot_scene": "res://scenarios/robotarms/openarm_reach_hold_scenario.tscn",
+  "godot_project": "godot",
+  "distance_key": "position_error_m",
+  "terminal_key": "terminal_reason",
+  "success_value": "target_reached",
+  "region": "easy",
+  "obs_dim": 27,
+  "action_size": 7,
+  "cells": [17, 18, 22, 25, 28, 29, 30, 31, 33, 34, 41],
+  "hard_cells": [25, 28, 31, 41],
+  "bands_m": [[0.02, 0.03], [0.03, 0.04], [0.04, 0.06], [0.06, 0.10]],
+  "gate_outer": 0.11,
+  "gate_inner": 0.04,
+  "err_start": 14,
+  "err_size": 3,
+  "anchor_dist_lo": 0.02,
+  "anchor_dist_hi": 0.10
+}

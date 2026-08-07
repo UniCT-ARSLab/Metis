@@ -1,10 +1,16 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
+from algorithms.common import (
+    build_replay_ready_event,
+    should_use_random_exploration,
+)
 from core.replay_buffer import ReplayBuffer
+from core.training import restore_replay_buffer
 
 
 class ReplayBufferTests(unittest.TestCase):
@@ -81,6 +87,48 @@ class ReplayBufferTests(unittest.TestCase):
             restored = ReplayBuffer(capacity=8)
             restored.load(path)
             self.assertEqual(restored.export_snapshot()["rewards"].tolist(), list(map(float, range(6))))
+
+    def test_missing_resume_replay_collects_with_restored_policy(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            args = SimpleNamespace(
+                replay_capacity=32,
+                replay_warmup=8,
+                batch_size=4,
+                require_replay_buffer=False,
+                random_exploration_episodes=100,
+            )
+            buffer = ReplayBuffer(capacity=args.replay_capacity)
+
+            restored = restore_replay_buffer(
+                args, Path(temp_dir) / "best" / "ckpt-10", buffer)
+
+            self.assertEqual(restored, 0)
+            self.assertTrue(args._replay_warmup_uses_restored_policy)
+            self.assertFalse(
+                should_use_random_exploration(10, args, len(buffer)))
+            self.assertTrue(build_replay_ready_event(buffer, args).is_set())
+
+    def test_best_checkpoint_can_restore_matching_parent_replay(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = ReplayBuffer(capacity=8)
+            for value in range(6):
+                source.add(*self.transition(value))
+            source.save(root / "replay-10.npz")
+            args = SimpleNamespace(
+                replay_capacity=8,
+                replay_warmup=4,
+                batch_size=4,
+                require_replay_buffer=False,
+                random_exploration_episodes=0,
+            )
+            restored_buffer = ReplayBuffer(capacity=8)
+
+            restored = restore_replay_buffer(
+                args, root / "best" / "ckpt-10", restored_buffer)
+
+            self.assertEqual(restored, 6)
+            self.assertFalse(args._replay_warmup_uses_restored_policy)
 
 
 if __name__ == "__main__":

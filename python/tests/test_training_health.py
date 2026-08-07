@@ -48,12 +48,13 @@ def health_args(directory, **overrides):
     return SimpleNamespace(**values)
 
 
-def summary(success, reward, checkpoint=None):
+def summary(success, reward, checkpoint=None, **diagnostics):
     return {
         "success_rate": float(success),
         "reward_mean": float(reward),
         "steps_mean": 100.0,
         "checkpoint": checkpoint,
+        **diagnostics,
     }
 
 
@@ -103,6 +104,39 @@ class TrainingHealthMonitorTests(unittest.TestCase):
             )
             self.assertEqual(monitor.state, "critical")
             self.assertEqual(monitor.recovery_count, 0)
+
+    def test_region_selection_success_drives_collapse_detection(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            monitor = TrainingHealthMonitor(
+                health_args(
+                    temp_dir,
+                    health_warning_drop=0.15,
+                    health_critical_drop=0.30,
+                    health_collapse_patience=1,
+                ),
+                "sac",
+            )
+            best = summary(
+                0.90,
+                10.0,
+                "best/ckpt-100",
+                selection_success_rate=0.80,
+            )
+
+            monitor.observe_evaluation(
+                episode=200,
+                summary=summary(
+                    0.85,
+                    9.0,
+                    selection_success_rate=0.40,
+                ),
+                best_summary=best,
+                best_checkpoint=best["checkpoint"],
+                improved=False,
+            )
+
+            self.assertEqual(monitor.state, "critical")
+            self.assertIn("selection success rate", monitor.reason)
 
     def test_enabled_recovery_restores_only_after_confirmed_collapse(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -250,6 +284,7 @@ class TrainingHealthMonitorTests(unittest.TestCase):
                 auto_recovery=True,
                 health_collapse_patience=1,
                 recovery_min_evaluations=1,
+                best_metric="success_rate",
             )
             monitor = TrainingHealthMonitor(args, "dqn")
             requests = []
@@ -292,6 +327,44 @@ class TrainingHealthMonitorTests(unittest.TestCase):
             )
 
             self.assertEqual(len(requests), 1)
+
+    def test_task_progress_allows_recovery_before_first_success(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            args = health_args(
+                temp_dir,
+                auto_recovery=True,
+                health_collapse_patience=1,
+                recovery_min_evaluations=1,
+                best_metric="task_progress",
+            )
+            monitor = TrainingHealthMonitor(args, "sac")
+            requests = []
+            monitor.set_recovery_handler(
+                lambda request: requests.append(request) or {}
+            )
+            best = summary(
+                0.0,
+                -20.0,
+                "best/ckpt-100",
+                progress_mean=0.8,
+                position_error_mean=0.1,
+            )
+
+            monitor.observe_evaluation(
+                episode=200,
+                summary=summary(
+                    0.0,
+                    -10.0,
+                    progress_mean=0.2,
+                    position_error_mean=0.5,
+                ),
+                best_summary=best,
+                best_checkpoint=best["checkpoint"],
+                improved=False,
+            )
+
+            self.assertEqual(len(requests), 1)
+            self.assertIn("task progress", requests[0].reason)
 
     def test_non_finite_telemetry_is_critical(self):
         with tempfile.TemporaryDirectory() as temp_dir:

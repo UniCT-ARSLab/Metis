@@ -1,0 +1,23 @@
+{
+  "delta_max": 0.02,
+  "near_dist": 0.1,
+  "n_settling_transitions": 5389,
+  "n_anchors": 6000,
+  "reached_episodes": 66,
+  "collided_episodes": 0,
+  "d_obs_per_meter": 1.0,
+  "gate_outer_d_obs": 0.1,
+  "per_cell": {
+    "17": 248,
+    "18": 839,
+    "22": 323,
+    "25": 948,
+    "28": 313,
+    "29": 369,
+    "30": 647,
+    "31": 1024,
+    "33": 216,
+    "34": 195,
+    "41": 267
+  }
+}

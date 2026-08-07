@@ -24,6 +24,7 @@ class DashboardServer:
         self.host = host
         self._history = deque(maxlen=int(history))
         self._health_history = deque(maxlen=500)
+        self._curriculum = {}  # latest canonical AdaptiveCurriculumController snapshot
         self._clients = {}  # ws -> {"batch": int, "buf": list}
         self._meta = dict(meta or {})  # run info: algorithm, scenario, agents, envs, ...
         self._meta.setdefault("started_at", time.time())  # epoch; client ticks a live timer off it
@@ -52,6 +53,16 @@ class DashboardServer:
                     state["buf"] = []
         for ws, batch in to_send:
             self._safe_send(ws, {"type": "episodes", "data": batch})
+
+    def record_curriculum(self, snapshot):
+        """Store + publish the canonical curriculum snapshot (stage, confirmations, cooldown, ...).
+        Values come straight from AdaptiveCurriculumController; the dashboard never recomputes them."""
+        snapshot = dict(snapshot)
+        with self._lock:
+            self._curriculum = snapshot
+            clients = list(self._clients)
+        for ws in clients:
+            self._safe_send(ws, {"type": "curriculum", "data": snapshot})
 
     def record_health(self, event):
         """Store a health-state transition and publish it independently of episodes."""
@@ -138,9 +149,12 @@ class DashboardServer:
                 snapshot = list(server._history)[-1000:]
                 health_snapshot = list(server._health_history)
                 meta = dict(server._meta)
+                curriculum = dict(server._curriculum)
             server._safe_send(ws, {"type": "meta", "data": meta})
             server._safe_send(ws, {"type": "snapshot", "data": snapshot})
             server._safe_send(ws, {"type": "health_snapshot", "data": health_snapshot})
+            if curriculum:
+                server._safe_send(ws, {"type": "curriculum", "data": curriculum})
             try:
                 while True:
                     message = ws.receive()

@@ -145,6 +145,8 @@ def main():
         print(f"Started Godot on port {args.port}", flush=True)
 
     env = None
+    samples = None
+    saved = False
     try:
         env = ScenarioGymEnv(
             host=args.host,
@@ -249,8 +251,17 @@ def main():
             )
 
         output, total = save_dataset(args.output, samples, env, append=args.append)
+        saved = True
         print(f"Saved demonstrations: {output} transitions={total}", flush=True)
     finally:
+        # Save whatever was collected even on Ctrl-C / kill, so a stopped session
+        # (fewer than --episodes) is never lost.
+        if not saved and env is not None and samples is not None and len(samples.get("actions", [])) > 0:
+            try:
+                out_path, total = save_dataset(args.output, samples, env, append=args.append)
+                print(f"Saved demonstrations (on stop): {out_path} transitions={total}", flush=True)
+            except Exception as exc:
+                print(f"finally-save failed: {exc}", flush=True)
         if env is not None:
             try:
                 env.close()

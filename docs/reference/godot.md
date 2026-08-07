@@ -61,9 +61,9 @@ An `ObservationSource` registers one or more numeric values. Supplied sources co
 Method and property sources accept an optional `source_path` relative to the agent
 body. An empty path reads the body itself.
 
-The **Metis Inspector** plugin adds `Select...` menus for compatible methods and
-properties. Selections are stored as ordinary `StringName` and `NodePath` values; the
-runtime has no dependency on the editor plugin.
+The **Metis** add-on adds `Select...` menus for compatible methods and properties.
+Selections are stored as ordinary `StringName` and `NodePath` values; exported scenes
+do not depend on the Inspector code.
 
 `PropertyObservationSource` also accepts sub-properties such as `velocity:x` and can
 map numeric values from a source range to a normalized output range.
@@ -90,6 +90,12 @@ Each component returns its weighted value and may implement
 adds `agent_id`, progress, scenario events as direct keys, and terminal/truncation
 state. Optional `is_agent_stalled()` and `get_terminal_reason()` methods may finish one
 agent without ending every other channel.
+
+Runtime scenario configuration is opt-in for reward components. Add property names to
+`scenario_config_properties` in the Inspector, or override
+`apply_scenario_config(config)`, when Python should be allowed to change them. Other
+configuration keys are ignored, so a generic key cannot silently overwrite a reward
+coefficient with the same name.
 
 Use local rewards for behavior intrinsic to a body. Use scenario rewards for task
 rules involving the shared world.
@@ -162,11 +168,14 @@ transition between two different episodes.
 ## Robot-arm collision handling
 
 `URDFRobotArmAgentBody` performs separate environment and self-collision queries.
-Parent-child links are ignored automatically. Additional mechanical overlaps can be
-declared through `self_collision_ignored_link_pairs` or
-`self_collision_ignored_link_sets`.
+Environment collision checks query every imported robot collision shape and only
+report colliders in `obstacle_group`. Configure the query with
+`auto_detect_environment_collisions`, `environment_collision_mask`, and
+`max_collision_results_per_shape`.
 
-Support surfaces can belong to both `robot_obstacle` and
-`robot_support_surface`. Only links listed in `support_contact_link_names` may touch
-them. This lets a fixed base rest on the floor while keeping floor contact terminal
-for the arm and tool.
+Self-body checks are deliberately narrower. Enable `self_body_collision_enabled`, put
+the central body links in `self_body_link_names`, and list only distal links that can
+swing into that body in `self_check_link_names`. Adjacent shoulder links that overlap
+mechanically should stay out of the checker list. `collision_debug` and
+`self_collision_debug` print the first detected contact of an episode while a new
+URDF is being calibrated.

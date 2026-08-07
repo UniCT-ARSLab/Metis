@@ -7,6 +7,10 @@ from pathlib import Path
 import numpy as np
 import tensorflow as tf
 
+# Registers the Metis-serializable composite-policy layers so tf.keras.models.load_model can restore
+# a fused gated-residual policy.keras with NO custom_objects at the call site (run.py stays generic).
+from core import composite_policy  # noqa: F401,E402
+
 
 POLICY_FORMAT = "metis-policy"
 POLICY_FORMAT_VERSION = 1

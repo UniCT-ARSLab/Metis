@@ -1,0 +1,226 @@
+{
+  "schema": "openarm-reach-hold-region-manifest/1",
+  "provenance": {
+    "generated_from": ".research/m1_1/unified/workspace_probe.json (60 cells x 20 samples/cell)",
+    "confirmed_on_scene": "re-probe of the real scene, shell-only 20 samples/cell",
+    "godot_version": "4.7.1 (cross-checked on 4.6.2)",
+    "date": "2026-08-03",
+    "scene": "res://scenarios/robotarms/openarm_reach_hold_scenario.tscn",
+    "context": "OpenArm reach-hold consolidation M1.1 (post ckpt-12000 baseline); workspace relocated to the right arm's reachable side"
+  },
+  "geometry": {
+    "box_center": [
+      0.41,
+      0.53,
+      0.14
+    ],
+    "box_size": [
+      0.2,
+      0.17,
+      0.29
+    ],
+    "grid": [
+      4,
+      3,
+      5
+    ],
+    "total_cells": 60
+  },
+  "tiering": {
+    "method": "radius",
+    "difficulty": "spatial expansion from sweet-spot center; Easy inner -> Hard outer"
+  },
+  "criteria": {
+    "physical_validity_floor": {
+      "easy": 0.95,
+      "medium": 0.85,
+      "hard": 0.7
+    },
+    "physical_valid_def": "position_reachable AND orientation<=30deg (agent metric) AND no endpoint collision AND joint-limit margin ok",
+    "orientation_metric": "agent get_target_orientation_error_observation (== reward/success metric)",
+    "endpoint_collision": "0/20 strict per allowed cell",
+    "min_samples": 20,
+    "path_confirm_min": 0.5,
+    "path_policy": "planner path-failure != physical invalidity; path_unconfirmed cells are KEPT, held OUT of first curriculum, added later without obs/action/reward change"
+  },
+  "active_shells_path_confirmed": {
+    "easy": [
+      17,
+      18,
+      22,
+      25,
+      28,
+      29,
+      30,
+      31,
+      33,
+      34,
+      41
+    ],
+    "medium": [
+      16,
+      19,
+      21,
+      23,
+      32,
+      35,
+      40,
+      44
+    ],
+    "hard": [
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      20,
+      48,
+      52,
+      53,
+      56,
+      57
+    ]
+  },
+  "path_unconfirmed_held_out": {
+    "easy": [
+      42,
+      46
+    ],
+    "medium": [
+      37,
+      43,
+      45,
+      47,
+      54
+    ],
+    "hard": [
+      58,
+      59
+    ]
+  },
+  "excluded_cells": [
+    {
+      "cell": 0,
+      "reason": "endpoint_collision 2/20, physical 35%<70",
+      "phys_pct": 35,
+      "endcoll": 2
+    },
+    {
+      "cell": 1,
+      "reason": "physical 15%<70",
+      "phys_pct": 15,
+      "endcoll": 0
+    },
+    {
+      "cell": 2,
+      "reason": "physical 0%<70",
+      "phys_pct": 0,
+      "endcoll": 0
+    },
+    {
+      "cell": 3,
+      "reason": "physical 0%<70",
+      "phys_pct": 0,
+      "endcoll": 0
+    },
+    {
+      "cell": 5,
+      "reason": "endpoint_collision 1/20",
+      "phys_pct": 90,
+      "endcoll": 1
+    },
+    {
+      "cell": 12,
+      "reason": "endpoint_collision 1/20, physical 55%<70",
+      "phys_pct": 55,
+      "endcoll": 1
+    },
+    {
+      "cell": 13,
+      "reason": "endpoint_collision 2/20, physical 25%<70",
+      "phys_pct": 25,
+      "endcoll": 2
+    },
+    {
+      "cell": 14,
+      "reason": "physical 10%<70",
+      "phys_pct": 10,
+      "endcoll": 0
+    },
+    {
+      "cell": 15,
+      "reason": "physical 0%<70",
+      "phys_pct": 0,
+      "endcoll": 0
+    },
+    {
+      "cell": 24,
+      "reason": "endpoint_collision 3/20",
+      "phys_pct": 70,
+      "endcoll": 3
+    },
+    {
+      "cell": 26,
+      "reason": "physical 25%<70",
+      "phys_pct": 25,
+      "endcoll": 0
+    },
+    {
+      "cell": 27,
+      "reason": "physical 0%<70",
+      "phys_pct": 0,
+      "endcoll": 0
+    },
+    {
+      "cell": 36,
+      "reason": "endpoint_collision 1/20",
+      "phys_pct": 90,
+      "endcoll": 1
+    },
+    {
+      "cell": 38,
+      "reason": "physical 45%<70",
+      "phys_pct": 45,
+      "endcoll": 0
+    },
+    {
+      "cell": 39,
+      "reason": "physical 25%<70",
+      "phys_pct": 25,
+      "endcoll": 0
+    },
+    {
+      "cell": 49,
+      "reason": "endpoint_collision 8/20, physical 30%<70",
+      "phys_pct": 30,
+      "endcoll": 8
+    },
+    {
+      "cell": 50,
+      "reason": "physical 0%<70",
+      "phys_pct": 0,
+      "endcoll": 0
+    },
+    {
+      "cell": 51,
+      "reason": "physical 0%<70",
+      "phys_pct": 0,
+      "endcoll": 0
+    },
+    {
+      "cell": 55,
+      "reason": "physical 45%<70",
+      "phys_pct": 45,
+      "endcoll": 0
+    }
+  ],
+  "terminology": {
+    "physically_valid_pose": "position + orientation<=30 (agent metric) + no endpoint collision + joint-limit ok",
+    "path_valid_pose": "physically-valid AND planner found a collision-free home path for that pose",
+    "path_confirmed_cell": "cell with >=50% path-valid poses; the allowlist granularity (region.allowed_cells). Still contains some path-invalid poses.",
+    "path_unconfirmed_cell": "physically-valid cell with <50% path-valid poses; held out of first curriculum",
+    "bc_filter": "BC/demo training MUST filter to path_valid==true POSES, not merely poses inside a path-confirmed cell"
+  },
+  "active_shells_are": "path-confirmed CELLS (cell-level); do not confuse with path-valid poses"
+}

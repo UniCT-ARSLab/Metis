@@ -614,10 +614,13 @@ For example, if the scene keeps the easy hold stage until episode 2400, evaluati
 speed limit even after live training has moved to the 60-frame stage. The dashboard may
 then report an excellent best policy without measuring the current task.
 
-When the option is omitted, Metis evaluates at `--num-episodes`, which normally selects
-the final curriculum. For staged experiments, use a separate run directory and a fixed
-evaluation episode for each stage. Never compare success percentages produced under
-different thresholds as though they measured the same task.
+When the option is omitted, Metis follows the live training episode, so a frozen
+evaluation measures the same episode-based stage currently being collected. Use
+`--no-best-evaluation-follow-curriculum` only when you deliberately want every check to
+run at the final stage. For staged experiments, a separate run directory and an
+explicit fixed evaluation episode still make comparisons easier to interpret. Never
+compare success percentages produced under different thresholds as though they
+measured the same task.
 
 The evaluator uses the same seed sequence for every checkpoint. After selecting a best
 checkpoint, run a larger held-out test with a different seed:

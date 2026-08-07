@@ -1,17 +1,17 @@
 [gd_scene format=3 uid="uid://bhb3n6ohd2bwd"]
 
-[ext_resource type="Script" uid="uid://d38lybllmy6tq" path="res://scripts/bridge_server.gd" id="1_jfawp"]
+[ext_resource type="Script" uid="uid://d38lybllmy6tq" path="res://addons/metis/runtime/bridge_server.gd" id="1_jfawp"]
 [ext_resource type="Script" uid="uid://b8wfataj6dyxj" path="res://scenarios/robotarms/xarm_scenario.gd" id="1_m16lm"]
-[ext_resource type="Script" uid="uid://cun4ha1fidr8n" path="res://scripts/agent/ScenarioController.gd" id="2_dw0os"]
+[ext_resource type="Script" uid="uid://cun4ha1fidr8n" path="res://addons/metis/runtime/agent/ScenarioController.gd" id="2_dw0os"]
 [ext_resource type="PackedScene" uid="uid://vaijuumklpqx" path="res://agents/RobotArms/xarm/x_arm_agent.tscn" id="3_nsb5c"]
-[ext_resource type="Script" uid="uid://dwsnfjalr8jc7" path="res://scripts/agent/progress/MethodProgressProvider.gd" id="4_1cwtp"]
-[ext_resource type="Script" uid="uid://b47ph323gt6gl" path="res://scripts/agent/events/ScenarioEventSystem.gd" id="5_j17jb"]
-[ext_resource type="Script" uid="uid://botsx3bwjduj2" path="res://scripts/agent/events/ManualScenarioEventSource.gd" id="6_pdjfy"]
-[ext_resource type="Script" uid="uid://tn1jug3aq4ll" path="res://scripts/agent/ScenarioRewardSystem.gd" id="7_x8tpn"]
-[ext_resource type="Script" uid="uid://bmmjchpjospjo" path="res://scripts/agent/scenario_reward_components/ProgressDeltaScenarioReward.gd" id="8_ywys0"]
-[ext_resource type="Script" uid="uid://5rg0xs5vr24r" path="res://scripts/agent/scenario_reward_components/ProgressStallScenarioReward.gd" id="9_qy6q5"]
-[ext_resource type="Script" uid="uid://b0mpnu83er6il" path="res://scripts/agent/scenario_reward_components/EventScenarioReward.gd" id="10_ts88v"]
-[ext_resource type="Script" uid="uid://cftry1v3ck1xm" path="res://scripts/agent/scenario_reward_components/ProximityScenarioReward.gd" id="11_ttprox"]
+[ext_resource type="Script" uid="uid://dwsnfjalr8jc7" path="res://addons/metis/runtime/agent/progress/MethodProgressProvider.gd" id="4_1cwtp"]
+[ext_resource type="Script" uid="uid://b47ph323gt6gl" path="res://addons/metis/runtime/agent/events/ScenarioEventSystem.gd" id="5_j17jb"]
+[ext_resource type="Script" uid="uid://botsx3bwjduj2" path="res://addons/metis/runtime/agent/events/ManualScenarioEventSource.gd" id="6_pdjfy"]
+[ext_resource type="Script" uid="uid://tn1jug3aq4ll" path="res://addons/metis/runtime/agent/ScenarioRewardSystem.gd" id="7_x8tpn"]
+[ext_resource type="Script" uid="uid://bmmjchpjospjo" path="res://addons/metis/runtime/agent/scenario_reward_components/ProgressDeltaScenarioReward.gd" id="8_ywys0"]
+[ext_resource type="Script" uid="uid://5rg0xs5vr24r" path="res://addons/metis/runtime/agent/scenario_reward_components/ProgressStallScenarioReward.gd" id="9_qy6q5"]
+[ext_resource type="Script" uid="uid://b0mpnu83er6il" path="res://addons/metis/runtime/agent/scenario_reward_components/EventScenarioReward.gd" id="10_ts88v"]
+[ext_resource type="Script" uid="uid://cftry1v3ck1xm" path="res://addons/metis/runtime/agent/scenario_reward_components/ProximityScenarioReward.gd" id="11_ttprox"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_ko6j8"]
 sky_horizon_color = Color(0.66224277, 0.6717428, 0.6867428, 1)
@@ -153,7 +153,7 @@ target = NodePath("../Target")
 target_pose = NodePath("../Target/GraspPose")
 
 [node name="Target" type="MeshInstance3D" parent="." unique_id=1913792666]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.31774482, 0.19755316, -0.012032464)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.19768018, 0.19755316, 0.06939696)
 mesh = SubResource("SphereMesh_jfawp")
 surface_material_override/0 = SubResource("StandardMaterial3D_w0qjo")
 

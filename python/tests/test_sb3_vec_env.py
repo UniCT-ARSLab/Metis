@@ -123,12 +123,16 @@ class MetisSB3VecEnvTests(unittest.TestCase):
         self.assertTrue(infos[0]["is_success"])
         self.assertEqual(obs[0].tolist(), [102.0])
         self.assertEqual(obs[1].tolist(), [4.0])
+        # The scene curriculum keys on a GLOBAL episode count, so every reset advances it by one
+        # no matter which env produced it: env0 gets 10, env1 gets 11, env0's auto-reset gets 12.
+        # Sending the per-env counter instead would pace the Godot curriculum num_envs times slower.
         self.assertEqual(env0.configs[0]["training_episode"], 10)
-        self.assertEqual(env1.configs[0]["training_episode"], 10)
-        self.assertEqual(env0.configs[1]["training_episode"], 11)
+        self.assertEqual(env1.configs[0]["training_episode"], 11)
+        self.assertEqual(env0.configs[1]["training_episode"], 12)
+        # Seeding still derives from the PER-ENV episode, so each env keeps its own seed stream.
         self.assertEqual(vec.reset_infos[1]["seed"], 10_001)
         self.assertEqual(vec.current_training_episode, 11)
-        self.assertEqual(vec.next_training_episode, 12)
+        self.assertEqual(vec.next_training_episode, 13)
         vec.close()
         self.assertTrue(env0.closed)
         self.assertTrue(env1.closed)
