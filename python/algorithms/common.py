@@ -106,6 +106,17 @@ from core.training import (
     restore_replay_buffer,
     save_replay_snapshot,
     validate_async_arguments,
+    argument_group,
+    GROUP_CHECKPOINTS,
+    GROUP_CRITIC_AUDIT,
+    GROUP_DEMOS,
+    GROUP_DETERMINISTIC,
+    GROUP_EXPLORATION,
+    GROUP_GODOT,
+    GROUP_LOGGING,
+    GROUP_LOOP,
+    GROUP_PROGRESS_CURRICULUM,
+    GROUP_REPLAY,
 )
 from envs.process_manager import GodotProcessManager
 from envs.scenario import ScenarioGymEnv
@@ -124,43 +135,55 @@ def parse_args(trainer_variant):
             "with the other deterministic algorithms."
         )
     )
-    parser.add_argument("--num-envs", type=int, default=1)
-    parser.add_argument("--base-port", type=int, default=6200)
-    parser.add_argument("--num-episodes", type=int, default=500)
+
+    group = argument_group(parser, GROUP_GODOT)
+    group.add_argument("--num-envs", type=int, default=1)
+    group.add_argument("--base-port", type=int, default=6200)
+
+    group = argument_group(parser, GROUP_LOOP)
+    group.add_argument("--num-episodes", type=int, default=500)
     add_training_budget_argument(parser)
-    parser.add_argument(
+    group.add_argument(
         "--max-steps-per-episode",
         type=int,
         default=500,
         help="Maximum episode steps shared with Godot; use 0 to rely only on terminal conditions.",
     )
-    parser.add_argument("--batch-size", type=int, default=128)
-    parser.add_argument("--gamma", type=float, default=0.99)
-    parser.add_argument("--tau", type=float, default=0.005)
-    parser.add_argument("--actor-learning-rate", type=float, default=1e-4)
-    parser.add_argument("--critic-learning-rate", type=float, default=1e-3)
-    parser.add_argument("--exploration-noise", type=float, default=0.2)
-    parser.add_argument("--exploration-noise-min", type=float, default=0.02)
-    parser.add_argument("--exploration-noise-decay", type=float, default=0.995)
-    parser.add_argument("--exploration-noise-kind", choices=["ou", "gaussian"], default="ou")
-    parser.add_argument("--ou-theta", type=float, default=0.15)
-    parser.add_argument("--action-smoothing", type=float, default=0.2)
-    parser.add_argument("--random-exploration-episodes", type=int, default=15)
-    parser.add_argument("--random-drive-min", type=float, default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--random-steering-abs-max", type=float, default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--actor-drive-prior", type=float, default=0.75)
-    parser.add_argument("--actor-steering-prior", type=float, default=0.0)
-    parser.add_argument("--actor-drive-regularization", type=float, default=0.05)
-    parser.add_argument("--actor-drive-target", type=float, default=0.65)
-    parser.add_argument("--reset-progress-curriculum", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--reset-progress-start-max", type=float, default=0.025)
-    parser.add_argument("--reset-progress-end-max", type=float, default=0.35)
-    parser.add_argument("--reset-progress-ramp-episodes", type=int, default=400)
-    parser.add_argument("--replay-warmup", type=int, default=500)
-    parser.add_argument("--replay-capacity", type=int, default=100000)
-    parser.add_argument("--critic-warmup-updates", type=int, default=2000)
-    parser.add_argument("--target-update-every", type=int, default=1)
-    parser.add_argument(
+    group.add_argument("--batch-size", type=int, default=128)
+    group.add_argument("--gamma", type=float, default=0.99)
+    group.add_argument("--tau", type=float, default=0.005)
+    group.add_argument("--actor-learning-rate", type=float, default=1e-4)
+    group.add_argument("--critic-learning-rate", type=float, default=1e-3)
+
+    group = argument_group(parser, GROUP_EXPLORATION)
+    group.add_argument("--exploration-noise", type=float, default=0.2)
+    group.add_argument("--exploration-noise-min", type=float, default=0.02)
+    group.add_argument("--exploration-noise-decay", type=float, default=0.995)
+    group.add_argument("--exploration-noise-kind", choices=["ou", "gaussian"], default="ou")
+    group.add_argument("--ou-theta", type=float, default=0.15)
+    group.add_argument("--action-smoothing", type=float, default=0.2)
+    group.add_argument("--random-exploration-episodes", type=int, default=15)
+    group.add_argument("--random-drive-min", type=float, default=None, help=argparse.SUPPRESS)
+    group.add_argument("--random-steering-abs-max", type=float, default=None, help=argparse.SUPPRESS)
+    group.add_argument("--actor-drive-prior", type=float, default=0.75)
+    group.add_argument("--actor-steering-prior", type=float, default=0.0)
+    group.add_argument("--actor-drive-regularization", type=float, default=0.05)
+    group.add_argument("--actor-drive-target", type=float, default=0.65)
+
+    group = argument_group(parser, GROUP_PROGRESS_CURRICULUM)
+    group.add_argument("--reset-progress-curriculum", action=argparse.BooleanOptionalAction, default=False)
+    group.add_argument("--reset-progress-start-max", type=float, default=0.025)
+    group.add_argument("--reset-progress-end-max", type=float, default=0.35)
+    group.add_argument("--reset-progress-ramp-episodes", type=int, default=400)
+
+    group = argument_group(parser, GROUP_REPLAY)
+    group.add_argument("--replay-warmup", type=int, default=500)
+    group.add_argument("--replay-capacity", type=int, default=100000)
+
+    group = argument_group(parser, GROUP_LOOP)
+    group.add_argument("--critic-warmup-updates", type=int, default=2000)
+    group.add_argument("--target-update-every", type=int, default=1)
+    group.add_argument(
         "--network-layers",
         type=int,
         nargs="+",
@@ -171,72 +194,84 @@ def parse_args(trainer_variant):
         "TD3/DDPG 400 300, PPO and DQN 64 64). Checkpoints written before these "
         "defaults used 256 256 128 and need that value passed explicitly.",
     )
-    parser.add_argument("--env-seed-base", type=int, default=100)
-    parser.add_argument("--episode-seed-multiplier", type=int, default=1000)
-    parser.add_argument("--env-timeout", type=float, default=30.0)
-    parser.add_argument("--agent-id", default=None)
-    parser.add_argument("--multi-agent", action=argparse.BooleanOptionalAction, default=False)
+
+    group = argument_group(parser, GROUP_GODOT)
+    group.add_argument("--env-seed-base", type=int, default=100)
+    group.add_argument("--episode-seed-multiplier", type=int, default=1000)
+    group.add_argument("--env-timeout", type=float, default=30.0)
+    group.add_argument("--agent-id", default=None)
+    group.add_argument("--multi-agent", action=argparse.BooleanOptionalAction, default=False)
     add_multi_policy_arguments(parser)
-    parser.add_argument("--actor-weights-path", default="generic_ddpg_actor.weights.h5")
-    parser.add_argument(
+
+    group = argument_group(parser, GROUP_CHECKPOINTS)
+    group.add_argument("--actor-weights-path", default="generic_ddpg_actor.weights.h5")
+    group.add_argument(
         "--policy-path",
         default=None,
         help="Warm-start the actor from a .keras model, full .h5 model, or .weights.h5 file.",
     )
-    parser.add_argument("--critic-weights-path", default="generic_ddpg_critic.weights.h5")
-    parser.add_argument("--checkpoint-dir", default="checkpoints/generic_ddpg")
-    parser.add_argument("--resume-checkpoint", default=None)
-    parser.add_argument("--checkpoint-every", type=int, default=25)
-    parser.add_argument("--keep-checkpoints", type=int, default=5)
-    parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--save-replay-buffer", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--require-replay-buffer", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--demo-path", action="append", default=[])
-    parser.add_argument("--demo-prefill", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--demo-max-transitions", type=int, default=0)
-    parser.add_argument("--demo-bc-epochs", type=int, default=0)
-    parser.add_argument("--demo-bc-batch-size", type=int, default=128)
-    parser.add_argument("--demo-bc-learning-rate", type=float, default=None)
-    parser.add_argument("--demo-bc-on-resume", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--demo-validation-path", action="append", default=[],
+    group.add_argument("--critic-weights-path", default="generic_ddpg_critic.weights.h5")
+    group.add_argument("--checkpoint-dir", default="checkpoints/generic_ddpg")
+    group.add_argument("--resume-checkpoint", default=None)
+    group.add_argument("--checkpoint-every", type=int, default=25)
+    group.add_argument("--keep-checkpoints", type=int, default=5)
+    group.add_argument("--resume", action=argparse.BooleanOptionalAction, default=False)
+
+    group = argument_group(parser, GROUP_REPLAY)
+    group.add_argument("--save-replay-buffer", action=argparse.BooleanOptionalAction, default=True)
+    group.add_argument("--require-replay-buffer", action=argparse.BooleanOptionalAction, default=False)
+
+    group = argument_group(parser, GROUP_DEMOS)
+    group.add_argument("--demo-path", action="append", default=[])
+    group.add_argument("--demo-prefill", action=argparse.BooleanOptionalAction, default=True)
+    group.add_argument("--demo-max-transitions", type=int, default=0)
+    group.add_argument("--demo-bc-epochs", type=int, default=0)
+    group.add_argument("--demo-bc-batch-size", type=int, default=128)
+    group.add_argument("--demo-bc-learning-rate", type=float, default=None)
+    group.add_argument("--demo-bc-on-resume", action=argparse.BooleanOptionalAction, default=False)
+    group.add_argument("--demo-validation-path", action="append", default=[],
                         help="Held-out demo npz(s): BC keeps the epoch with the lowest validation "
                         "action MSE (best-checkpoint against overfitting).")
-    parser.add_argument("--bc-actor-weights-path", type=str, default=None,
+    group.add_argument("--bc-actor-weights-path", type=str, default=None,
                         help="Persist the BC-pretrained actor here BEFORE any RL update "
                         "(default: the actor weights path with a _bc suffix).")
-    parser.add_argument("--stop-after-bc", action=argparse.BooleanOptionalAction, default=False,
+    group.add_argument("--stop-after-bc", action=argparse.BooleanOptionalAction, default=False,
                         help="Run BC (+ save the BC actor) then ONE frozen evaluation at the "
                         "current curriculum level, and STOP before the RL loop. A deterministic "
                         "BC gate; errors if BC did not actually run.")
-    parser.add_argument("--stop-after-critic-warmup", action=argparse.BooleanOptionalAction,
+
+    group = argument_group(parser, GROUP_CRITIC_AUDIT)
+    group.add_argument("--stop-after-critic-warmup", action=argparse.BooleanOptionalAction,
                         default=False,
                         help="Run the critic warmup with the actor FROZEN, then a Q-ranking audit on "
                         "the validation batch (min(Q1,Q2) for expert/clone/perturbed/random/saturated "
                         "actions), SAVE state and STOP before the first actor update. The audit gate "
                         "must pass (critic values expert+clone above random+saturated) before any "
                         "actor update is allowed.")
-    parser.add_argument("--gradient-telemetry-every", type=int, default=0,
+    group.add_argument("--gradient-telemetry-every", type=int, default=0,
                         help="Collect separate Q-term / BC-term gradient norms + cosine similarity + "
                         "actor-vs-BC deviation every N policy updates (0 = never). Adds two extra "
                         "backward passes on those steps.")
-    parser.add_argument("--critic-audit-win-rate", type=float, default=0.9,
+    group.add_argument("--critic-audit-win-rate", type=float, default=0.9,
                         help="stop-after-critic-warmup gate: each good-vs-bad action pair must beat "
                         "the bad family on at least this fraction of validation samples.")
-    parser.add_argument("--critic-audit-cell-margin-tol", type=float, default=0.0,
+    group.add_argument("--critic-audit-cell-margin-tol", type=float, default=0.0,
                         help="stop-after-critic-warmup gate: a cell fails if its MEAN good-vs-bad "
                         "margin is below -tol (0 = no clearly-negative cell allowed).")
     # Generic dataset separation (task-agnostic):
     #   --demo-path             complete transitions -> BC AND replay.
     #   --demo-replay-only-path complete transitions -> replay ONLY (never in the BC sampler).
     #   --demo-bc-path          (obs, action) pairs   -> BC imitation loss ONLY (never in replay).
-    parser.add_argument("--demo-replay-only-path", action="append", default=[],
+
+    group = argument_group(parser, GROUP_DEMOS)
+    group.add_argument("--demo-replay-only-path", action="append", default=[],
                         help="Complete-transition npz(s) added ONLY to the replay buffer, never to "
                         "BC (e.g. DAgger recovery: expert-applied transitions valid for the critics "
                         "but which must not bias the imitation target).")
-    parser.add_argument("--demo-bc-path", action="append", default=[],
+    group.add_argument("--demo-bc-path", action="append", default=[],
                         help="(obs, action) npz(s) added ONLY to the BC imitation loss, never to "
                         "replay (their next_obs was produced by a different policy).")
-    parser.add_argument("--demo-q-filter-start-policy-updates", type=int, default=0,
+    group.add_argument("--demo-q-filter-start-policy-updates", type=int, default=0,
                         help="Enable the TD3+BC Q-filter only after this many policy updates have "
                         "run SINCE the critic warmup ended (0 = filter from the first update). "
                         "Before it, the demo BC term is unfiltered.")
@@ -260,52 +295,60 @@ def parse_args(trainer_variant):
         ddpgfd_actor_priority_weight=1e-3,
     )
     if variant_uses_joint_bc(trainer_variant) or str(trainer_variant) == "ddpgfd":
-        parser.add_argument("--demo-bc-weight-start", type=float, default=1.0)
-        parser.add_argument("--demo-bc-weight-end", type=float, default=0.05)
-        parser.add_argument("--demo-bc-decay-updates", type=int, default=100000)
+        group.add_argument("--demo-bc-weight-start", type=float, default=1.0)
+        group.add_argument("--demo-bc-weight-end", type=float, default=0.05)
+        group.add_argument("--demo-bc-decay-updates", type=int, default=100000)
         # Separate Q-term schedule: grow the TD3 Q-maximisation weight 0 -> end over policy updates
         # since the warmup, so it is NOT applied at full strength the instant the actor unfreezes.
-        parser.add_argument("--demo-q-weight-start", type=float, default=0.0)
-        parser.add_argument("--demo-q-weight-end", type=float, default=1.0)
-        parser.add_argument("--demo-q-weight-ramp-updates", type=int, default=50000)
-        parser.add_argument("--demo-q-filter", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument(
+        group.add_argument("--demo-q-weight-start", type=float, default=0.0)
+        group.add_argument("--demo-q-weight-end", type=float, default=1.0)
+        group.add_argument("--demo-q-weight-ramp-updates", type=int, default=50000)
+        group.add_argument("--demo-q-filter", action=argparse.BooleanOptionalAction, default=False)
+
+    group = argument_group(parser, GROUP_LOOP)
+    group.add_argument(
         "--grad-clip-norm",
         type=float,
         default=10.0,
         help="Hard global gradient-norm cap for critic/actor updates (0 disables). Safety "
         "net against the deadly-triad Q-value divergence that otherwise blows critics up.",
     )
-    parser.add_argument(
+    group.add_argument(
         "--grad-clip-adaptive",
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Clip each network at --grad-clip-k * EMA(gradient-norm), bounded by "
         "--grad-clip-norm.",
     )
-    parser.add_argument(
+    group.add_argument(
         "--grad-clip-k",
         type=float,
         default=3.0,
         help="Multiplier on the running-mean gradient norm when --grad-clip-adaptive is set.",
     )
     if variant_uses_td3(trainer_variant):
-        parser.add_argument("--critic2-weights-path", default="generic_td3_critic2.weights.h5")
-        parser.add_argument("--td3-policy-delay", type=int, default=2)
-        parser.add_argument("--td3-target-policy-noise", type=float, default=0.2)
-        parser.add_argument("--td3-target-noise-clip", type=float, default=0.5)
+
+        group = argument_group(parser, GROUP_CHECKPOINTS)
+        group.add_argument("--critic2-weights-path", default="generic_td3_critic2.weights.h5")
+
+        group = argument_group(parser, GROUP_DETERMINISTIC)
+        group.add_argument("--td3-policy-delay", type=int, default=2)
+        group.add_argument("--td3-target-policy-noise", type=float, default=0.2)
+        group.add_argument("--td3-target-noise-clip", type=float, default=0.5)
     if trainer_variant == "td3_bc":
-        parser.add_argument("--td3-bc-alpha", type=float, default=2.5)
+        group.add_argument("--td3-bc-alpha", type=float, default=2.5)
     if trainer_variant == "ddpgfd":
-        parser.add_argument("--ddpgfd-pretrain-updates", type=int, default=1000)
-        parser.add_argument("--ddpgfd-priority-alpha", type=float, default=0.3)
-        parser.add_argument("--ddpgfd-priority-beta", type=float, default=1.0)
-        parser.add_argument("--ddpgfd-demo-priority-bonus", type=float, default=1.0)
-        parser.add_argument("--ddpgfd-actor-priority-weight", type=float, default=1e-3)
-    parser.add_argument("--godot-bin", default=os.environ.get("GODOT_BIN"))
-    parser.add_argument("--godot-project", default=None)
-    parser.add_argument("--godot-scene", default=None)
-    parser.add_argument(
+        group.add_argument("--ddpgfd-pretrain-updates", type=int, default=1000)
+        group.add_argument("--ddpgfd-priority-alpha", type=float, default=0.3)
+        group.add_argument("--ddpgfd-priority-beta", type=float, default=1.0)
+        group.add_argument("--ddpgfd-demo-priority-bonus", type=float, default=1.0)
+        group.add_argument("--ddpgfd-actor-priority-weight", type=float, default=1e-3)
+
+    group = argument_group(parser, GROUP_GODOT)
+    group.add_argument("--godot-bin", default=os.environ.get("GODOT_BIN"))
+    group.add_argument("--godot-project", default=None)
+    group.add_argument("--godot-scene", default=None)
+    group.add_argument(
         "--headless",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -315,8 +358,10 @@ def parse_args(trainer_variant):
             "which physics stays gated to wall-clock 60Hz. Use --no-headless to watch."
         ),
     )
-    parser.add_argument("--godot-debug", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--log-details", action=argparse.BooleanOptionalAction, default=False)
+    group.add_argument("--godot-debug", action=argparse.BooleanOptionalAction, default=False)
+
+    group = argument_group(parser, GROUP_LOGGING)
+    group.add_argument("--log-details", action=argparse.BooleanOptionalAction, default=False)
     add_collector_arguments(parser)
     add_parallel_env_arguments(parser)
     add_lockstep_tuning_arguments(parser)

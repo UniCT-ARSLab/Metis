@@ -2,6 +2,8 @@
 class_name MetisRuntimeSetupDialog
 extends AcceptDialog
 
+const BRANDING := preload("res://addons/metis/editor/metis_branding.gd")
+
 signal runtime_ready(config: Dictionary)
 
 var runtime_manager: MetisRuntimeManager
@@ -29,6 +31,10 @@ func _ready() -> void:
 	var content := VBoxContainer.new()
 	content.add_theme_constant_override("separation", 8)
 	add_child(content)
+
+	content.add_child(BRANDING.header(
+		"Metis Runtime Setup",
+		"Python environment for training and inference"))
 
 	var description := Label.new()
 	description.text = (
@@ -130,7 +136,7 @@ func _process(_delta: float) -> void:
 	var status := runtime_manager.setup_status()
 	if status.is_empty():
 		return
-	_status_label.text = str(status.get("message", "Working..."))
+	_status_label.text = str(status.get("message", "Working…"))
 	_progress.value = float(status.get("progress", 0.0)) * 100.0
 	var log_text := runtime_manager.setup_log()
 	if _log.text != log_text:
@@ -173,7 +179,7 @@ func _start_setup() -> void:
 	_setup_started = true
 	get_ok_button().disabled = true
 	_set_inputs_disabled(true)
-	_status_label.text = "Starting runtime setup..."
+	_status_label.text = "Starting runtime setup…"
 	set_process(true)
 
 

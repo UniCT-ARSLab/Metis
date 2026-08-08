@@ -113,6 +113,20 @@ from core.training import (
     restore_replay_buffer,
     save_replay_snapshot,
     validate_async_arguments,
+    argument_group,
+    GROUP_CHECKPOINTS,
+    GROUP_DEMOS,
+    GROUP_EXPLORATION,
+    GROUP_GODOT,
+    GROUP_LOGGING,
+    GROUP_LOOP,
+    GROUP_REPLAY,
+    add_gradient_clip_arguments,
+    add_value_loss_arguments,
+    describe_gradient_clip,
+    make_gradient_clipper,
+    value_loss_fn,
+    TargetSyncSchedule,
 )
 from envs.process_manager import GodotProcessManager
 from envs.scenario import ScenarioGymEnv
@@ -173,24 +187,48 @@ def merge_count_dicts(states, key, *, integer=False):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Generic DQN trainer for Godot scenarios using BridgeServer.")
-    parser.add_argument("--num-envs", type=int, default=1)
-    parser.add_argument("--base-port", type=int, default=6200)
-    parser.add_argument("--num-episodes", type=int, default=500)
+
+    group = argument_group(parser, GROUP_GODOT)
+    group.add_argument("--num-envs", type=int, default=1)
+    group.add_argument("--base-port", type=int, default=6200)
+
+    group = argument_group(parser, GROUP_LOOP)
+    group.add_argument("--num-episodes", type=int, default=500)
     add_training_budget_argument(parser)
-    parser.add_argument(
+    group.add_argument(
         "--max-steps-per-episode",
         type=int,
         default=500,
         help="Maximum episode steps shared with Godot; use 0 to rely only on terminal conditions.",
     )
-    parser.add_argument("--batch-size", type=int, default=128)
-    parser.add_argument("--gamma", type=float, default=0.99)
-    parser.add_argument("--learning-rate", type=float, default=1e-3)
-    parser.add_argument("--target-update-every", type=int, default=20)
-    parser.add_argument("--replay-warmup", type=int, default=500)
-    parser.add_argument("--epsilon-start", type=float, default=1.0)
-    parser.add_argument("--epsilon-min", type=float, default=0.05)
-    parser.add_argument(
+    group.add_argument("--batch-size", type=int, default=128)
+    group.add_argument("--gamma", type=float, default=0.99)
+    group.add_argument("--learning-rate", type=float, default=1e-3)
+    group.add_argument("--target-update-every", type=int, default=20)
+    group.add_argument(
+        "--target-update-steps",
+        type=int,
+        default=0,
+        help=(
+            "Refresh the target network every N collected TRANSITIONS instead of every "
+            "--target-update-every episodes (0 keeps the episode-based default). Episodes are a "
+            "moving unit whenever their length grows with the policy: on Breakout they went from 57 "
+            "to 935 steps in one run, drifting the real interval from 284 to 4345 gradient updates. "
+            "The DQN literature counts environment steps for exactly this reason."
+        ),
+    )
+    # DQN had neither of these until now: it was the only algorithm without gradient clipping, and
+    # every Metis learner hardcoded a squared error. Both default to the previous behaviour.
+    add_gradient_clip_arguments(parser, default_norm=0.0)
+    add_value_loss_arguments(parser)
+
+    group = argument_group(parser, GROUP_REPLAY)
+    group.add_argument("--replay-warmup", type=int, default=500)
+
+    group = argument_group(parser, GROUP_EXPLORATION)
+    group.add_argument("--epsilon-start", type=float, default=1.0)
+    group.add_argument("--epsilon-min", type=float, default=0.05)
+    group.add_argument(
         "--epsilon-decay",
         type=float,
         default=None,
@@ -202,7 +240,7 @@ def parse_args():
             "Pass a value to pin it."
         ),
     )
-    parser.add_argument(
+    group.add_argument(
         "--epsilon-decay-horizon-fraction",
         type=float,
         default=EPSILON_DECAY_HORIZON_FRACTION,
@@ -211,8 +249,12 @@ def parse_args():
             "epsilon down to epsilon-min. Ignored when --epsilon-decay is given."
         ),
     )
-    parser.add_argument("--replay-capacity", type=int, default=100000)
-    parser.add_argument(
+
+    group = argument_group(parser, GROUP_REPLAY)
+    group.add_argument("--replay-capacity", type=int, default=100000)
+
+    group = argument_group(parser, GROUP_LOOP)
+    group.add_argument(
         "--network-layers",
         type=int,
         nargs="+",
@@ -223,38 +265,50 @@ def parse_args():
         "TD3/DDPG 400 300, PPO and DQN 64 64). Checkpoints written before these "
         "defaults used 256 256 128 and need that value passed explicitly.",
     )
-    parser.add_argument("--env-seed-base", type=int, default=100)
-    parser.add_argument("--episode-seed-multiplier", type=int, default=1000)
-    parser.add_argument("--env-timeout", type=float, default=30.0)
-    parser.add_argument("--agent-id", default=None)
-    parser.add_argument("--multi-agent", action=argparse.BooleanOptionalAction, default=False)
+
+    group = argument_group(parser, GROUP_GODOT)
+    group.add_argument("--env-seed-base", type=int, default=100)
+    group.add_argument("--episode-seed-multiplier", type=int, default=1000)
+    group.add_argument("--env-timeout", type=float, default=30.0)
+    group.add_argument("--agent-id", default=None)
+    group.add_argument("--multi-agent", action=argparse.BooleanOptionalAction, default=False)
     add_multi_policy_arguments(parser)
-    parser.add_argument("--log-action-every", type=int, default=1)
-    parser.add_argument("--weights-path", default="generic_dqn_weights.weights.h5")
-    parser.add_argument(
+
+    group = argument_group(parser, GROUP_LOGGING)
+    group.add_argument("--log-action-every", type=int, default=1)
+
+    group = argument_group(parser, GROUP_CHECKPOINTS)
+    group.add_argument("--weights-path", default="generic_dqn_weights.weights.h5")
+    group.add_argument(
         "--policy-path",
         default=None,
         help="Warm-start the policy from a .keras model, full .h5 model, or .weights.h5 file.",
     )
-    parser.add_argument("--initial-weights-path", default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--checkpoint-dir", default="checkpoints/generic_dqn")
-    parser.add_argument("--resume-checkpoint", default=None)
-    parser.add_argument("--checkpoint-every", type=int, default=25)
-    parser.add_argument("--keep-checkpoints", type=int, default=5)
-    parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--save-replay-buffer", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--require-replay-buffer", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--demo-path", action="append", default=[])
-    parser.add_argument("--demo-prefill", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--demo-max-transitions", type=int, default=0)
-    parser.add_argument("--demo-bc-epochs", type=int, default=0)
-    parser.add_argument("--demo-bc-batch-size", type=int, default=128)
-    parser.add_argument("--demo-bc-learning-rate", type=float, default=None)
-    parser.add_argument("--demo-bc-on-resume", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--godot-bin", default=os.environ.get("GODOT_BIN"))
-    parser.add_argument("--godot-project", default=None)
-    parser.add_argument("--godot-scene", default=None)
-    parser.add_argument(
+    group.add_argument("--initial-weights-path", default=None, help=argparse.SUPPRESS)
+    group.add_argument("--checkpoint-dir", default="checkpoints/generic_dqn")
+    group.add_argument("--resume-checkpoint", default=None)
+    group.add_argument("--checkpoint-every", type=int, default=25)
+    group.add_argument("--keep-checkpoints", type=int, default=5)
+    group.add_argument("--resume", action=argparse.BooleanOptionalAction, default=False)
+
+    group = argument_group(parser, GROUP_REPLAY)
+    group.add_argument("--save-replay-buffer", action=argparse.BooleanOptionalAction, default=True)
+    group.add_argument("--require-replay-buffer", action=argparse.BooleanOptionalAction, default=False)
+
+    group = argument_group(parser, GROUP_DEMOS)
+    group.add_argument("--demo-path", action="append", default=[])
+    group.add_argument("--demo-prefill", action=argparse.BooleanOptionalAction, default=True)
+    group.add_argument("--demo-max-transitions", type=int, default=0)
+    group.add_argument("--demo-bc-epochs", type=int, default=0)
+    group.add_argument("--demo-bc-batch-size", type=int, default=128)
+    group.add_argument("--demo-bc-learning-rate", type=float, default=None)
+    group.add_argument("--demo-bc-on-resume", action=argparse.BooleanOptionalAction, default=False)
+
+    group = argument_group(parser, GROUP_GODOT)
+    group.add_argument("--godot-bin", default=os.environ.get("GODOT_BIN"))
+    group.add_argument("--godot-project", default=None)
+    group.add_argument("--godot-scene", default=None)
+    group.add_argument(
         "--headless",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -264,7 +318,7 @@ def parse_args():
             "which physics stays gated to wall-clock 60Hz. Use --no-headless to watch."
         ),
     )
-    parser.add_argument("--godot-debug", action=argparse.BooleanOptionalAction, default= False)
+    group.add_argument("--godot-debug", action=argparse.BooleanOptionalAction, default= False)
     add_collector_arguments(parser)
     add_parallel_env_arguments(parser)
     add_lockstep_tuning_arguments(parser)
@@ -363,9 +417,30 @@ def action_last_summary(last_actions, action_names):
     return result
 
 
-def build_dqn_learner_step(model, target_model, optimizer, gamma, *, compiled=True):
+def build_dqn_learner_step(
+    model,
+    target_model,
+    optimizer,
+    gamma,
+    *,
+    compiled=True,
+    grad_clip_norm=0.0,
+    grad_clip_adaptive=False,
+    grad_clip_k=3.0,
+    critic_loss="mse",
+    huber_delta=1.0,
+):
     gamma = tf.constant(float(gamma), dtype=tf.float32)
     optimizer.build(model.trainable_variables)
+    # Both resolved once, before tracing: the traced graph holds the chosen loss and clipper, so
+    # neither adds a branch per step nor a retrace.
+    compute_loss = value_loss_fn(critic_loss, huber_delta)
+    clip_grads = make_gradient_clipper(
+        "dqn",
+        grad_clip_norm=grad_clip_norm,
+        grad_clip_adaptive=grad_clip_adaptive,
+        grad_clip_k=grad_clip_k,
+    )
 
     def update_one(obs, actions, rewards, next_obs, dones):
         next_q = target_model(next_obs, training=False)
@@ -376,9 +451,9 @@ def build_dqn_learner_step(model, target_model, optimizer, gamma, *, compiled=Tr
             q_values = model(obs, training=True)
             action_mask = tf.one_hot(actions, tf.shape(q_values)[-1], dtype=q_values.dtype)
             q_selected = tf.reduce_sum(q_values * action_mask, axis=1)
-            loss = tf.reduce_mean(tf.square(targets - q_selected))
+            loss = compute_loss(targets, q_selected)
 
-        grads = tape.gradient(loss, model.trainable_variables)
+        grads = clip_grads(tape.gradient(loss, model.trainable_variables))
         optimizer.apply_gradients(zip(grads, model.trainable_variables))
         return loss
 
@@ -435,6 +510,7 @@ def run_async_dqn(
 ):
     validate_async_arguments(args, supports_opponent_pool=True)
     budget = budget or TrainingBudget(getattr(args, "total_timesteps", 0))
+    target_sync = TargetSyncSchedule(args)
     obs_dim = envs[0].obs_dim
     num_actions = envs[0].num_actions
     with tf.device("/CPU:0"):
@@ -733,6 +809,8 @@ def run_async_dqn(
                     warmup_completed_episode["value"] = int(completed)
                     replay_ready_event.set()
                 budget.consume(collected_transitions)
+                if target_sync.due_after_transitions(collected_transitions):
+                    target_model.set_weights(model.get_weights())
                 updates_due = scheduler.ingest(step_events)
                 updates_performed = 0
                 if (
@@ -766,7 +844,7 @@ def run_async_dqn(
                 continue
             completed += 1
             state = event.payload
-            if completed % args.target_update_every == 0:
+            if target_sync.due_after_episode(completed):
                 target_model.set_weights(model.get_weights())
             if opponent_pool is not None:
                 # Snapshot from the learner, not the workers: a worker's local model is
@@ -1583,6 +1661,11 @@ def run_sync_multi_policy_dqn(
             optimizer,
             args.gamma,
             compiled=args.tf_compile_learner,
+            grad_clip_norm=args.grad_clip_norm,
+            grad_clip_adaptive=args.grad_clip_adaptive,
+            grad_clip_k=args.grad_clip_k,
+            critic_loss=args.critic_loss,
+            huber_delta=args.huber_delta,
         )
         artifact_dir = (
             Path(args.checkpoint_dir)
@@ -1691,7 +1774,9 @@ def run_sync_multi_policy_dqn(
     )
     print(
         f"DQN learner: {'compiled batched graph' if args.tf_compile_learner else 'eager'} "
-        f"instances={len(policy_states)}",
+        f"instances={len(policy_states)} loss={args.critic_loss}"
+        + (f"(delta={args.huber_delta:g})" if args.critic_loss == "huber" else "")
+        + f" grad_clip={describe_gradient_clip(args)}",
         flush=True,
     )
 
@@ -2043,6 +2128,13 @@ def main():
     args = parse_args()
     budget = TrainingBudget(args.total_timesteps)
     validate_async_arguments(args, supports_opponent_pool=True)
+    if int(getattr(args, "target_update_steps", 0) or 0) > 0 and getattr(args, "multi_policy", False):
+        # Refused rather than ignored: the multi-policy loops still sync per episode, and silently
+        # dropping the flag would report a schedule the run is not using.
+        raise RuntimeError(
+            "--target-update-steps is not implemented for --multi-policy; "
+            "use --target-update-every there."
+        )
     best_tracker = BestCheckpointTracker(args, "dqn")
     describe_tensorflow_backend(args)
     dashboard = maybe_start_dashboard(args, algorithm="dqn")
@@ -2248,15 +2340,25 @@ def main():
                 flush=True,
             )
 
+        target_sync = TargetSyncSchedule(args)
         learner_step = build_dqn_learner_step(
             model,
             target_model,
             optimizer,
             args.gamma,
             compiled=args.tf_compile_learner,
+            grad_clip_norm=args.grad_clip_norm,
+            grad_clip_adaptive=args.grad_clip_adaptive,
+            grad_clip_k=args.grad_clip_k,
+            critic_loss=args.critic_loss,
+            huber_delta=args.huber_delta,
         )
         print(
-            f"DQN learner: {'compiled batched graph' if args.tf_compile_learner else 'eager'}",
+            f"DQN learner: {'compiled batched graph' if args.tf_compile_learner else 'eager'} "
+            f"loss={args.critic_loss}"
+            + (f"(delta={args.huber_delta:g})" if args.critic_loss == "huber" else "")
+            + f" grad_clip={describe_gradient_clip(args)}"
+            + f" target_sync={target_sync.describe()}",
             flush=True,
         )
 
@@ -2497,7 +2599,7 @@ def main():
                 if budget.exhausted:
                     break
 
-            if (episode + 1) % args.target_update_every == 0:
+            if target_sync.due_after_episode(episode + 1):
                 target_model.set_weights(model.get_weights())
 
             if len(buffer) >= replay_warmup_threshold(args):

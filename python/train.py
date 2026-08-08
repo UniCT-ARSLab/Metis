@@ -27,6 +27,9 @@ SB3_BACKEND = "backends.sb3"
 SB3_ALGORITHMS = {"dqn", "ddpg", "td3", "sac", "ppo"}
 
 
+HELP_FLAGS = ("-h", "--help")
+
+
 def parse_args(argv):
     parser = argparse.ArgumentParser(
         description=(
@@ -35,6 +38,12 @@ def parse_args(argv):
             "DDPG for continuous actions, or PPO for hybrid actions. SAC can be "
             "selected explicitly for continuous action spaces, as can TD3 and the "
             "demonstration-aware deterministic variants."
+        ),
+        epilog=(
+            "Only the options above are handled here; each algorithm accepts well over a hundred "
+            "more. Name one to see its full grouped list: --algorithm sac --help. "
+            "That cannot be done for --algorithm auto, because resolving 'auto' means launching "
+            "Godot to inspect the scenario's action space."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -132,6 +141,63 @@ def has_bool_option(argv, option):
     return any(arg == option or arg == negative for arg in argv)
 
 
+def option_value(argv, option):
+    """Read one option straight off the command line, without building a parser.
+
+    Needed because ``--help`` has to be answered BEFORE argparse sees it: the automatic help action
+    fires inside parse_known_args() and exits, which is why `--algorithm sac --help` used to print
+    the dispatcher's short list instead of SAC's.
+    """
+    prefix = option + "="
+    for index, arg in enumerate(argv):
+        if arg == option and index + 1 < len(argv):
+            return argv[index + 1]
+        if arg.startswith(prefix):
+            return arg[len(prefix):]
+    return None
+
+
+def backend_module_for(algorithm, backend):
+    if backend != "sb3":
+        return BACKENDS[algorithm]
+    if algorithm not in SB3_ALGORITHMS:
+        supported = ", ".join(sorted(SB3_ALGORITHMS))
+        raise RuntimeError(
+            f"backend='sb3' does not support algorithm={algorithm!r}; choose one of: {supported}"
+        )
+    return SB3_BACKEND
+
+
+def delegate_help(argv):
+    """Print the selected algorithm's own --help, or return False to fall back to ours.
+
+    Every backend's main() calls parse_args() as its first statement, so handing it an argv that
+    still contains --help makes argparse print and exit before any training side effect. Resolving
+    'auto' is deliberately NOT attempted: that path starts a Godot process to probe the action
+    space, which no help request should do.
+    """
+    algorithm = option_value(argv, "--algorithm")
+    if algorithm is None or algorithm == "auto" or algorithm not in BACKENDS:
+        return False
+    backend = option_value(argv, "--backend") or "metis"
+    try:
+        module_name = backend_module_for(algorithm, backend)
+    except RuntimeError as exc:
+        print(exc, file=sys.stderr)
+        raise SystemExit(2)
+    backend_argv = strip_frontend_args(argv)
+    if backend == "sb3":
+        backend_argv.extend(["--algorithm", algorithm])
+    # Skip ensure_nvidia_pip_libs_on_path()'s os.execv: a help request needs no CUDA libraries, and
+    # the re-exec restarts this process from the top -- which printed the banner below twice.
+    os.environ.setdefault("GODOT_GYM_TF_LD_READY", "1")
+    # Importing a trainer pulls in TensorFlow, which takes a few seconds with no output at all.
+    print(f"Options for {algorithm} ({module_name}):\n", flush=True)
+    sys.argv = [sys.argv[0], *backend_argv]
+    importlib.import_module(module_name).main()
+    return True
+
+
 def probe_action_type(args):
     probe_port = args.probe_port
     if probe_port is None:
@@ -205,6 +271,8 @@ def policy_manifest_algorithm(policy_path):
 
 
 def main():
+    if any(arg in HELP_FLAGS for arg in sys.argv[1:]) and delegate_help(sys.argv[1:]):
+        return
     args = parse_args(sys.argv[1:])
     try:
         algorithm = select_backend(args)
@@ -217,16 +285,8 @@ def main():
     if not has_bool_option(backend_args, "--godot-debug") and args.godot_debug:
         backend_args.append("--godot-debug")
 
-    if args.backend == "metis":
-        backend_module_name = BACKENDS[algorithm]
-    else:
-        if algorithm not in SB3_ALGORITHMS:
-            supported = ", ".join(sorted(SB3_ALGORITHMS))
-            raise RuntimeError(
-                f"backend='sb3' does not support algorithm={algorithm!r}; "
-                f"choose one of: {supported}"
-            )
-        backend_module_name = SB3_BACKEND
+    backend_module_name = backend_module_for(algorithm, args.backend)
+    if args.backend == "sb3":
         backend_args.extend(["--algorithm", algorithm])
 
     print(

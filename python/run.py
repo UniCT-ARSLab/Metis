@@ -90,6 +90,7 @@ from core.training import (
     add_tensorflow_runtime_arguments,
     configure_tensorflow_devices,
     episode_step_indices,
+    argument_group,
 )
 from envs.process_manager import GodotProcessManager
 from envs.scenario import ScenarioGymEnv
@@ -97,17 +98,19 @@ from envs.scenario import ScenarioGymEnv
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Run a trained policy on any Godot BridgeServer scenario.")
-    parser.add_argument(
+
+    group = argument_group(parser, "policy and checkpoints")
+    group.add_argument(
         "--algorithm",
         choices=["auto", "dqn", "ddpg", "ddpg_bc", "ddpgfd", "td3", "td3_bc", "sac", "ppo"],
         default="auto",
     )
-    parser.add_argument(
+    group.add_argument(
         "--load-from",
         choices=["auto", "policy", "keras", "weights", "checkpoint"],
         default="auto",
     )
-    parser.add_argument(
+    group.add_argument(
         "--network-layers",
         type=int,
         nargs="+",
@@ -118,7 +121,7 @@ def parse_args(argv=None):
         "TD3/DDPG 400 300, PPO and DQN 64 64). Checkpoints written before these "
         "defaults used 256 256 128 and need that value passed explicitly.",
     )
-    parser.add_argument(
+    group.add_argument(
         "--policy-path",
         default=None,
         help=(
@@ -126,15 +129,17 @@ def parse_args(argv=None):
             "Defaults to CHECKPOINT_DIR/policy.keras."
         ),
     )
-    parser.add_argument("--weights-path", default="generic_dqn_weights.weights.h5")
-    parser.add_argument("--actor-weights-path", default=None)
-    parser.add_argument("--checkpoint-dir", default="checkpoints/generic")
-    parser.add_argument(
+    group.add_argument("--weights-path", default="generic_dqn_weights.weights.h5")
+    group.add_argument("--actor-weights-path", default=None)
+    group.add_argument("--checkpoint-dir", default="checkpoints/generic")
+    group.add_argument(
         "--checkpoint-path",
         default=None,
         help="Exact TensorFlow checkpoint prefix (for example checkpoints/run/ckpt-2000).",
     )
-    parser.add_argument(
+
+    group = argument_group(parser, "policy export")
+    group.add_argument(
         "--export-policy-dir",
         default=None,
         help=(
@@ -142,28 +147,34 @@ def parse_args(argv=None):
             "directory. This can extract only the actor from an exact checkpoint."
         ),
     )
-    parser.add_argument(
+    group.add_argument(
         "--export-policy-only",
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Export the loaded policy and exit without running evaluation episodes.",
     )
-    parser.add_argument("--godot-bin", default=os.environ.get("GODOT_BIN"))
-    parser.add_argument("--godot-project", default=None)
-    parser.add_argument("--godot-scene", default=None)
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=6200)
-    parser.add_argument("--agent-id", default=None)
-    parser.add_argument("--multi-agent", action=argparse.BooleanOptionalAction, default=False)
+
+    group = argument_group(parser, "Godot environment")
+    group.add_argument("--godot-bin", default=os.environ.get("GODOT_BIN"))
+    group.add_argument("--godot-project", default=None)
+    group.add_argument("--godot-scene", default=None)
+    group.add_argument("--host", default="127.0.0.1")
+    group.add_argument("--port", type=int, default=6200)
+    group.add_argument("--agent-id", default=None)
+    group.add_argument("--multi-agent", action=argparse.BooleanOptionalAction, default=False)
     add_multi_policy_arguments(parser, training=False)
-    parser.add_argument("--episodes", type=int, default=1)
-    parser.add_argument(
+
+    group = argument_group(parser, "episodes")
+    group.add_argument("--episodes", type=int, default=1)
+    group.add_argument(
         "--max-steps",
         type=int,
         default=1000,
         help="Maximum episode steps; use 0 or --no-time-limit to rely on terminal conditions.",
     )
-    parser.add_argument(
+
+    group = argument_group(parser, "Godot environment")
+    group.add_argument(
         "--physics-frames-per-step",
         type=int,
         default=1,
@@ -172,8 +183,10 @@ def parse_args(argv=None):
             "value as training when evaluating a checkpoint."
         ),
     )
-    parser.add_argument("--infinite", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument(
+
+    group = argument_group(parser, "episodes")
+    group.add_argument("--infinite", action=argparse.BooleanOptionalAction, default=False)
+    group.add_argument(
         "--reset",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -182,7 +195,7 @@ def parse_args(argv=None):
             "Metis starts the next logical episode from the current Godot state."
         ),
     )
-    parser.add_argument(
+    group.add_argument(
         "--initial-reset",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -192,7 +205,7 @@ def parse_args(argv=None):
             "from the current Godot state without moving agents or targets."
         ),
     )
-    parser.add_argument(
+    group.add_argument(
         "--continue-after-success",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -201,16 +214,18 @@ def parse_args(argv=None):
             "so inference can continue when a target moves. Scenario support is required."
         ),
     )
-    parser.add_argument("--time-limit", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--epsilon", type=float, default=0.0)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument(
+    group.add_argument("--time-limit", action=argparse.BooleanOptionalAction, default=True)
+    group.add_argument("--epsilon", type=float, default=0.0)
+    group.add_argument("--seed", type=int, default=0)
+
+    group = argument_group(parser, "difficulty and evaluation")
+    group.add_argument(
         "--training-episode",
         type=int,
         default=None,
         help="Scenario curriculum episode. Defaults to the episode encoded in a checkpoint name, or 0.",
     )
-    parser.add_argument(
+    group.add_argument(
         "--curriculum-level",
         type=float,
         default=None,
@@ -219,7 +234,7 @@ def parse_args(argv=None):
             "this for frozen evaluations when adaptive curriculum is enabled."
         ),
     )
-    parser.add_argument(
+    group.add_argument(
         "--evaluation-mode",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -229,8 +244,10 @@ def parse_args(argv=None):
             "the training frozen-eval command; plain inference leaves it off."
         ),
     )
-    parser.add_argument("--delay", type=float, default=0.0)
-    parser.add_argument(
+
+    group = argument_group(parser, "pacing and execution mode")
+    group.add_argument("--delay", type=float, default=0.0)
+    group.add_argument(
         "--execution-mode",
         choices=["auto", "lockstep", "realtime"],
         default="auto",
@@ -241,24 +258,28 @@ def parse_args(argv=None):
             "is watching; keep it fast and reproducible) and realtime otherwise."
         ),
     )
-    parser.add_argument(
+    group.add_argument(
         "--realtime-action-hz",
         type=float,
         default=60.0,
         help="Policy action-update frequency in realtime mode; 0 disables wall-clock pacing.",
     )
-    parser.add_argument(
+    group.add_argument(
         "--realtime-simulation-fps",
         type=int,
         default=60,
         help="Godot render/process frame cap while realtime mode is active.",
     )
-    parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=False)
+
+    group = argument_group(parser, "Godot environment")
+    group.add_argument("--headless", action=argparse.BooleanOptionalAction, default=False)
     add_tensorflow_runtime_arguments(parser)
     add_godot_render_argument(parser, default="project")
-    parser.add_argument("--connect-only", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--print-every", type=int, default=1)
-    parser.add_argument(
+    group.add_argument("--connect-only", action=argparse.BooleanOptionalAction, default=False)
+
+    group = argument_group(parser, "output and reporting")
+    group.add_argument("--print-every", type=int, default=1)
+    group.add_argument(
         "--summary-json",
         default=None,
         help="Optional path where the aggregate evaluation summary is written as JSON.",

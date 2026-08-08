@@ -27,6 +27,7 @@ tonemap_mode = 2
 glow_enabled = true
 
 [sub_resource type="PlaneMesh" id="PlaneMesh_iyblc"]
+size = Vector2(10, 10)
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_wchse"]
 albedo_color = Color(0.31599998, 0.6, 0.17400002, 1)

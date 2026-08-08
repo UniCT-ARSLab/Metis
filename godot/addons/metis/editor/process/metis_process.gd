@@ -78,12 +78,35 @@ func start_command(
 	return _launcher_pid > 0
 
 
+## Point this instance at a run it did not launch, so is_running(), read_log_tail() and stop() all
+## work on it. The whole point of launching detached is that the run outlives the editor; without
+## this, a restarted editor holds a MetisProcess with no pidfile path and reports "nothing running"
+## while training is very much alive.
+func attach(log_abs: String, pidfile_abs: String) -> void:
+	log_path = log_abs
+	pidfile_path = pidfile_abs
+
+
 ## The detached child PID once the launcher has written the pidfile (-1 until then).
 func child_pid() -> int:
 	if not FileAccess.file_exists(pidfile_path):
 		return -1
 	var text := FileAccess.get_file_as_string(pidfile_path).strip_edges()
 	return int(text) if text.is_valid_int() else -1
+
+
+func has_pidfile() -> bool:
+	## Whether the launcher has recorded a PID yet.
+	##
+	## is_running() alone cannot tell "not started yet" from "already finished": both answer false.
+	## start_command() deletes any stale pidfile before spawning and the launch script writes the new
+	## one a moment later, so a caller polling right after a launch needs this to know which of the
+	## two it is looking at.
+	##
+	## Deliberately a CONTENT check, not file_exists(): `echo $$ > pidfile` creates the file empty and
+	## fills it immediately afterwards, and a poll landing in that window would see a pidfile with no
+	## pid in it -- which read as "the run existed and is now gone".
+	return child_pid() > 0
 
 
 func is_running() -> bool:
@@ -109,7 +132,42 @@ func stop() -> void:
 	_launcher_pid = -1
 
 
+const LOG_TAIL_BYTES := 64 * 1024
+
+
 func read_log() -> String:
 	if log_path.is_empty() or not FileAccess.file_exists(log_path):
 		return ""
 	return FileAccess.get_file_as_string(log_path)
+
+
+func log_size() -> int:
+	## Byte length of the log, for callers that poll and want to skip unchanged reads.
+	if log_path.is_empty() or not FileAccess.file_exists(log_path):
+		return 0
+	var file := FileAccess.open(log_path, FileAccess.READ)
+	if file == null:
+		return 0
+	var length := file.get_length()
+	file.close()
+	return int(length)
+
+
+func read_log_tail(max_bytes := LOG_TAIL_BYTES) -> String:
+	## The last `max_bytes` of the log.
+	##
+	## read_log() pulls the whole file, which is fine once but not on a poll: a multi-hour run writes
+	## tens of megabytes, and re-reading all of it to display the newest lines scales with run length
+	## instead of with what changed. The first line of the returned chunk may be cut mid-way, which
+	## neither consumer minds -- a scrollback view and an `episode=` scan.
+	if log_path.is_empty() or not FileAccess.file_exists(log_path):
+		return ""
+	var file := FileAccess.open(log_path, FileAccess.READ)
+	if file == null:
+		return ""
+	var length := int(file.get_length())
+	var start := maxi(0, length - maxi(1, max_bytes))
+	file.seek(start)
+	var chunk := file.get_buffer(length - start).get_string_from_utf8()
+	file.close()
+	return chunk

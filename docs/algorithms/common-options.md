@@ -7,6 +7,22 @@ line is therefore the union of this page and the algorithm-specific page.
 Boolean flags use Python's paired form: `--headless` enables a setting and
 `--no-headless` disables it. The table shows both only where the distinction helps.
 
+## Reading the option list from the CLI
+
+Name an algorithm and `train.py` prints that trainer's own help, grouped by topic:
+
+```bash
+python python/train.py --algorithm sac --help
+```
+
+Without an algorithm — or with `--algorithm auto` — only the dispatcher's own options are
+listed. `auto` cannot be resolved for a help request, because deciding which learner it
+means requires launching Godot to inspect the scenario's action space.
+
+The Godot add-on reads the same specification, which is how its Train wizard keeps the
+"All options" list in step with the CLI. It caches the result in `.metis/argspec.json` and
+regenerates it whenever the Python sources are newer.
+
 ## Entrypoint and task
 
 | Flag | Meaning |

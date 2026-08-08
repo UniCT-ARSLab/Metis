@@ -3,12 +3,22 @@
 [ext_resource type="Script" uid="uid://c1qwau3h5p18r" path="res://scenarios/pong/pong_scenario.gd" id="1_5k7yf"]
 [ext_resource type="Script" uid="uid://d38lybllmy6tq" path="res://addons/metis/runtime/bridge_server.gd" id="1_8qidu"]
 [ext_resource type="Script" uid="uid://cun4ha1fidr8n" path="res://addons/metis/runtime/agent/ScenarioController.gd" id="2_5k7yf"]
+[ext_resource type="Shader" uid="uid://dcfs6d8yfpc31" path="res://scenarios/breakout/breakout_scenario_bg.gdshader" id="2_loxhw"]
 [ext_resource type="Script" uid="uid://b47ph323gt6gl" path="res://addons/metis/runtime/agent/events/ScenarioEventSystem.gd" id="3_loxhw"]
 [ext_resource type="Script" uid="uid://botsx3bwjduj2" path="res://addons/metis/runtime/agent/events/ManualScenarioEventSource.gd" id="4_cvres"]
 [ext_resource type="Script" uid="uid://tn1jug3aq4ll" path="res://addons/metis/runtime/agent/ScenarioRewardSystem.gd" id="5_dlml4"]
 [ext_resource type="Script" uid="uid://b0mpnu83er6il" path="res://addons/metis/runtime/agent/scenario_reward_components/EventScenarioReward.gd" id="6_s5no5"]
 [ext_resource type="PackedScene" uid="uid://de6qiwynlc8es" path="res://agents/PongPaddle/pong_paddle.tscn" id="7_4x70t"]
 [ext_resource type="PackedScene" uid="uid://1cn4sfelb5ti" path="res://scenarios/pong/pong_ball.tscn" id="8_y1c7r"]
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_h6m26"]
+shader = ExtResource("2_loxhw")
+shader_parameter/bottom_color = Color(0.87, 0.67425, 0.08700002, 1)
+shader_parameter/top_color = Color(0.76, 0.19, 0.5034998, 1)
+shader_parameter/wave_amp = 0.0690000032775
+shader_parameter/wave_size = 1.7770000369074999
+shader_parameter/wave_time_mul = 0.44200001773512
+shader_parameter/total_phases = 5
 
 [sub_resource type="RectangleShape2D" id="RectangleShape2D_0pgps"]
 size = Vector2(1290, 20)
@@ -18,6 +28,11 @@ size = Vector2(16, 745)
 
 [node name="PongScenario" type="Node2D" unique_id=1718542686]
 script = ExtResource("1_5k7yf")
+
+[node name="ColorRect" type="ColorRect" parent="." unique_id=1422985198]
+material = SubResource("ShaderMaterial_h6m26")
+offset_right = 1305.0
+offset_bottom = 762.0
 
 [node name="BridgeServer" type="Node" parent="." unique_id=490047119]
 script = ExtResource("1_8qidu")

@@ -80,7 +80,257 @@ def episode_step_indices(max_steps):
     return count() if max_steps == 0 else range(max_steps)
 
 
+# Section titles for --help, shared by every parser so the same topic never appears twice under two
+# spellings. The Godot add-on renders these as the headings of its "All options" list, which is why
+# they read as short noun phrases rather than sentences.
+GROUP_GODOT = "Godot environment"
+GROUP_LOOP = "training loop"
+GROUP_EXPLORATION = "exploration"
+GROUP_REPLAY = "replay buffer"
+GROUP_DEMOS = "demonstrations and behaviour cloning"
+GROUP_CHECKPOINTS = "weights and checkpoints"
+GROUP_PROGRESS_CURRICULUM = "progress curriculum"
+GROUP_ADAPTIVE_CURRICULUM = "adaptive curriculum"
+GROUP_SAC = "SAC entropy and smoothness"
+GROUP_PPO = "PPO objective"
+GROUP_RESIDUAL = "residual policy adapter"
+GROUP_DETERMINISTIC = "TD3 and DDPGfD"
+GROUP_CRITIC_AUDIT = "critic warmup and audit"
+GROUP_EVALUATION = "best checkpoint and evaluation"
+GROUP_HEALTH = "training health and recovery"
+GROUP_COLLECTOR = "collector and updates"
+GROUP_LOCKSTEP = "lockstep tuning"
+GROUP_LOGGING = "logging and dashboard"
+GROUP_TENSORFLOW = "TensorFlow runtime"
+
+
+def argument_group(parser, title):
+    """Fetch-or-create the argument group `title` on `parser`.
+
+    argparse offers no lookup for this, and ``add_argument_group`` happily creates a second section
+    with an identical title. Several helpers contribute to the same topic from different call sites
+    (``--render-mode`` and ``--physics-frames-per-step`` are both Godot-environment options added by
+    different functions), so without the fetch step the group would be repeated once per caller.
+
+    Passing something that is already a group returns it unchanged, so a helper can be called with
+    either a parser or a group.
+    """
+    if not hasattr(parser, "_action_groups"):
+        return parser
+    for group in parser._action_groups:
+        if group.title == title:
+            return group
+    return parser.add_argument_group(title)
+
+
+class TargetSyncSchedule:
+    """Decides when a DQN target network should be refreshed.
+
+    Episodes are the wrong unit whenever their length changes as the policy improves, and on a task
+    like Breakout that change is enormous: episodes grew from 57 to 935 steps in one run, so a fixed
+    "every 20 episodes" drifted from 284 to 4345 gradient updates between syncs. The effective
+    hyperparameter was moving by 15x while nobody touched it. Counting TRANSITIONS instead keeps it
+    where it was set, which is what the DQN literature does (10,000 environment steps).
+
+    Episode counting stays the default so existing runs are unaffected; pass a positive
+    ``--target-update-steps`` to switch.
+    """
+
+    def __init__(self, args):
+        self.every_steps = int(getattr(args, "target_update_steps", 0) or 0)
+        self.every_episodes = int(getattr(args, "target_update_every", 0) or 0)
+        if self.every_steps < 0:
+            raise ValueError("--target-update-steps cannot be negative")
+        self._credit = 0
+
+    @property
+    def uses_steps(self):
+        return self.every_steps > 0
+
+    def describe(self):
+        if self.uses_steps:
+            return f"every {self.every_steps} transitions"
+        return f"every {self.every_episodes} episodes"
+
+    def due_after_transitions(self, transitions):
+        """True when the accumulated transitions have crossed another interval."""
+        if not self.uses_steps:
+            return False
+        self._credit += max(0, int(transitions))
+        if self._credit < self.every_steps:
+            return False
+        self._credit %= self.every_steps
+        return True
+
+    def due_after_episode(self, completed_episodes):
+        """True on the episode boundary, when episodes are the configured unit."""
+        if self.uses_steps or self.every_episodes <= 0:
+            return False
+        return int(completed_episodes) % self.every_episodes == 0
+
+
+def make_gradient_clipper(
+    name,
+    *,
+    grad_clip_norm=0.0,
+    grad_clip_adaptive=False,
+    grad_clip_k=3.0,
+    grad_clip_decay=0.99,
+    warmup_steps=25.0,
+):
+    """Build a ``clip(grads) -> grads`` callable for one network.
+
+    Gradient clipping is the safety net against deadly-triad Q-divergence to NaN. The fixed cap
+    (``grad_clip_norm``) is a hard backstop. Adaptive mode instead clips at
+    ``grad_clip_k * EMA(grad_norm)`` bounded by that hard cap, so no per-scenario tuning of the norm
+    is needed: each network's own gradient scale is tracked while the hard cap still bounds every
+    finite update. The EMA ignores non-finite norms, so NaN/Inf cannot poison its state; finite
+    spikes can move the EMA but never loosen the threshold past the hard value. Until
+    ``warmup_steps`` samples have been seen the EMA is too cold to trust, so the hard cap is used
+    instead of over-clipping a network that has barely started.
+
+    Returns a pass-through when neither mode is enabled, so callers need no branch of their own.
+
+    TensorFlow is imported here rather than at module scope on purpose: recorder.py imports this
+    module only for argument_group(), and paying a TensorFlow import to build a CLI parser would be
+    absurd.
+    """
+    import tensorflow as tf
+
+    has_hard = bool(grad_clip_norm and grad_clip_norm > 0.0)
+    if not has_hard and not grad_clip_adaptive:
+        return lambda grads: grads
+
+    hard_clip_c = tf.constant(float(grad_clip_norm) if has_hard else 0.0, dtype=tf.float32)
+    clip_k_c = tf.constant(float(grad_clip_k), dtype=tf.float32)
+    clip_decay_c = tf.constant(float(grad_clip_decay), dtype=tf.float32)
+    clip_warmup_c = tf.constant(float(warmup_steps), dtype=tf.float32)
+    # Created eagerly and captured by any traced graph that uses the returned closure.
+    ema = tf.Variable(0.0, dtype=tf.float32, trainable=False, name=f"clip_ema_{name}")
+    seen = tf.Variable(0.0, dtype=tf.float32, trainable=False, name=f"clip_seen_{name}")
+
+    def clip(grads):
+        gnorm = tf.linalg.global_norm(grads)
+        if grad_clip_adaptive:
+            finite = tf.math.is_finite(gnorm)
+            g_for_ema = tf.where(finite, gnorm, ema)
+            new_ema = tf.where(
+                seen > 0.0, clip_decay_c * ema + (1.0 - clip_decay_c) * g_for_ema, g_for_ema)
+            ema.assign(new_ema)
+            seen.assign_add(1.0)
+            adaptive_cap = clip_k_c * ema
+            cap = tf.minimum(hard_clip_c, adaptive_cap) if has_hard else adaptive_cap
+            warmup_cap = hard_clip_c if has_hard else adaptive_cap
+            cap = tf.where(seen < clip_warmup_c, warmup_cap, cap)
+            cap = tf.maximum(cap, 1e-3)
+        else:
+            cap = hard_clip_c
+        clipped, _ = tf.clip_by_global_norm(grads, cap)
+        return clipped
+
+    return clip
+
+
+def describe_gradient_clip(args):
+    """One-line summary of the configured clipping, for the startup banner."""
+    if getattr(args, "grad_clip_adaptive", False):
+        return "adaptive k=%g cap=%g" % (
+            getattr(args, "grad_clip_k", 3.0), getattr(args, "grad_clip_norm", 0.0))
+    norm = getattr(args, "grad_clip_norm", 0.0)
+    return "fixed norm=%g" % norm if norm and norm > 0 else "off"
+
+
+def add_gradient_clip_arguments(parser, *, default_norm=0.0):
+    """Shared --grad-clip-* surface.
+
+    ``default_norm`` is a parameter because the existing algorithms disagree: SAC, TD3 and DDPG ship
+    a hard cap of 10 because they diverged without one, while DQN had no clipping at all until this
+    was added, so its default stays 0 rather than silently changing every existing DQN run.
+    """
+    parser = argument_group(parser, GROUP_LOOP)
+    parser.add_argument(
+        "--grad-clip-norm",
+        type=float,
+        default=default_norm,
+        help=(
+            "Hard global gradient-norm cap for the update (0 disables). Safety net against the "
+            "deadly-triad Q-value divergence that otherwise blows a critic up to NaN."
+        ),
+    )
+    parser.add_argument(
+        "--grad-clip-adaptive",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Clip at --grad-clip-k * EMA(gradient-norm), bounded by --grad-clip-norm. Tracks the "
+            "network's own gradient scale so the norm needs no per-scenario tuning; the hard cap "
+            "remains the final bound."
+        ),
+    )
+    parser.add_argument(
+        "--grad-clip-k",
+        type=float,
+        default=3.0,
+        help="Multiplier on the running-mean gradient norm when --grad-clip-adaptive is set.",
+    )
+
+
+def add_value_loss_arguments(parser):
+    """Shared --critic-loss / --huber-delta surface.
+
+    Defaults to ``mse``, which is what every Metis algorithm did before this existed, so adding the
+    flag changes no run that does not ask for it.
+    """
+    parser = argument_group(parser, GROUP_LOOP)
+    parser.add_argument(
+        "--critic-loss",
+        choices=["mse", "huber"],
+        default="mse",
+        help=(
+            "Regression loss for the value/Q target. 'huber' is quadratic within --huber-delta and "
+            "LINEAR outside it, which bounds the gradient of a large TD error -- the standard DQN "
+            "choice, and it expects rewards clipped to a small range. Beware the corollary: "
+            "outcomes whose magnitude far exceeds delta are effectively not fitted, only ranked, so "
+            "pairing huber with large one-off terminal rewards leaves those terminals unlearned."
+        ),
+    )
+    parser.add_argument(
+        "--huber-delta",
+        type=float,
+        default=1.0,
+        help="Transition point between the quadratic and linear regions of --critic-loss huber.",
+    )
+
+
+def value_loss_fn(kind, delta):
+    """Return ``loss(target, prediction) -> scalar`` for the selected regression loss.
+
+    Written out rather than taken from keras.losses so the delta convention is visible and fixed:
+    below delta the value is 0.5 * err^2 (matching MSE up to the same 0.5 factor Huber carries), and
+    above it the slope is constant at delta.
+    """
+    import tensorflow as tf
+
+    if kind == "huber":
+        delta_c = tf.constant(float(delta), dtype=tf.float32)
+
+        def huber(target, prediction):
+            error = target - prediction
+            absolute = tf.abs(error)
+            quadratic = 0.5 * tf.square(error)
+            linear = delta_c * (absolute - 0.5 * delta_c)
+            return tf.reduce_mean(tf.where(absolute <= delta_c, quadratic, linear))
+
+        return huber
+
+    def mse(target, prediction):
+        return tf.reduce_mean(tf.square(target - prediction))
+
+    return mse
+
+
 def add_training_budget_argument(parser):
+    parser = argument_group(parser, GROUP_LOOP)
     parser.add_argument(
         "--total-timesteps",
         type=int,
@@ -119,6 +369,7 @@ class TrainingBudget:
 
 
 def add_tensorflow_runtime_arguments(parser, *, include_compile_learner=False):
+    parser = argument_group(parser, GROUP_TENSORFLOW)
     parser.add_argument(
         "--gpu-memory-growth",
         action=argparse.BooleanOptionalAction,
@@ -151,6 +402,7 @@ RENDER_MODES = ("project", "cpu", "light-gpu", "gpu")
 
 
 def add_godot_render_argument(parser, *, default="light-gpu"):
+    parser = argument_group(parser, GROUP_GODOT)
     parser.add_argument(
         "--render-mode",
         choices=RENDER_MODES,
@@ -168,6 +420,10 @@ def add_godot_render_argument(parser, *, default="light-gpu"):
 
 
 def add_best_checkpoint_arguments(parser):
+    # Kept separately: the curriculum arguments below open their own section, and argparse deprecated
+    # nesting one argument group inside another.
+    root = parser
+    parser = argument_group(parser, GROUP_EVALUATION)
     parser.add_argument(
         "--best-checkpoint",
         action=argparse.BooleanOptionalAction,
@@ -262,10 +518,11 @@ def add_best_checkpoint_arguments(parser):
             "cannot crown a collapsed policy)."
         ),
     )
-    add_adaptive_curriculum_arguments(parser)
+    add_adaptive_curriculum_arguments(root)
 
 
 def add_training_health_arguments(parser):
+    parser = argument_group(parser, GROUP_HEALTH)
     parser.add_argument(
         "--health-monitor",
         action=argparse.BooleanOptionalAction,
@@ -1174,12 +1431,17 @@ class BestCheckpointTracker:
         tf.train.latest_checkpoint() parses -- to avoid the deprecated
         tf.compat.v1.train.update_checkpoint_state. Paths stay absolute: the best directory
         is not relocatable.
+
+        Absolute is not cosmetic. tf.train.latest_checkpoint() joins a RELATIVE entry with the
+        directory holding this file, so a prefix built from a relative --checkpoint-dir came back
+        doubled -- `checkpoints/run/best/checkpoints/run/best/ckpt-5000` -- and every attempt to run
+        a trained policy by directory failed with "Couldn't match files for checkpoint".
         """
         if not self._retained:
             return
 
         def _escape(path):
-            return str(path).replace("\\", "\\\\").replace('"', '\\"')
+            return str(Path(path).resolve()).replace("\\", "\\\\").replace('"', '\\"')
 
         lines = [f'model_checkpoint_path: "{_escape(self._retained[-1][1])}"']
         lines += [
@@ -1275,6 +1537,7 @@ def configure_tensorflow_devices(tf_module, *, memory_growth=True, system_name=N
 
 
 def add_parallel_env_arguments(parser):
+    parser = argument_group(parser, GROUP_GODOT)
     parser.add_argument(
         "--parallel-env-steps",
         action=argparse.BooleanOptionalAction,
@@ -1304,6 +1567,7 @@ def add_parallel_env_arguments(parser):
 
 
 def add_lockstep_tuning_arguments(parser):
+    parser = argument_group(parser, GROUP_LOCKSTEP)
     parser.add_argument(
         "--lockstep-idle-sleep-usec",
         type=int,
@@ -1345,6 +1609,7 @@ def build_lockstep_user_args(args):
 
 
 def add_collector_arguments(parser):
+    parser = argument_group(parser, GROUP_COLLECTOR)
     parser.add_argument(
         "--collector-mode",
         choices=["sync", "async"],
@@ -1967,6 +2232,7 @@ def build_async_worker(
 
 
 def add_log_format_argument(parser):
+    parser = argument_group(parser, GROUP_LOGGING)
     parser.add_argument(
         "--log-format",
         choices=["pretty", "compact"],
@@ -1994,6 +2260,7 @@ def _coerce_metric_value(value):
 
 
 def add_dashboard_arguments(parser):
+    parser = argument_group(parser, GROUP_LOGGING)
     parser.add_argument(
         "--dashboard",
         action=argparse.BooleanOptionalAction,

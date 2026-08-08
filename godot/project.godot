@@ -25,6 +25,7 @@ config/icon="uid://bber4kdxb5e1m"
 
 window/size/viewport_width=1280
 window/size/viewport_height=720
+window/stretch/mode="viewport"
 
 [editor_plugins]
 

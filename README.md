@@ -4,7 +4,7 @@
   <img src="docs/logo.svg" alt="Metis logo" width="640">
 </p>
 <center>
-<b>METIS: Modular Environment for Training Intelligent Systems</b>
+<b>METIS: Modular Environment for Multi-Agent Reinforcement Learning</b>
 </center>
 
 <p align="center">
@@ -21,6 +21,14 @@ optimization, checkpoints, evaluation, and inference.
 
 **The aim is straightforward: changing the task should usually mean building a new
 Godot scene, not writing another Python training program.**
+
+<div align="center"> 
+  <img src="docs/media/breakout_demo.gif" height="140"/>
+  <img src="docs/media/cars_demo.gif" height="140"/>
+  <img src="docs/media/pong_demo.gif" height="140"/>
+  <img src="docs/media/demo_arm.gif" height="140"/>
+</div>
+
 
 Metis is under active development, but it already supports discrete, continuous, and
 hybrid control; multi-agent environments; asynchronous collection; demonstrations;
@@ -806,3 +814,4 @@ implementations. The main algorithmic foundations are:
 
 Metis itself is distributed under the [Apache License 2.0](LICENSE). Attribution and
 the suggested project citation are recorded in [NOTICE](NOTICE).
+

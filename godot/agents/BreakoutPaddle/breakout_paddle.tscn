@@ -12,13 +12,14 @@
 [ext_resource type="Script" uid="uid://cp4g4r5f7n1kx" path="res://addons/metis/runtime/agent/action_space/DiscreteAction.gd" id="9_discrete_action"]
 
 [sub_resource type="CapsuleShape2D" id="CapsuleShape2D_chi8s"]
-radius = 24.0
-height = 210.0
+radius = 13.0
+height = 94.0
 
 [node name="BreakoutPaddle" type="CharacterBody2D" unique_id=100166131]
 script = ExtResource("1_hqqp6")
 
 [node name="Sprite2D" type="Sprite2D" parent="." unique_id=888959028]
+scale = Vector2(0.45833337, 0.45833334)
 texture = ExtResource("1_gkoiq")
 
 [node name="CollisionShape2D" type="CollisionShape2D" parent="." unique_id=238518252]
@@ -58,7 +59,6 @@ metadata/_custom_type_script = "uid://d1xuba84xevcv"
 
 [node name="TimePenalty" type="Node" parent="Agent/RewardSystem" unique_id=1513122641]
 script = ExtResource("6_cmbfi")
-term_name = "time"
 penalty = -0.0001
 term_name = "time"
 metadata/_custom_type_script = "uid://dyq1fjgcu1wqu"
@@ -70,17 +70,17 @@ metadata/_custom_type_script = "uid://clefx53jebtj3"
 [node name="PaddlePosition" type="Node" parent="Agent/ObservationSystem" unique_id=1488401114]
 script = ExtResource("8_ft730")
 observation_name = "paddle_x"
-method_name = "get_paddle_x_observation"
+method_name = &"get_paddle_x_observation"
 metadata/_custom_type_script = "uid://cys7i0vchrdlo"
 
 [node name="BallPosition" type="Node" parent="Agent/ObservationSystem" unique_id=1779448433]
 script = ExtResource("8_ft730")
 observation_name = "ball_relative_position"
-method_name = "get_ball_relative_position_observation"
+method_name = &"get_ball_relative_position_observation"
 metadata/_custom_type_script = "uid://cys7i0vchrdlo"
 
 [node name="BallVelocity" type="Node" parent="Agent/ObservationSystem" unique_id=669825025]
 script = ExtResource("8_ft730")
 observation_name = "ball_velocity"
-method_name = "get_ball_velocity_observation"
+method_name = &"get_ball_velocity_observation"
 metadata/_custom_type_script = "uid://cys7i0vchrdlo"

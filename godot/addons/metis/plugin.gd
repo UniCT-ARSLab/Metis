@@ -15,6 +15,14 @@ const RUNTIME_SETUP_DIALOG_SCRIPT := preload(
 	"res://addons/metis/editor/runtime/runtime_setup_dialog.gd")
 const TRAIN_DIALOG_SCRIPT := preload(
 	"res://addons/metis/editor/run/metis_train_dialog.gd")
+const TRAIN_MONITOR_DIALOG_SCRIPT := preload(
+	"res://addons/metis/editor/run/metis_train_monitor_dialog.gd")
+const RUN_DIALOG_SCRIPT := preload(
+	"res://addons/metis/editor/run/metis_run_dialog.gd")
+const RECORD_DIALOG_SCRIPT := preload(
+	"res://addons/metis/editor/run/metis_record_dialog.gd")
+const RUN_STATE := preload("res://addons/metis/editor/run/metis_run_state.gd")
+const BRANDING := preload("res://addons/metis/editor/metis_branding.gd")
 
 var _inspector_plugin: EditorInspectorPlugin
 var _urdf_importer: EditorImportPlugin
@@ -27,6 +35,10 @@ var _toolbar_in_container := false
 # Untyped on purpose (it is a MetisTrainDialog): keeps plugin.gd from depending on that class_name
 # being registered before the project rescan, and lets us call its custom configure() dynamically.
 var _train_dialog
+# Untyped for the same reason as _train_dialog: its class_name may not be registered yet.
+var _monitor_dialog
+var _run_dialog
+var _record_dialog
 
 
 func _enter_tree() -> void:
@@ -45,34 +57,37 @@ func _enter_tree() -> void:
 	_runtime_dialog = RUNTIME_SETUP_DIALOG_SCRIPT.new()
 	EditorInterface.get_base_control().add_child(_runtime_dialog)
 	_runtime_dialog.configure(_runtime_manager)
-	add_tool_menu_item("Metis Runtime Setup...", _show_runtime_setup)
+	add_tool_menu_item("Metis Runtime Setup…", _show_runtime_setup)
 
 	_train_dialog = TRAIN_DIALOG_SCRIPT.new()
 	EditorInterface.get_base_control().add_child(_train_dialog)
 	_train_dialog.configure(_runtime_manager)
 
+	_monitor_dialog = TRAIN_MONITOR_DIALOG_SCRIPT.new()
+	EditorInterface.get_base_control().add_child(_monitor_dialog)
+	_train_dialog.training_started.connect(_on_training_started)
+
+	_run_dialog = RUN_DIALOG_SCRIPT.new()
+	EditorInterface.get_base_control().add_child(_run_dialog)
+	_run_dialog.configure(_runtime_manager)
+
+	_record_dialog = RECORD_DIALOG_SCRIPT.new()
+	EditorInterface.get_base_control().add_child(_record_dialog)
+	_record_dialog.configure(_runtime_manager)
+
 	_metis_toolbar = HBoxContainer.new()
-	var brand := TextureRect.new()
-	var logo: Texture2D
-	var logo_path := "res://addons/metis/logo.svg"
-	if not ResourceLoader.exists(logo_path):
-		logo_path = "res://icon.svg"
-	if ResourceLoader.exists(logo_path):
-		logo = load(logo_path)
-	if logo != null:
-		brand.texture = logo
-	# EXPAND_IGNORE_SIZE: don't let the 576px source texture drive the control size (that blew the
-	# whole top bar up). custom_minimum_size then fixes it to a small editor-icon size.
-	brand.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-	brand.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-	brand.custom_minimum_size = Vector2(18, 18)
-	brand.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	brand.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	# Metis's own labels are English by design -- the CLI flags, logs and docs they name are English
+	# too. Left on AUTO, Godot runs them through the EDITOR's dictionary, which translates any string
+	# that happens to collide with its own vocabulary: on an Italian editor "Run" rendered as
+	# "Esegui" while "Train" and "Record" stayed put, giving a half-translated toolbar. DISABLED
+	# propagates to children that are themselves AUTO, so one call covers the buttons.
+	_metis_toolbar.auto_translate_mode = Node.AUTO_TRANSLATE_MODE_DISABLED
+	var brand := BRANDING.logo_rect(18)
 	brand.tooltip_text = "Metis"
 	_metis_toolbar.add_child(brand)
-	_add_toolbar_button("Train", _show_train, false)
-	_add_toolbar_button("Run", _show_run, true)
-	_add_toolbar_button("Record", _show_record, true)
+	_add_toolbar_button("Train", _show_train)
+	_add_toolbar_button("Run", _show_run)
+	_add_toolbar_button("Record", _show_record)
 	_metis_toolbar.add_child(VSeparator.new())
 	# Preferred: drop the bar immediately LEFT of the editor's run/play buttons. If the run bar can't
 	# be located (Godot internals change), fall back to the standard top toolbar container.
@@ -102,7 +117,7 @@ func _enter_tree() -> void:
 
 
 func _exit_tree() -> void:
-	remove_tool_menu_item("Metis Runtime Setup...")
+	remove_tool_menu_item("Metis Runtime Setup…")
 	if _metis_toolbar != null:
 		if _toolbar_in_container:
 			remove_control_from_container(CONTAINER_TOOLBAR, _metis_toolbar)
@@ -111,6 +126,15 @@ func _exit_tree() -> void:
 	if _train_dialog != null:
 		_train_dialog.queue_free()
 	_train_dialog = null
+	if _monitor_dialog != null:
+		_monitor_dialog.queue_free()
+	_monitor_dialog = null
+	if _run_dialog != null:
+		_run_dialog.queue_free()
+	_run_dialog = null
+	if _record_dialog != null:
+		_record_dialog.queue_free()
+	_record_dialog = null
 	if _runtime_dialog != null:
 		_runtime_dialog.queue_free()
 	_runtime_dialog = null
@@ -199,32 +223,48 @@ func _find_run_bar(node: Node) -> Control:
 	return null
 
 
-func _add_toolbar_button(text: String, handler: Callable, coming_soon: bool) -> void:
+func _add_toolbar_button(text: String, handler: Callable) -> void:
+	# The "coming soon" variant this used to take is gone with the last disabled button: a parameter
+	# every caller passes false to is a claim the toolbar no longer makes.
 	var button := Button.new()
 	button.text = text
 	button.flat = true  # match the top-left menu-bar items (Scene / Project / …)
-	if coming_soon:
-		button.disabled = true
-		button.tooltip_text = "Coming in the next step."
-	else:
-		button.pressed.connect(handler)
+	button.pressed.connect(handler)
 	_metis_toolbar.add_child(button)
 
 
-func _show_train() -> void:
-	if _train_dialog == null:
-		return
+func _dialog_size() -> Vector2i:
 	var editor_size := EditorInterface.get_base_control().size
-	var dialog_size := Vector2i(
+	return Vector2i(
 		clampi(int(editor_size.x * 0.5), 640, 820),
 		clampi(int(editor_size.y * 0.6), 480, 680),
 	)
-	_train_dialog.popup_centered_clamped(dialog_size, 0.8)
+
+
+func _show_train() -> void:
+	# One button, two windows: configure a new run, or watch the one already going. Offering the
+	# wizard while training is active would only lead to a launch it has to refuse.
+	if _monitor_dialog != null and RUN_STATE.is_run_active():
+		_monitor_dialog.popup_centered_clamped(_dialog_size(), 0.8)
+		return
+	if _train_dialog == null:
+		return
+	_train_dialog.popup_centered_clamped(_dialog_size(), 0.8)
+
+
+func _on_training_started() -> void:
+	if _monitor_dialog == null:
+		return
+	# Deferred so the wizard's hide() has been processed: two exclusive child windows cannot overlap
+	# even for one frame, and the editor logs an error and drops the second.
+	_monitor_dialog.call_deferred("popup_centered_clamped", _dialog_size(), 0.8)
 
 
 func _show_run() -> void:
-	pass
+	if _run_dialog != null:
+		_run_dialog.popup_centered_clamped(_dialog_size(), 0.8)
 
 
 func _show_record() -> void:
-	pass
+	if _record_dialog != null:
+		_record_dialog.popup_centered_clamped(_dialog_size(), 0.8)

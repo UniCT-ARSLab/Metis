@@ -94,6 +94,12 @@ from core.training import (
     print_episode_metrics,
     resolve_resume_checkpoint,
     validate_async_arguments,
+    argument_group,
+    GROUP_CHECKPOINTS,
+    GROUP_GODOT,
+    GROUP_LOOP,
+    GROUP_PPO,
+    GROUP_RESIDUAL,
 )
 from envs.process_manager import GodotProcessManager
 from envs.scenario import ScenarioGymEnv
@@ -111,19 +117,25 @@ SUPPORTED_ACTION_TYPES = {"hybrid", "discrete", "continuous"}
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Generic PPO trainer for hybrid Godot action spaces.")
-    parser.add_argument("--num-envs", type=int, default=1)
-    parser.add_argument("--base-port", type=int, default=6200)
-    parser.add_argument("--num-episodes", type=int, default=500)
+
+    group = argument_group(parser, GROUP_GODOT)
+    group.add_argument("--num-envs", type=int, default=1)
+    group.add_argument("--base-port", type=int, default=6200)
+
+    group = argument_group(parser, GROUP_LOOP)
+    group.add_argument("--num-episodes", type=int, default=500)
     add_training_budget_argument(parser)
-    parser.add_argument(
+    group.add_argument(
         "--max-steps-per-episode",
         type=int,
         default=500,
         help="Maximum episode steps shared with Godot; use 0 to rely only on terminal conditions.",
     )
-    parser.add_argument("--batch-size", type=int, default=128)
-    parser.add_argument("--ppo-epochs", type=int, default=4)
-    parser.add_argument(
+    group.add_argument("--batch-size", type=int, default=128)
+
+    group = argument_group(parser, GROUP_PPO)
+    group.add_argument("--ppo-epochs", type=int, default=4)
+    group.add_argument(
         "--ppo-rollout-steps",
         type=int,
         default=0,
@@ -135,19 +147,27 @@ def parse_args():
             "PPO n-steps rollout, higher/steadier throughput. Single-agent only."
         ),
     )
-    parser.add_argument("--gamma", type=float, default=0.99)
-    parser.add_argument("--gae-lambda", type=float, default=0.95)
-    parser.add_argument("--clip-ratio", type=float, default=0.2)
-    parser.add_argument("--learning-rate", type=float, default=3e-4)
-    parser.add_argument("--value-loss-coef", type=float, default=0.5)
-    parser.add_argument("--entropy-coef", type=float, default=0.01)
-    parser.add_argument("--ppo-grad-clip", type=float, default=0.0,
+
+    group = argument_group(parser, GROUP_LOOP)
+    group.add_argument("--gamma", type=float, default=0.99)
+
+    group = argument_group(parser, GROUP_PPO)
+    group.add_argument("--gae-lambda", type=float, default=0.95)
+    group.add_argument("--clip-ratio", type=float, default=0.2)
+
+    group = argument_group(parser, GROUP_LOOP)
+    group.add_argument("--learning-rate", type=float, default=3e-4)
+
+    group = argument_group(parser, GROUP_PPO)
+    group.add_argument("--value-loss-coef", type=float, default=0.5)
+    group.add_argument("--entropy-coef", type=float, default=0.01)
+    group.add_argument("--ppo-grad-clip", type=float, default=0.0,
                         help="Global-norm gradient clip for the PPO update. 0 (default) = OFF = unchanged.")
-    parser.add_argument("--ppo-target-kl", type=float, default=0.0,
+    group.add_argument("--ppo-target-kl", type=float, default=0.0,
                         help="Approx-KL early stop: skip the rest of the epochs once mean KL exceeds "
                              "1.5x this. 0 (default) = OFF = unchanged.")
-    parser.add_argument("--initial-log-std", type=float, default=-0.5)
-    parser.add_argument(
+    group.add_argument("--initial-log-std", type=float, default=-0.5)
+    group.add_argument(
         "--ppo-log-std-max",
         type=float,
         default=2.0,
@@ -158,7 +178,7 @@ def parse_args():
             "keep exploration bounded. Default 2.0 is effectively no cap."
         ),
     )
-    parser.add_argument(
+    group.add_argument(
         "--ppo-log-std-min",
         type=float,
         default=-20.0,
@@ -167,23 +187,27 @@ def parse_args():
     # Generic policy-mode / residual-adapter options (task-agnostic; standard PPO is the default and is
     # bit-identical to before). 'residual' makes the SAME PPO control a bounded gated residual around a
     # FROZEN base policy via core.policy_action_adapter.
-    parser.add_argument("--policy-mode", choices=["standard", "residual"], default="standard")
-    parser.add_argument("--base-policy", default=None,
+
+    group = argument_group(parser, GROUP_RESIDUAL)
+    group.add_argument("--policy-mode", choices=["standard", "residual"], default="standard")
+    group.add_argument("--base-policy", default=None,
                         help="Frozen base policy (.keras/.h5/.weights.h5) for --policy-mode residual; NOT trained/checkpointed.")
-    parser.add_argument("--residual-delta-max", type=float, default=0.005,
+    group.add_argument("--residual-delta-max", type=float, default=0.005,
                         help="Max |residual correction| per joint when the gate is fully open.")
-    parser.add_argument("--residual-gate-config", default=None,
+    group.add_argument("--residual-gate-config", default=None,
                         help="Gate spec: JSON path or 'outer,inner,err_start[,err_size]' (obs-space near-target gate).")
-    parser.add_argument("--residual-update-mask", choices=["gate", "all"], default="gate",
+    group.add_argument("--residual-update-mask", choices=["gate", "all"], default="gate",
                         help="'gate': train the policy only where the residual gate is open; 'all': everywhere.")
-    parser.add_argument("--freeze-base-policy", action=argparse.BooleanOptionalAction, default=True,
+    group.add_argument("--freeze-base-policy", action=argparse.BooleanOptionalAction, default=True,
                         help="Residual mode requires this True: the base (and its embedded residual) is a "
                              "separate frozen model, never in the trainable variables. --no-freeze-base-policy "
                              "is refused (base training is not implemented and would break the design).")
-    parser.add_argument("--value-learning-rate", type=float, default=0.0,
+
+    group = argument_group(parser, GROUP_LOOP)
+    group.add_argument("--value-learning-rate", type=float, default=0.0,
                         help="Residual mode only: LR of a SEPARATE optimizer for the value tower (needs "
                              "separate_value_tower). 0 (default) = single optimizer (standard, unchanged).")
-    parser.add_argument(
+    group.add_argument(
         "--network-layers",
         type=int,
         nargs="+",
@@ -194,27 +218,33 @@ def parse_args():
         "TD3/DDPG 400 300, PPO and DQN 64 64). Checkpoints written before these "
         "defaults used 256 256 128 and need that value passed explicitly.",
     )
-    parser.add_argument("--env-seed-base", type=int, default=100)
-    parser.add_argument("--episode-seed-multiplier", type=int, default=1000)
-    parser.add_argument("--env-timeout", type=float, default=30.0)
-    parser.add_argument("--agent-id", default=None)
-    parser.add_argument("--multi-agent", action=argparse.BooleanOptionalAction, default=False)
+
+    group = argument_group(parser, GROUP_GODOT)
+    group.add_argument("--env-seed-base", type=int, default=100)
+    group.add_argument("--episode-seed-multiplier", type=int, default=1000)
+    group.add_argument("--env-timeout", type=float, default=30.0)
+    group.add_argument("--agent-id", default=None)
+    group.add_argument("--multi-agent", action=argparse.BooleanOptionalAction, default=False)
     add_multi_policy_arguments(parser)
-    parser.add_argument("--weights-path", default="generic_ppo_hybrid.weights.h5")
-    parser.add_argument(
+
+    group = argument_group(parser, GROUP_CHECKPOINTS)
+    group.add_argument("--weights-path", default="generic_ppo_hybrid.weights.h5")
+    group.add_argument(
         "--policy-path",
         default=None,
         help="Warm-start the policy from a .keras model, full .h5 model, or .weights.h5 file.",
     )
-    parser.add_argument("--checkpoint-dir", default="checkpoints/generic_ppo_hybrid")
-    parser.add_argument("--resume-checkpoint", default=None)
-    parser.add_argument("--checkpoint-every", type=int, default=25)
-    parser.add_argument("--keep-checkpoints", type=int, default=5)
-    parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--godot-bin", default=os.environ.get("GODOT_BIN"))
-    parser.add_argument("--godot-project", default=None)
-    parser.add_argument("--godot-scene", default=None)
-    parser.add_argument(
+    group.add_argument("--checkpoint-dir", default="checkpoints/generic_ppo_hybrid")
+    group.add_argument("--resume-checkpoint", default=None)
+    group.add_argument("--checkpoint-every", type=int, default=25)
+    group.add_argument("--keep-checkpoints", type=int, default=5)
+    group.add_argument("--resume", action=argparse.BooleanOptionalAction, default=False)
+
+    group = argument_group(parser, GROUP_GODOT)
+    group.add_argument("--godot-bin", default=os.environ.get("GODOT_BIN"))
+    group.add_argument("--godot-project", default=None)
+    group.add_argument("--godot-scene", default=None)
+    group.add_argument(
         "--headless",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -224,7 +254,7 @@ def parse_args():
             "which physics stays gated to wall-clock 60Hz. Use --no-headless to watch."
         ),
     )
-    parser.add_argument("--godot-debug", action=argparse.BooleanOptionalAction, default=False)
+    group.add_argument("--godot-debug", action=argparse.BooleanOptionalAction, default=False)
     add_collector_arguments(parser)
     add_opponent_pool_arguments(parser)
     add_best_checkpoint_arguments(parser)

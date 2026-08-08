@@ -15,6 +15,40 @@ extends Node2D
 @export var auto_start_manual := true
 @export var manual_seed := 1
 
+@export_category("Calibration")
+## Derive the paddle's travel limits, its bounce half-width and the observation scales from the
+## actual wall geometry at startup, instead of trusting hand-entered numbers.
+##
+## Those numbers go stale the moment the playfield is resized, and they fail SILENTLY: an
+## observation scale that is too small clamps to +-1 and makes distant states indistinguishable, a
+## travel limit that is too wide lets the observation saturate against a wall the paddle can never
+## reach. Both happened when this scene was made vertical. Measuring instead means moving a wall in
+## the editor is enough.
+@export var auto_calibrate_from_geometry := true
+## Keep the ball's spawn within reach of the paddle for the ball's flight time.
+##
+## The ball is served DOWNWARD from above the paddle, so an episode is decided before the agent can
+## act: if the spawn is further sideways than the paddle can travel while the ball falls, the life
+## is lost no matter what it does. Measured on the vertical layout, 30% of spawns were unreachable
+## and taught nothing but "you lost". The margin leaves slack for the paddle to arrive early rather
+## than exactly on time; 1.0 means "reachable at the last instant", 0 pins every spawn to the
+## paddle's own column.
+@export_range(0.0, 1.0, 0.05) var reachable_spawn_margin := 0.9
+
+@export_category("Serve")
+## Serve the ball off the paddle, upward, instead of dropping it from a fixed point in mid air.
+##
+## A mid-air serve above the paddle decides the episode before the agent can act: the ball is on the
+## paddle's line within a fraction of a second, so any sideways spawn offset it cannot cover in that
+## time is an unwinnable life. Serving from the paddle removes the offset entirely and hands the
+## agent a full up-and-back round trip before the first interception.
+@export var serve_from_paddle := true
+## Half-width of the launch cone, as |dx| against a vertical of 1. 0 serves straight up; 0.6 is about
+## 31 degrees either side.
+@export_range(0.0, 0.9, 0.05) var serve_horizontal_range := 0.6
+## Clearance between the paddle's top edge and the ball, so the serve does not start in contact.
+@export_range(0.0, 40.0, 1.0) var serve_gap := 6.0
+
 @onready var controller := $ScenarioController
 @onready var paddle: BreakoutPaddle = $BreakoutPaddle
 @onready var paddle_agent: Agent = $BreakoutPaddle/Agent
@@ -24,27 +58,106 @@ extends Node2D
 @onready var lost_event: ManualScenarioEventSource = $ScenarioController/ScenarioEventSystem/LifeLost
 @onready var cleared_event: ManualScenarioEventSource = $ScenarioController/ScenarioEventSystem/LevelCleared
 @onready var ball_hit_event: ManualScenarioEventSource = $ScenarioController/ScenarioEventSystem/BallHitEvent
+@onready var time_label: Label = get_node_or_null("UI/VBoxContainer/Time2")
+@onready var reward_label: Label = get_node_or_null("UI/VBoxContainer/Reward2")
 
 
 var _ball_start_transform: Transform2D
+var _paddle_start := Vector2.ZERO
 var _bricks: Array[Node2D] = []
 var _remaining_bricks := 0
 var _episode_ball_speed := 0.0
 var _training_episode := 0
+# Playfield interior, measured from the walls (see _calibrate_from_geometry).
+var _field := Rect2()
+var _ball_radius := 0.0
+# HUD state. Steps rather than seconds: with --physics-frames-per-step and --fixed-fps a training
+# instance does not run at wall-clock rate, so a stopwatch would show a number that means nothing.
+var _episode_steps := 0
+var _episode_reward := 0.0
 
 
 func _ready() -> void:
 	_ball_start_transform = ball.global_transform
+	_paddle_start = paddle.global_position
 	_episode_ball_speed = ball_speed
 	for child in $Bricks.get_children():
 		if child is Node2D:
 			_bricks.append(child)
+	_measure_field()
+	if auto_calibrate_from_geometry:
+		_calibrate_from_geometry()
 	controller.episode_reset_started.connect(_reset_game)
+	controller.episode_step_completed.connect(_on_step_completed)
 	controller.scenario_configured.connect(_on_scenario_configured)
 	ball.body_entered.connect(_on_ball_body_entered)
 	loss_zone.body_entered.connect(_on_loss_zone_body_entered)
+	_refresh_hud()
 	if auto_start_manual and paddle.manual_control:
 		call_deferred("_reset_game", manual_seed)
+
+
+# --- geometry --------------------------------------------------------------------------------------
+
+func _shape_rect(path:String) -> Rect2:
+	## World-space rect of a CollisionShape2D holding a RectangleShape2D, or an empty rect.
+	var node := get_node_or_null(path) as CollisionShape2D
+	if node == null or not (node.shape is RectangleShape2D):
+		return Rect2()
+	var half := (node.shape as RectangleShape2D).size * 0.5
+	return Rect2(node.global_position - half, half * 2.0)
+
+
+func _measure_field() -> void:
+	## The interior the ball can occupy: inside the walls, above the loss line.
+	var left := _shape_rect("Walls/LeftWall/CollisionShape2D")
+	var right := _shape_rect("Walls/RightWall/CollisionShape2D")
+	var ceiling := _shape_rect("Walls/Ceiling/CollisionShape2D")
+	var loss := _shape_rect("LossZone/CollisionShape2D")
+	if left.size == Vector2.ZERO or right.size == Vector2.ZERO \
+			or ceiling.size == Vector2.ZERO or loss.size == Vector2.ZERO:
+		push_warning("Breakout: could not measure the playfield; keeping the exported values.")
+		return
+	var shape := (ball.get_node_or_null("CollisionShape2D") as CollisionShape2D)
+	if shape != null and shape.shape is CircleShape2D:
+		_ball_radius = (shape.shape as CircleShape2D).radius
+	_field = Rect2(
+		Vector2(left.end.x, ceiling.end.y),
+		Vector2(right.position.x - left.end.x, loss.position.y - ceiling.end.y))
+
+
+func _paddle_half_extent() -> float:
+	## Half the paddle's collision width. The capsule is rotated 90 degrees, so its `height` is the
+	## HORIZONTAL extent -- reading `radius` here would be off by a factor of four.
+	var shape := paddle.get_node_or_null("CollisionShape2D") as CollisionShape2D
+	if shape == null:
+		return paddle_half_width
+	if shape.shape is CapsuleShape2D:
+		var capsule := shape.shape as CapsuleShape2D
+		var along := capsule.height * 0.5
+		var across := capsule.radius
+		var rotated := absf(sin(shape.global_rotation)) > 0.5
+		return along if rotated else across
+	if shape.shape is RectangleShape2D:
+		return (shape.shape as RectangleShape2D).size.x * 0.5
+	return paddle_half_width
+
+
+func _calibrate_from_geometry() -> void:
+	if _field.size == Vector2.ZERO:
+		return
+	var half := _paddle_half_extent()
+	paddle_half_width = half
+	paddle.horizontal_center = _field.position.x + _field.size.x * 0.5
+	# The paddle centre can reach a wall minus its own half width, and no further; a wider limit
+	# would map positions it can never occupy onto the edges of the observation.
+	paddle.horizontal_limit = maxf(1.0, _field.size.x * 0.5 - half)
+	# Ball-minus-paddle offsets span at most the field, so scaling by the field means the
+	# observation uses its whole [-1, 1] range and never clamps.
+	paddle.observation_position_scale = _field.size
+	print("Breakout field: x=[%.0f, %.0f] y=[%.0f, %.0f] paddle_half=%.0f limit=%.0f" % [
+		_field.position.x, _field.end.x, _field.position.y, _field.end.y,
+		half, paddle.horizontal_limit], "\n")
 
 func _reset_game(seed:int) -> void:
 	var rng := RandomNumberGenerator.new()
@@ -52,29 +165,130 @@ func _reset_game(seed:int) -> void:
 	paddle.set_episode_terminal(false)
 	_remaining_bricks = _bricks.size()
 
+	# The ball is parked out of the way BEFORE the bricks come back. Re-enabling their collision
+	# while the ball still sits where the last episode left it makes them materialise around it, and
+	# the resulting contacts destroyed one or two bricks for free at every reset.
+	ball.park_outside(_field.position - Vector2(1000.0, 1000.0))
+
 	for brick in _bricks:
 		brick.visible = true
 		brick.process_mode = Node.PROCESS_MODE_INHERIT
 		if brick is CollisionObject2D:
 			brick.collision_layer = 1
 
-	var reset_transform := _ball_start_transform
-	var position_jitter := _current_ball_position_jitter_x()
-	reset_transform.origin.x += rng.randf_range(-position_jitter, position_jitter)
-	var launch_direction := Vector2(
-		rng.randf_range(-launch_horizontal_range, launch_horizontal_range),
-		1.0
-	).normalized()
+	_episode_steps = 0
+	_episode_reward = 0.0
+	_refresh_hud()
+
 	var speed_scale := rng.randf_range(
 		1.0 - ball_speed_jitter_ratio,
 		1.0 + ball_speed_jitter_ratio
 	)
 	_episode_ball_speed = ball_speed * speed_scale
+
+	var reset_transform := _ball_start_transform
+	var launch_direction: Vector2
+	if serve_from_paddle:
+		# Served off the paddle, upward, like the real game. This is what makes the start of an
+		# episode well posed: the ball leaves from the paddle's own column, so there is no opening
+		# offset to recover and no spawn can be unwinnable. The agent then gets a full round trip --
+		# up to the bricks and back, some forty steps -- to line up the first interception, instead of
+		# the ten steps a mid-air serve above the paddle allowed.
+		#
+		# Randomising the ANGLE rather than the position is the point: it produces different
+		# trajectories without ever producing an impossible state.
+		launch_direction = Vector2(
+			rng.randf_range(-serve_horizontal_range, serve_horizontal_range),
+			-1.0
+		).normalized()
+		reset_transform.origin = Vector2(
+			_paddle_start.x,
+			_paddle_start.y - _paddle_half_height() - _ball_radius - serve_gap)
+	else:
+		# Legacy mid-air serve, kept for scenes that place the ball themselves. Direction is drawn
+		# first because the reachable spawn offset depends on this ball's flight time and drift.
+		launch_direction = Vector2(
+			rng.randf_range(-launch_horizontal_range, launch_horizontal_range),
+			1.0
+		).normalized()
+		var position_jitter := _current_ball_position_jitter_x()
+		position_jitter = minf(position_jitter, _spawn_jitter_limit(launch_direction))
+		if _field.size != Vector2.ZERO:
+			# Bound the AMPLITUDE, not the drawn position: clamping the sampled x instead would pile a
+			# quarter of all spawns onto each edge.
+			var origin := _ball_start_transform.origin.x
+			position_jitter = minf(position_jitter, minf(
+				origin - (_field.position.x + _ball_radius),
+				(_field.end.x - _ball_radius) - origin))
+		position_jitter = maxf(position_jitter, 0.0)
+		reset_transform.origin.x += rng.randf_range(-position_jitter, position_jitter)
 	ball.reset_ball(reset_transform, launch_direction * _episode_ball_speed)
+
+
+func _paddle_half_height() -> float:
+	## Half the paddle's collision height -- the SHORT axis of the rotated capsule, the mirror of
+	## _paddle_half_extent().
+	var shape := paddle.get_node_or_null("CollisionShape2D") as CollisionShape2D
+	if shape == null:
+		return 13.0
+	if shape.shape is CapsuleShape2D:
+		var capsule := shape.shape as CapsuleShape2D
+		var rotated := absf(sin(shape.global_rotation)) > 0.5
+		return capsule.radius if rotated else capsule.height * 0.5
+	if shape.shape is RectangleShape2D:
+		return (shape.shape as RectangleShape2D).size.y * 0.5
+	return 13.0
+
+
+func _spawn_jitter_limit(launch_direction:Vector2) -> float:
+	## Largest sideways spawn offset the paddle can still answer, for this ball.
+	##
+	## Flight time comes from the vertical speed alone; over it the paddle covers speed * flight, and
+	## the ball itself slides sideways by its own horizontal speed * flight. The offset the paddle has
+	## to absorb is spawn offset PLUS that drift, so the drift is subtracted from the budget rather
+	## than ignored. Returns a huge number when the geometry is unknown, so the caller's other limits
+	## still apply and nothing is silently pinned to the centre.
+	var vertical_speed := _episode_ball_speed * absf(launch_direction.y)
+	if vertical_speed <= 0.0 or paddle == null or paddle.speed <= 0.0:
+		return 1e9
+	var fall_distance := _paddle_start.y - _ball_start_transform.origin.y
+	if fall_distance <= 0.0:
+		# Served from below or level with the paddle: reachability says nothing useful here.
+		return 1e9
+	var flight := fall_distance / vertical_speed
+	var reach := paddle.speed * flight * reachable_spawn_margin
+	var drift := absf(_episode_ball_speed * launch_direction.x) * flight
+	# The paddle does not start exactly under the ball, so its head start counts against the budget --
+	# and neither does it start where the scene put it: ScenarioController re-randomises every agent by
+	# reset_position_jitter, which is measured in pixels and was still sized for the OLD, far wider
+	# playfield. Subtracting it here means the two randomisations can never combine into an offset the
+	# paddle cannot cover, whatever either one is set to.
+	var offset := absf(_ball_start_transform.origin.x - _paddle_start.x)
+	if controller != null and controller.randomize_reset:
+		offset += absf(controller.reset_position_jitter.x)
+	return maxf(0.0, reach - drift - offset)
 
 
 func _on_scenario_configured(config:Dictionary) -> void:
 	_training_episode = maxi(0, int(config.get("training_episode", _training_episode)))
+
+
+# --- HUD -------------------------------------------------------------------------------------------
+
+func _on_step_completed(step:int) -> void:
+	## `last_reward` is the per-step total the controller sends to Python (agent-local + scenario),
+	## published for exactly this purpose. Reading it has no side effects -- calling get_reward()
+	## instead would consume the event terms and steal the reward from the trainer.
+	_episode_steps = step
+	_episode_reward += controller.last_reward
+	_refresh_hud()
+
+
+func _refresh_hud() -> void:
+	if time_label != null:
+		time_label.text = "%d steps" % _episode_steps
+	if reward_label != null:
+		reward_label.text = "%.2f" % _episode_reward
 
 
 func _current_ball_position_jitter_x() -> float:

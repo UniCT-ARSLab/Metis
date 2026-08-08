@@ -35,7 +35,7 @@ func _init() -> void:
 	_line_edit.focus_exited.connect(_on_focus_exited)
 	row.add_child(_line_edit)
 
-	_menu_button.text = "Select..."
+	_menu_button.text = "Select…"
 	_menu_button.tooltip_text = "Choose a compatible member from the selected source node"
 	_menu_button.get_popup().about_to_popup.connect(_rebuild_menu)
 	_menu_button.get_popup().id_pressed.connect(_on_member_selected)

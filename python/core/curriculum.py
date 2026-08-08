@@ -7,6 +7,9 @@ import numpy as np
 
 
 def add_adaptive_curriculum_arguments(parser):
+    # Title kept in sync with core.training.GROUP_ADAPTIVE_CURRICULUM by hand: importing it here
+    # would close an import cycle, since core.training already imports this module.
+    parser = parser.add_argument_group("adaptive curriculum")
     parser.add_argument(
         "--adaptive-curriculum",
         action=argparse.BooleanOptionalAction,

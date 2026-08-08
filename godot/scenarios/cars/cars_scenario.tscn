@@ -12,21 +12,23 @@
 [ext_resource type="Script" uid="uid://b47ph323gt6gl" path="res://addons/metis/runtime/agent/events/ScenarioEventSystem.gd" id="11_event_system"]
 [ext_resource type="Script" uid="uid://douxrysm43n8i" path="res://addons/metis/runtime/agent/events/AreaReachedEventSource.gd" id="12_area_event"]
 
-[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_jqq6j"]
-sky_horizon_color = Color(0.66224277, 0.6717428, 0.6867428, 1)
-ground_horizon_color = Color(0.66224277, 0.6717428, 0.6867428, 1)
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_bxv28"]
+sky_top_color = Color(3.272891e-06, 0.48188025, 0.66148806, 1)
+sky_horizon_color = Color(0.6121336, 0.8503194, 0.7964411, 1)
+ground_bottom_color = Color(0, 0.47086573, 0.075744666, 1)
+ground_horizon_color = Color(0.6121336, 0.8503194, 0.7964411, 1)
 
-[sub_resource type="Sky" id="Sky_p42p6"]
-sky_material = SubResource("ProceduralSkyMaterial_jqq6j")
+[sub_resource type="Sky" id="Sky_l4ago"]
+sky_material = SubResource("ProceduralSkyMaterial_bxv28")
 
-[sub_resource type="Environment" id="Environment_xv75d"]
+[sub_resource type="Environment" id="Environment_bs4p7"]
 background_mode = 2
-sky = SubResource("Sky_p42p6")
+sky = SubResource("Sky_l4ago")
 tonemap_mode = 2
 glow_enabled = true
 
 [sub_resource type="PlaneMesh" id="PlaneMesh_jqq6j"]
-size = Vector2(500, 500)
+size = Vector2(20000, 20000)
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_jqq6j"]
 albedo_color = Color(0.39961004, 0.89, 0.3738, 1)
@@ -144,7 +146,7 @@ reset_lateral_jitter = 0.2
 reset_yaw_jitter_degrees = 5.0
 max_steps = 4500
 agent_to_replicate = NodePath("../Agents/Car")
-number_of_replications = 0
+number_of_replications = 9
 agents_container = NodePath("../Agents")
 
 [node name="ProgressProvider" type="Node" parent="ScenarioController" unique_id=1354235311 node_paths=PackedStringArray("path")]
@@ -156,9 +158,9 @@ script = ExtResource("11_event_system")
 
 [node name="FinishReached" type="Node" parent="ScenarioController/ScenarioEventSystem" unique_id=1873584203 node_paths=PackedStringArray("area")]
 script = ExtResource("12_area_event")
+area = NodePath("../../../Environment/EndRace")
 event_name = "finish_reached"
 terminal_reason = "finish_reached"
-area = NodePath("../../../Environment/EndRace")
 
 [node name="ScenarioRewardSystem" type="Node" parent="ScenarioController" unique_id=1874867625]
 script = ExtResource("4_rewards")
@@ -185,7 +187,6 @@ script = ExtResource("8_pace_reward")
 progress_pace_bucket_size = 0.01
 progress_pace_steps_per_bucket = 130
 progress_pace_penalty = -2.0
-terminate_on_progress_pace_failure = false
 
 [node name="Environment" type="Node3D" parent="." unique_id=412876759]
 
@@ -193,8 +194,8 @@ terminate_on_progress_pace_failure = false
 transform = Transform3D(-0.8660254, -0.43301278, 0.25, 0, 0.49999997, 0.86602545, -0.50000006, 0.75, -0.43301266, 0, 0, 0)
 shadow_enabled = true
 
-[node name="WorldEnvironment" type="WorldEnvironment" parent="Environment" unique_id=1413563165]
-environment = SubResource("Environment_xv75d")
+[node name="WorldEnvironment" type="WorldEnvironment" parent="Environment" unique_id=1503808463]
+environment = SubResource("Environment_bs4p7")
 
 [node name="Floor" type="StaticBody3D" parent="Environment" unique_id=197675366]
 collision_layer = 2
@@ -236,10 +237,10 @@ shape = SubResource("BoxShape3D_xv75d")
 
 [node name="Car" parent="Agents" unique_id=832978756 instance=ExtResource("3_p42p6")]
 transform = Transform3D(0.30730683, 0, -0.9516105, 0, 1, 0, 0.9516105, 0, 0.30730683, -144.63727, 1.0053892, 124.888916)
-manual_control = false
 auto_manage_camera = true
 
 [node name="DEBUG" type="Control" parent="." unique_id=2010511882]
+visible = false
 layout_mode = 3
 anchors_preset = 15
 anchor_right = 1.0
@@ -256,10 +257,10 @@ offset_bottom = 46.0
 text = "Total Agents: "
 label_settings = SubResource("LabelSettings_p42p6")
 
-[node name="RoadGenerator" type="Path3D" parent="." groups=["navigation_path"] unique_id=316570233]
+[node name="RoadGenerator" type="Path3D" parent="." unique_id=316570233 groups=["navigation_path"]]
 curve = SubResource("Curve3D_xv75d")
 
-[node name="CSGPolygon3D3" type="CSGPolygon3D" parent="RoadGenerator" groups=["car_crash_obstacle"] unique_id=1448621689]
+[node name="CSGPolygon3D3" type="CSGPolygon3D" parent="RoadGenerator" unique_id=1448621689 groups=["car_crash_obstacle"]]
 use_collision = true
 collision_layer = 2
 polygon = PackedVector2Array(6.8228264, -0.04716444, 6.7743917, 1.9506198, 7.31263, 1.9417965, 7.327011, 0.024861932)
@@ -276,7 +277,7 @@ path_u_distance = 1.0
 path_joined = true
 smooth_faces = true
 
-[node name="CSGPolygon3D2" type="CSGPolygon3D" parent="RoadGenerator" groups=["car_crash_obstacle"] unique_id=1012139786]
+[node name="CSGPolygon3D2" type="CSGPolygon3D" parent="RoadGenerator" unique_id=1012139786 groups=["car_crash_obstacle"]]
 use_collision = true
 collision_layer = 2
 polygon = PackedVector2Array(-7.3068123, 0.05918908, -7.3088417, 1.7531005, -6.7088413, 1.769418, -6.6948395, 0.061200857)

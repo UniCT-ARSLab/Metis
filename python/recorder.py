@@ -5,33 +5,52 @@ from pathlib import Path
 
 import numpy as np
 
+# argument_group only: core.training imports TensorFlow lazily, inside the functions that need
+# it, so this costs the recorder nothing at import time (measured: 0.11s, tensorflow absent).
+from core.training import argument_group
 from envs.process_manager import GodotProcessManager
 from envs.scenario import ScenarioGymEnv
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Record manual expert demonstrations from a Godot scenario.")
-    parser.add_argument("--output", default="demos/tank_target_demo.npz")
-    parser.add_argument("--append", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--godot-bin", default=os.environ.get("GODOT_BIN"))
-    parser.add_argument("--godot-project", default=None)
-    parser.add_argument("--godot-scene", default=None)
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=6200)
-    parser.add_argument("--agent-id", default=None)
-    parser.add_argument("--multi-agent", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--manual-agent-id", default=None)
-    parser.add_argument("--record-all-agents", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--recording-mode", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--disable-replication", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--episodes", type=int, default=5)
-    parser.add_argument("--max-steps", type=int, default=500)
-    parser.add_argument("--step-delay", type=float, default=0.08)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--connect-only", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--debug-godot", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--print-every", type=int, default=20)
+
+    group = argument_group(parser, "output and reporting")
+    group.add_argument("--output", default="demos/tank_target_demo.npz")
+    group.add_argument("--append", action=argparse.BooleanOptionalAction, default=False)
+
+    group = argument_group(parser, "Godot environment")
+    group.add_argument("--godot-bin", default=os.environ.get("GODOT_BIN"))
+    group.add_argument("--godot-project", default=None)
+    group.add_argument("--godot-scene", default=None)
+    group.add_argument("--host", default="127.0.0.1")
+    group.add_argument("--port", type=int, default=6200)
+    group.add_argument("--agent-id", default=None)
+    group.add_argument("--multi-agent", action=argparse.BooleanOptionalAction, default=False)
+
+    group = argument_group(parser, "recording")
+    group.add_argument("--manual-agent-id", default=None)
+    group.add_argument("--record-all-agents", action=argparse.BooleanOptionalAction, default=False)
+    group.add_argument("--recording-mode", action=argparse.BooleanOptionalAction, default=True)
+    group.add_argument("--disable-replication", action=argparse.BooleanOptionalAction, default=True)
+
+    group = argument_group(parser, "episodes")
+    group.add_argument("--episodes", type=int, default=5)
+    group.add_argument("--max-steps", type=int, default=500)
+
+    group = argument_group(parser, "pacing and execution mode")
+    group.add_argument("--step-delay", type=float, default=0.08)
+
+    group = argument_group(parser, "episodes")
+    group.add_argument("--seed", type=int, default=0)
+
+    group = argument_group(parser, "Godot environment")
+    group.add_argument("--headless", action=argparse.BooleanOptionalAction, default=False)
+    group.add_argument("--connect-only", action=argparse.BooleanOptionalAction, default=False)
+    group.add_argument("--debug-godot", action=argparse.BooleanOptionalAction, default=True)
+
+    group = argument_group(parser, "output and reporting")
+    group.add_argument("--print-every", type=int, default=20)
     return parser.parse_args()
 
 

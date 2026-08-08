@@ -34,6 +34,14 @@ ALGORITHM_MODULES = {
 	"td3": "algorithms.td3",
 }
 
+# The non-training entry points, dumped into the same file under their own keys so the add-on's Run
+# and Record windows build their forms the same way the Train wizard does -- from the CLI, instead of
+# from defaults copied into GDScript that then drift.
+COMMAND_MODULES = {
+	"run": "run",
+	"record": "recorder",
+}
+
 
 class _ParserCaptured(Exception):
 	pass
@@ -91,6 +99,8 @@ def _group_titles(parser):
 
 
 def spec_for_algorithm(algorithm):
+	if algorithm in COMMAND_MODULES:
+		return spec_for_command(algorithm)
 	module_name = ALGORITHM_MODULES.get(algorithm)
 	if module_name is None:
 		raise ValueError(f"Unknown algorithm: {algorithm!r}")
@@ -104,6 +114,11 @@ def spec_for_algorithm(algorithm):
 	if parser is None:
 		raise RuntimeError(f"Could not capture the parser for {algorithm}")
 
+	return {"algorithm": algorithm, "arguments": _describe(parser)}
+
+
+def _describe(parser):
+	"""Every user-facing option of a built parser, as plain JSON-able dictionaries."""
 	groups = _group_titles(parser)
 	arguments = []
 	for action in parser._actions:
@@ -117,23 +132,41 @@ def spec_for_algorithm(algorithm):
 			"flags": list(action.option_strings),
 			"dest": action.dest,
 			"kind": _kind(action),
+			# Exported so the editor knows a flag takes several values (--network-layers 256 256):
+			# without it the add-on would send "256 256" as ONE argv token and argparse would reject
+			# it with `invalid int value: '256 256'`.
+			"nargs": _jsonable(action.nargs),
 			"default": _jsonable(action.default),
 			"choices": [str(c) for c in action.choices] if action.choices else None,
 			"help": (action.help or "").strip(),
 			"group": groups.get(action.dest, ""),
 		})
-	return {"algorithm": algorithm, "arguments": arguments}
+	return arguments
+
+
+def spec_for_command(command):
+	"""Capture run.py / recorder.py the same way, so their forms come from the CLI too."""
+	module_name = COMMAND_MODULES.get(command)
+	if module_name is None:
+		raise ValueError(f"Unknown command: {command!r}")
+	module = importlib.import_module(module_name)
+	parser = _capture_parser(module.parse_args)
+	if parser is None:
+		raise RuntimeError(f"Could not capture the parser for {command}")
+	return {"algorithm": command, "arguments": _describe(parser)}
 
 
 def main(argv=None):
-	parser = argparse.ArgumentParser(description="Dump a training algorithm's argparse spec as JSON.")
-	parser.add_argument("--algorithm", choices=sorted(ALGORITHM_MODULES))
-	parser.add_argument("--all", action="store_true", help="Dump every algorithm.")
+	parser = argparse.ArgumentParser(description="Dump a Metis entry point's argparse spec as JSON.")
+	parser.add_argument("--algorithm", choices=sorted(ALGORITHM_MODULES) + sorted(COMMAND_MODULES))
+	parser.add_argument("--all", action="store_true",
+		help="Dump every algorithm plus the run and record commands.")
 	parser.add_argument("--output", help="Write JSON to this file instead of stdout.")
 	args = parser.parse_args(argv)
 
 	if args.all:
-		result = {name: spec_for_algorithm(name)["arguments"] for name in sorted(ALGORITHM_MODULES)}
+		names = sorted(ALGORITHM_MODULES) + sorted(COMMAND_MODULES)
+		result = {name: spec_for_algorithm(name)["arguments"] for name in names}
 	elif args.algorithm:
 		result = {args.algorithm: spec_for_algorithm(args.algorithm)["arguments"]}
 	else:
