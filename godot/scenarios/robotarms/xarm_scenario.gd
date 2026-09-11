@@ -1,46 +1,35 @@
 extends Node3D
 
 @export var target_spawns: Array[Marker3D] = []
-## Optional: assign a node whose Marker3D children are auto-collected as spawn points, so
-## adding a marker in the editor is enough (no need to also wire it into target_spawns).
+## Collects Marker3D children automatically when assigned.
 @export var target_spawns_root: Node3D
 @export var easy_target_count := 4
-## Once the basic reach is learned, sample the complete axis-aligned volume delimited by the
-## Marker3D nodes instead of memorizing a finite set of target coordinates.
+## Samples the volume bounded by the markers after the initial reach phase.
 @export var continuous_target_sampling := true
 @export var continuous_target_sampling_start_episode := 800
-## Spatial curriculum: rather than jumping straight to the full marker volume, sample within a radius
-## around a discrete marker that GROWS from spatial_curriculum_start_radius (tight, essentially on the
-## markers) to the full per-axis half-extent, linearly between the two episodes below. Keeps early
-## continuous targets close to the learned discrete poses, then widens to cover the whole volume.
-## Leave full<=start to disable (samples the full volume immediately, the original behaviour).
+## Expands sampling from each marker to the full marker volume.
 @export var spatial_curriculum_start_episode := 0
 @export var spatial_curriculum_full_episode := 0
 @export var spatial_curriculum_start_radius := 0.01
-## Shrinks the marker-defined volume on each axis. Useful when the outer markers sit too close to
-## a wall or to the physical edge of the robot workspace.
+## Shrinks the marker-defined volume on each axis.
 @export var target_sampling_inset := Vector3.ZERO
 @export var late_joint_jitter_degrees := 10.0
 @export_category("Continuous Pose Tracking")
 @export var continuous_pose_tracking := true
-## Random yaw teaches the policy that the target is a pose, not only a point. The target's local
-## +X axis remains the canonical approach direction.
+## Random yaw teaches the policy that the target is a pose, not only a point.
 @export var target_yaw_randomization_start_episode := 800
 @export_range(0.0, 180.0, 1.0) var target_yaw_randomization_degrees := 30.0
-## Once static reach-and-hold is established, move the target after a random dwell without
-## resetting the robot. This creates reach -> hold -> reacquire transitions in the replay.
+## Once static reach-and-hold is established, move the target after a random dwell without resetting the robot.
 @export var relocate_target_during_training := true
 @export var target_relocation_start_episode := 1500
 @export_range(1, 1000, 1) var target_relocation_delay_steps_min := 45
 @export_range(1, 1000, 1) var target_relocation_delay_steps_max := 120
 @export var minimum_target_relocation_distance := 0.04
-## Reach-and-HOLD curriculum breakpoints (absolute training episode). The hold requirement tightens
-## in stages: a longer hold at a lower stillness threshold.
+## Absolute episode boundaries for the hold curriculum.
 @export var hold_curriculum_stage1_until := 1000
 @export var hold_curriculum_stage2_until := 2200
 
 @onready var controller: ScenarioController = $ScenarioController
-# Both robot backends implement the same contract without sharing a GDScript base class.
 @onready var arm = $RobotArm
 @onready var target: Node3D = $Target
 @onready var target_pose: Node3D = $Target/GraspPose
@@ -103,8 +92,7 @@ func _apply_continuous_pose_tracking(enabled: bool) -> void:
 
 
 func _target_spawn_pool() -> Array[Marker3D]:
-	# Prefer auto-collecting every Marker3D under target_spawns_root; fall back to the
-	# manually-wired target_spawns array so existing scenes keep working.
+	# Explicit markers remain the fallback for older scenes.
 	var result: Array[Marker3D] = []
 	if target_spawns_root:
 		for child in target_spawns_root.get_children():
@@ -129,11 +117,7 @@ func _on_episode_reset_started(_seed:int) -> void:
 	_target_pool_size = spawn_pool.size()
 	var joint_jitter_degrees := 0.0
 
-	# Curriculum on the success radius. Coarse first (easy to hit + earn the +30 goal), then
-	# progressively tighter so the arm learns to stop ON the target, not just within 5cm. With
-	# terminate_on_success the radius is where the arm stops, so tightening it moves the stop point
-	# onto the target; the dense ProximityScenarioReward pulls it through the final approach.
-	# workspace_scale=0.5.
+	# Tighten the pose gate only after the arm can reach reliably.
 	if _training_episode < 300:
 		_target_pool_size = maxi(1, mini(easy_target_count, spawn_pool.size()))
 		arm.success_distance = 0.08
@@ -148,15 +132,10 @@ func _on_episode_reset_started(_seed:int) -> void:
 	else:
 		joint_jitter_degrees = late_joint_jitter_degrees
 		arm.success_distance = 0.02
-		# Relaxed from 12deg: with wrist_roll fixed (5 effective DOF) the arm reaches an arbitrary
-		# full-volume position at <2cm ~86% of the time but can only orient within 12deg ~36% (it is
-		# ~90% within 20deg). 12deg was a hard KINEMATIC ceiling on arbitrary poses, not a training
-		# gap; 20deg is within reach across the volume and is tight enough for a parallel-jaw grasp.
+		# With the fixed wrist roll, 20 degrees is reachable across the workspace.
 		arm.success_angle_degrees = 20.0
 
-	# Reach-and-HOLD curriculum: require a progressively LONGER hold at a TIGHTER stillness threshold.
-	# The reach (success_distance) is already at its tightest by this episode range; this teaches the
-	# arm to STOP and stay, not just touch. At 60 Hz the final 120 frames represent two seconds.
+	# Later stages require a longer, steadier hold. At 60 Hz, 120 frames are two seconds.
 	if _training_episode < hold_curriculum_stage1_until:
 		arm.success_hold_physics_frames = 20
 		arm.success_max_joint_speed = 0.30
@@ -233,11 +212,7 @@ func _sample_target_position(
 		lower[axis] += axis_inset
 		upper[axis] -= axis_inset
 
-	# Spatial curriculum: sample within a GROWING radius around the anchor marker instead of the
-	# full volume at once. frac ramps 0->1 across [start, full]; the per-axis radius lerps from the
-	# tight start radius (targets essentially on the learned markers) to the axis half-extent (full
-	# volume). Clamped to the marker AABB so the target never leaves the workspace or drops below the
-	# table (lower.y sits above it). full<=start disables the ramp (frac=1 -> full volume at once).
+	# Grow each axis around the anchor, while staying inside the marker bounds.
 	var frac := 1.0
 	if spatial_curriculum_full_episode > spatial_curriculum_start_episode:
 		frac = clampf(

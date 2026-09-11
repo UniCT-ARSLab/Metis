@@ -1,6 +1,6 @@
 @tool
 class_name GodotRobot
-extends Node3D
+extends MetisRobot3D
 
 enum ControlMode {
 	PHYSICS_MOTORS,

@@ -162,7 +162,12 @@ The SB3 adapter does not implement independent multi-policy learning.
 
 - `models.py`: Keras model factories and compiled inference functions;
 - `policy_artifact.py`: atomic `policy.keras` and manifest output;
+- `composite_policy.py` and `policy_action_adapter.py`: generic bounded-residual
+  policy execution and standalone PPO policy export;
+- `critic_audit.py`: task-independent Q-ranking gate used by the documented
+  `--stop-after-critic-warmup` training option;
 - `replay_buffer.py`: uniform/prioritized replay, protected demonstrations, snapshots;
+- `transition_snapshots.py`: immutable transition-indexed checkpoint publication;
 - `opponent_pool.py`: historical policy snapshots and opponent sampling;
 - `training.py`: async collection, parallel stepping, TensorFlow setup, best-policy
   evaluation, health/recovery wiring, transition budgets, JSONL metrics, and shared
@@ -184,9 +189,11 @@ commands directly.
 
 ### `python/tools/`
 
-Contains random rollout and bridge diagnostics plus
-`benchmark_backends.py`, which runs Metis and SB3 sequentially with common seeds,
-transition budgets, and deterministic evaluation.
+Contains repository-only development commands such as random rollout and bridge
+diagnostics. `benchmark_backends.py` runs Metis and SB3 sequentially with common
+seeds, transition budgets, and deterministic evaluation. These modules are not part
+of the installed Python package; a supported end-user command must be registered in
+`[project.scripts]` instead.
 
 ### `python/dashboard/`
 

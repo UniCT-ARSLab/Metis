@@ -101,6 +101,36 @@ class BestCheckpointTrackerTests(unittest.TestCase):
             self.assertTrue(tracker.is_improvement(evaluation(200, 0.10, 51.0)))
             self.assertTrue(tracker.is_improvement(evaluation(200, 0.15, -10.0)))
 
+    def test_success_rate_metric_ignores_the_region_floor(self):
+        """`--best-metric success_rate` must rank on the rate that can actually vary.
+
+        `selection_success_rate` is the success rate floored by the WORST region. That floor is the
+        point of `auto`, but on a task where no region succeeds yet it is identically 0.00, so every
+        evaluation ties and the tracker keeps whichever arrived first. Measured on a real run: it
+        held an evaluation with zero successes while an 8/20 came and went, and checkpoint rotation
+        then deleted the good one. Asking for `success_rate` has to mean the plain rate.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            args = tracker_args(temp_dir, best_metric="success_rate")
+            tracker = BestCheckpointTracker(args, "sac")
+            tracker.record_best(
+                evaluation(100, 0.0, 10.0, selection_success_rate=0.0), "best/ckpt-100")
+
+            # Eight successes out of twenty, but every region still floors to zero.
+            better = evaluation(200, 0.40, -20.0, selection_success_rate=0.0)
+            self.assertTrue(tracker.is_improvement(better))
+
+    def test_auto_metric_still_honours_the_region_floor(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tracker = BestCheckpointTracker(tracker_args(temp_dir), "sac")
+            tracker.record_best(
+                evaluation(100, 0.0, 10.0, selection_success_rate=0.0), "best/ckpt-100")
+
+            # Same evaluation as above: under `auto` the floor keeps it from counting as better on
+            # success alone, so the weaker reward decides and it is NOT an improvement.
+            unchanged = evaluation(200, 0.40, -20.0, selection_success_rate=0.0)
+            self.assertFalse(tracker.is_improvement(unchanged))
+
     def test_reward_metric_prioritizes_reward(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             args = tracker_args(temp_dir, best_metric="reward_mean")

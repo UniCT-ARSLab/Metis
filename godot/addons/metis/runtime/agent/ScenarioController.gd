@@ -1,4 +1,4 @@
-extends Node
+extends Metis
 class_name ScenarioController
 signal episode_reset_started(seed:int)
 signal episode_reset_completed(seed:int)
@@ -24,6 +24,11 @@ signal scenario_configured(config:Dictionary)
 @export_category("RL Info")
 @export var max_steps:= 500 # Zero disables step-based truncation.
 @export_range(1, 16, 1) var physics_frames_per_step := 1
+## Guarantee EXACTLY physics_frames_per_step physics ticks per environment step. Off by default,
+## which keeps the historical behaviour byte for byte -- see _advance_physics_frames for what the
+## two branches actually differ in. Turn it on for tasks whose reward integrates per-tick quantities
+## (contact, object disturbance), where a machine under load would otherwise change the reward.
+@export var strict_physics_frames := false
 @export var manage_agent_cameras := true
 @export var continue_after_success := false
 @export var training_mode := false
@@ -278,6 +283,8 @@ func configure(config:Dictionary) -> Dictionary:
 		max_steps = maxi(0, int(config["max_steps"]))
 	if config.has("physics_frames_per_step"):
 		physics_frames_per_step = maxi(1, int(config["physics_frames_per_step"]))
+	if config.has("strict_physics_frames"):
+		strict_physics_frames = bool(config["strict_physics_frames"])
 	if config.has("training_episode"):
 		_training_episode = max(0, int(config["training_episode"]))
 	if config.has("reset_progress_min"):
@@ -314,6 +321,7 @@ func configure(config:Dictionary) -> Dictionary:
 		"training_episode": _training_episode,
 		"max_steps": max_steps,
 		"physics_frames_per_step": physics_frames_per_step,
+		"strict_physics_frames": strict_physics_frames,
 		"reset_progress_min": reset_progress_min,
 		"reset_progress_max": reset_progress_max,
 		"reset_track_progress_min": reset_progress_min,
@@ -426,7 +434,9 @@ func get_spec() -> Dictionary:
 			"error": error_message,
 			"agents": [],
 			"multi_agent": false,
-			"physics_frames_per_step": physics_frames_per_step
+			"physics_frames_per_step": physics_frames_per_step,
+			"max_steps": max_steps,
+			"strict_physics_frames": strict_physics_frames
 		}
 
 	var agent_specs := []
@@ -440,6 +450,8 @@ func get_spec() -> Dictionary:
 			"policy_id": _agent_policy_id(agent),
 			"obs_dim": _agent_observation_size(agent),
 			"observation_names": _agent_observation_names(agent),
+			"observation_layout": _agent_observation_layout(agent),
+			"observation_scalar_names": _agent_observation_scalar_names(agent),
 			"action_names": action_names,
 			"action_type": action_type,
 			"action_space": action_space
@@ -461,7 +473,9 @@ func get_spec() -> Dictionary:
 		"ok": true,
 		"agents": agent_specs,
 		"multi_agent": agent_specs.size() > 1,
-		"physics_frames_per_step": physics_frames_per_step
+		"physics_frames_per_step": physics_frames_per_step,
+		"max_steps": max_steps,
+		"strict_physics_frames": strict_physics_frames
 	}
 
 
@@ -470,11 +484,26 @@ func _advance_physics_frames(frame_count:int) -> void:
 	var was_paused := get_tree().paused
 	if was_paused:
 		get_tree().paused = false
-		
-	for _frame in range(maxi(frame_count, 1)):
-		# Wait for both physics and process frames so Godot completes the full tick.
-		await get_tree().physics_frame
+
+	# Both branches wait for the idle frame before returning, because the observations are read
+	# immediately afterwards and deferred work (call_deferred, queue_free) only lands there.
+	#
+	# They differ in HOW MANY idle frames are crossed, and that is not cosmetic. When the engine
+	# falls behind, Godot catches up by running several physics ticks inside one main-loop
+	# iteration (up to max_physics_steps_per_frame, default 8). Awaiting process_frame inside the
+	# loop skips past those extra ticks, so the default branch delivers AT LEAST frame_count ticks
+	# rather than exactly frame_count. The strict branch awaits physics_frame frame_count times --
+	# the signal fires once per tick, so N awaits are N ticks -- and takes the idle frame once at
+	# the end. The cost is that anything deferred during tick k now lands after tick N instead of
+	# before tick k+1.
+	if strict_physics_frames:
+		for _frame in range(maxi(frame_count, 1)):
+			await get_tree().physics_frame
 		await get_tree().process_frame
+	else:
+		for _frame in range(maxi(frame_count, 1)):
+			await get_tree().physics_frame
+			await get_tree().process_frame
 
 	# Restore the pause state; BridgeServer will manage it after the request.
 	if was_paused:
@@ -1015,6 +1044,20 @@ func _agent_observation_names(agent_body:Node) -> Array:
 	var interface := _agent_interface(agent_body)
 	if interface != null and interface.has_method("get_observation_names"):
 		return interface.get_observation_names()
+	return []
+
+
+func _agent_observation_layout(agent_body:Node) -> Array:
+	var interface := _agent_interface(agent_body)
+	if interface != null and interface.has_method("get_observation_layout"):
+		return interface.get_observation_layout()
+	return []
+
+
+func _agent_observation_scalar_names(agent_body:Node) -> Array:
+	var interface := _agent_interface(agent_body)
+	if interface != null and interface.has_method("get_observation_scalar_names"):
+		return interface.get_observation_scalar_names()
 	return []
 
 

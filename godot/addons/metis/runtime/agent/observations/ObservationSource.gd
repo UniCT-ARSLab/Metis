@@ -1,4 +1,4 @@
-extends Node
+extends Metis
 class_name ObservationSource
 
 @export var enabled := true

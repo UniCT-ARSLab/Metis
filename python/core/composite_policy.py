@@ -70,7 +70,7 @@ class BoundedGateCombine(keras.layers.Layer):
 
 def build_composite_policy(base_model, residual_model, *, delta_max, gate_outer, gate_inner,
                            err_start=14, err_size=3, clip_base=False, action_low=-1.0, action_high=1.0,
-                           freeze=True, name="settling_composite_policy"):
+                           freeze=True, name="composite_policy"):
     """Fuse a frozen base + a residual into one action-emitting Keras model.
 
     freeze=True (default) marks both sub-models non-trainable -- correct for an offline packaging tool

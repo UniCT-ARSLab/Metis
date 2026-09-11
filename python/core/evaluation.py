@@ -38,6 +38,17 @@ def new_episode_agent_diagnostics():
         "orientation_error": [],
         "max_joint_speed": [],
         "hold_frames": [],
+        # Grasping only: how far the claws were open, what the policy last asked them to do, and
+        # whether the object was between them. Absent for scenarios that publish no gripper.
+        "pad_gap": [],
+        "gripper_command": [],
+        "offset_across_pads": [],
+        "steps_object_between_pads": 0,
+        "steps_closing_on_object": 0,
+        # Claws narrower than the object while the object is NOT between them. Once that happens the
+        # grasp is impossible for the rest of the episode -- the glass no longer fits -- so this is
+        # the mirror of "never closes" and needs its own counter to be told apart from squeezing.
+        "steps_shut_off_object": 0,
         "success_thresholds": {},
         "position_gate_reached": False,
         "pose_gate_reached": False,
@@ -45,6 +56,9 @@ def new_episode_agent_diagnostics():
         "collided": False,
         "progress_stalled": False,
         "collision_sources": [],
+        "collision_links": [],
+        "self_clearance": [],
+        "self_clearance_argmin": 0,
         "terminal_reasons": [],
     }
 
@@ -62,10 +76,37 @@ def update_episode_agent_diagnostics(state, agent_info):
             agent_info.get("max_joint_speed", agent_info.get("max_joint_speed_rad_s"))
         ),
         "hold_frames": _finite_float(agent_info.get("hold_frames")),
+        "pad_gap": _finite_float(agent_info.get("pad_gap_m")),
+        "gripper_command": _finite_float(agent_info.get("gripper_command")),
+        "offset_across_pads": _finite_float(
+            agent_info.get("object_offset_across_pads_m")
+        ),
+        "self_clearance": _finite_float(agent_info.get("self_clearance_m")),
     }
     for key, value in values.items():
         if value is not None:
             state[key].append(value)
+
+    # WHERE along the episode the arm came closest to itself. The minimum alone cannot tell a brief
+    # transit past the torso from a whole approach spent against it, and those need opposite fixes.
+    if values["self_clearance"] is not None and len(state["self_clearance"]) > 1:
+        if values["self_clearance"] < min(state["self_clearance"][:-1]):
+            state["self_clearance_argmin"] = len(state["self_clearance"]) - 1
+
+    # Closing is a negative command; the pair of counters is what distinguishes "never tried to
+    # close" from "tried and was refused".
+    between = bool(agent_info.get("object_between_pads", False))
+    object_width = _finite_float(agent_info.get("grasp_object_width_m"))
+    if between:
+        state["steps_object_between_pads"] += 1
+        if values["gripper_command"] is not None and values["gripper_command"] < 0.0:
+            state["steps_closing_on_object"] += 1
+    elif (
+        values["pad_gap"] is not None
+        and object_width is not None
+        and values["pad_gap"] < object_width
+    ):
+        state["steps_shut_off_object"] += 1
 
     thresholds = agent_info.get("success_thresholds", {})
     if isinstance(thresholds, dict):
@@ -109,6 +150,19 @@ def update_episode_agent_diagnostics(state, agent_info):
     collision_source = str(agent_info.get("collision_source", "")).strip()
     if collision_source and collision_source not in state["collision_sources"]:
         state["collision_sources"].append(collision_source)
+    # Which link actually touched. "environment" alone cannot distinguish a fingertip grazing the
+    # table while taking an object off it -- close to unavoidable -- from a forearm swinging into
+    # it, which is a trajectory fault. Godot already publishes it; only this side dropped it.
+    details = agent_info.get("collision_details")
+    if isinstance(details, dict):
+        # Self-collisions name the offending link `body_link`; environment hits name it
+        # `checker_link`, because there the arm is the thing doing the checking. Reading only the
+        # first left every table collision anonymous.
+        link = str(
+            details.get("body_link") or details.get("checker_link") or ""
+        ).strip()
+        if link and link not in state["collision_links"]:
+            state["collision_links"].append(link)
     terminal_reason = str(agent_info.get("terminal_reason", "")).strip()
     if terminal_reason and terminal_reason not in state["terminal_reasons"]:
         state["terminal_reasons"].append(terminal_reason)
@@ -178,6 +232,27 @@ def finalize_episode_agent_diagnostics(state):
         "hold_frames_final": (
             float(state["hold_frames"][-1]) if state["hold_frames"] else None
         ),
+        "pad_gap_min": (
+            float(np.min(state["pad_gap"])) if state["pad_gap"] else None
+        ),
+        "gripper_command_mean": (
+            float(np.mean(state["gripper_command"]))
+            if state["gripper_command"]
+            else None
+        ),
+        "gripper_command_min": (
+            float(np.min(state["gripper_command"]))
+            if state["gripper_command"]
+            else None
+        ),
+        "steps_object_between_pads": int(state["steps_object_between_pads"]),
+        "steps_closing_on_object": int(state["steps_closing_on_object"]),
+        "steps_shut_off_object": int(state["steps_shut_off_object"]),
+        "offset_across_pads_min_abs": (
+            float(np.min(np.abs(state["offset_across_pads"])))
+            if state["offset_across_pads"]
+            else None
+        ),
         "success_thresholds": dict(state["success_thresholds"]),
         "position_gate_reached": bool(state["position_gate_reached"]),
         "pose_gate_reached": bool(state["pose_gate_reached"]),
@@ -185,6 +260,17 @@ def finalize_episode_agent_diagnostics(state):
         "collided": bool(state["collided"]),
         "progress_stalled": bool(state["progress_stalled"]),
         "collision_sources": list(state["collision_sources"]),
+        "collision_links": list(state["collision_links"]),
+        "self_clearance_argmin": int(state["self_clearance_argmin"]),
+        "self_clearance_steps_tight": int(
+            sum(1 for v in state["self_clearance"] if 0.0 <= v <= 0.02)
+        ),
+        "self_clearance_samples": int(len(state["self_clearance"])),
+        "self_clearance_min": (
+            float(np.min(state["self_clearance"]))
+            if state["self_clearance"]
+            else None
+        ),
         "terminal_reasons": list(state["terminal_reasons"]),
     }
 

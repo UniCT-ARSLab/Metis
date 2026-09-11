@@ -2,26 +2,16 @@
 class_name MetisTrainMonitorDialog
 extends AcceptDialog
 
-## Watches a training run and stops it. Shown INSTEAD of the configuration wizard whenever a run is
-## already active, which is also why it is a window of its own: the wizard's four configuration steps
-## describe a run about to be launched, and reusing its last page for an existing run left a form full
-## of defaults sitting behind values that had nothing to do with what was executing.
-##
-## Nothing here owns the run. It attaches to whatever `res://.metis` describes (see MetisRunState), so
-## it works for a run launched by a previous editor session, or from a terminal.
+## Monitors and stops the detached training run recorded in `res://.metis`.
 
 const BRANDING := preload("res://addons/metis/editor/metis_branding.gd")
 const RUN_STATE := preload("res://addons/metis/editor/run/metis_run_state.gd")
 
-# `episode=0042` opens every episode record in both --log-format modes.
 static var EPISODE_PATTERN := RegEx.create_from_string("episode=(\\d+)")
 
-# An episode takes seconds; polling the log per frame only re-read a growing file 60 times a second.
 const POLL_SECONDS := 1.0
 
-# How long a missing pidfile still counts as "starting" rather than "finished". Generous, because the
-# window opens in the same frame as the spawn and the trainer imports TensorFlow before doing
-# anything; bounded, so a monitor opened with nothing running does eventually say so.
+# TensorFlow may still be importing when the monitor first opens.
 const STARTUP_GRACE_MS := 30_000
 
 signal run_finished
@@ -47,7 +37,6 @@ var _log: TextEdit
 
 func _ready() -> void:
 	title = "Metis — Training"
-	# English by design; see plugin.gd. Keeps the editor dictionary out of our labels.
 	auto_translate_mode = Node.AUTO_TRANSLATE_MODE_DISABLED
 	min_size = Vector2i(660, 470)
 	get_ok_button().text = "Close"
@@ -57,8 +46,6 @@ func _ready() -> void:
 	root.add_theme_constant_override("separation", 8)
 	add_child(root)
 
-	# Built with a placeholder subtitle so the label exists, then rebound each popup to name the run
-	# actually being watched. Reaching into the shared header beats rebuilding the brand here.
 	var header := BRANDING.header("Training in progress", "…")
 	root.add_child(header)
 	_subtitle = header.find_child(BRANDING.SUBTITLE_NAME, true, false)
@@ -108,8 +95,6 @@ func _ready() -> void:
 	buttons.add_child(spacer)
 	root.add_child(buttons)
 
-	# Collapsed by default: the metrics stream is dense, and it pushes everything actionable -- the
-	# progress bar, the dashboard link, the status line -- out of view.
 	_log_toggle = Button.new()
 	_log_toggle.toggle_mode = true
 	_log_toggle.alignment = HORIZONTAL_ALIGNMENT_LEFT
@@ -133,8 +118,7 @@ func _ready() -> void:
 	_poll_timer.timeout.connect(_poll)
 	add_child(_poll_timer)
 
-	# Killing a run that may have been training for hours is worth one click of friction: checkpoints
-	# are periodic, so whatever happened since the last one is gone.
+	# Stopping may discard work since the last checkpoint, so ask first.
 	_confirm_stop = ConfirmationDialog.new()
 	_confirm_stop.title = "Stop training"
 	_confirm_stop.ok_button_text = "Stop"
@@ -143,8 +127,7 @@ func _ready() -> void:
 
 
 func _refresh_from_disk() -> void:
-	## Rebind to whatever `res://.metis` currently describes. Runs on every popup, so switching runs
-	## between sessions needs no bookkeeping here.
+	## Reconnects to the run currently described by `res://.metis`.
 	_runner.attach(RUN_STATE.log_path(), RUN_STATE.pid_path())
 	var state := RUN_STATE.read()
 	_subtitle.text = RUN_STATE.summary(state)
@@ -165,13 +148,10 @@ func _refresh_from_disk() -> void:
 		_progress_bar.max_value = float(_episode_total)
 		_progress_label.text = "episode 0 / %d" % _episode_total
 	else:
-		# Without a recorded total there is no denominator; report the count rather than invent one.
 		_progress_bar.visible = false
 		_progress_label.text = "waiting for the first episode…"
 
 	if bool(state.get("dashboard", false)):
-		# 127.0.0.1 rather than the port alone: the dashboard binds locally, and a bare port is not
-		# something the OS handler can open.
 		_dashboard_url = "http://127.0.0.1:%d" % int(state.get("dashboard_port", 8770))
 		_dashboard_link.text = "Open the live dashboard — %s" % _dashboard_url
 		_dashboard_link.visible = true
@@ -200,10 +180,7 @@ func _poll() -> void:
 			_status_label.text = ""
 		return
 	if not _runner.has_pidfile() and Time.get_ticks_msec() < _startup_deadline:
-		# Opened straight after a launch: the launcher writes the pidfile a few milliseconds after the
-		# spawn returns, and until it exists is_running() answers false for a run that is simply not up
-		# yet. Reading that as "finished" is what disabled Stop and froze the progress bar the instant
-		# the window appeared.
+		# The launcher may not have written its pidfile yet.
 		_status_label.text = "Waiting for the trainer to start…"
 		_stop_button.disabled = true
 		return
@@ -215,12 +192,7 @@ func _poll() -> void:
 
 
 func _apply_progress(log_text: String) -> void:
-	## Track the episode counter out of the trainer's own log.
-	##
-	## Both --log-format values start an episode with `episode=NNNN` (pretty puts it alone on a line,
-	## compact prefixes the metric row), so one pattern covers them. The total is the configured
-	## --num-episodes; a run also stops early on --total-timesteps, so the bar is an upper bound on the
-	## work remaining rather than a promise.
+	## Updates progress from the latest `episode=NNNN` entry in the trainer log.
 	var found := EPISODE_PATTERN.search_all(log_text)
 	if found.is_empty():
 		return
@@ -242,5 +214,4 @@ func _stop_confirmed() -> void:
 	_runner.stop()
 	_status_label.text = "Stop requested. Waiting for the process group to exit…"
 	_stop_button.disabled = true
-	# Keep polling: is_running() flips once the group is gone, and _poll() settles the UI then.
 	_poll_timer.start()

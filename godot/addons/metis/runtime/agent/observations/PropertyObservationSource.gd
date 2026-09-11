@@ -1,5 +1,5 @@
 @tool
-extends "res://addons/metis/runtime/agent/observations/ObservationSource.gd"
+extends ObservationSource
 class_name PropertyObservationSource
 
 @export var observation_name := ""

@@ -1,4 +1,4 @@
-extends "res://addons/metis/runtime/agent/reward_components/RewardComponent.gd"
+extends RewardComponent
 class_name MovementReward
 
 @export var reward := 0.002

@@ -8,8 +8,6 @@ re-exec that the training entry points perform on import is suppressed via the e
 this stays a quick, side-effect-free introspection.
 """
 
-from __future__ import annotations
-
 import os
 
 # Must be set before importing any algorithm module: it skips ensure_nvidia_pip_libs_on_path()'s

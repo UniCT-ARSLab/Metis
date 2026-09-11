@@ -1,4 +1,4 @@
-extends "res://addons/metis/runtime/agent/events/ScenarioEventSource.gd"
+extends ScenarioEventSource
 class_name ObservationThresholdEventSource
 
 @export var observation_name := ""

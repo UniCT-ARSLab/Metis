@@ -1,4 +1,4 @@
-extends "res://addons/metis/runtime/agent/observations/ObservationSource.gd"
+extends ObservationSource
 class_name TeamRaycastObservationSource
 
 @export var team_method_name: StringName = &"get_team_id"

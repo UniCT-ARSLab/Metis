@@ -1,32 +1,16 @@
 @tool
 extends RefCounted
-## Tells a Metis scenario scene from any other scene, without instantiating it.
-##
-## A trainable/runnable scenario is a scene holding a BridgeServer: that node is the TCP endpoint the
-## Python side connects to, so a scene without one cannot be driven whatever it is named. Of the 14
-## scenes under `scenarios/` in the development project, 9 qualify -- the rest are sub-scenes (a ball,
-## a missile, map variants) that nothing should ever be pointed at.
+## Identifies Metis scenarios without instantiating their scene trees.
 
-# Referenced by string rather than by the BridgeServer symbol, so a caller still parses if the
-# runtime scripts fail to load.
+# String lookup works before the runtime class cache is ready.
 const BRIDGE_CLASS := "BridgeServer"
 
-# Depth cap for the recursion below: a guard against a malformed cyclic instance chain, not a case
-# any real project is expected to hit.
+# Protect against malformed cyclic scene dependencies.
 const MAX_DEPTH := 8
 
 
 static func has_bridge_server(path: String, depth: int = 0) -> bool:
-	## Whether the scene FILE at `path` contains a BridgeServer.
-	##
-	## SceneState exposes the saved node list, so this costs a resource load and runs no _ready() --
-	## instantiating a scenario in the editor would start its @tool scripts and build its whole tree.
-	## The file is also the right thing to inspect rather than the live edited tree: launching starts
-	## a separate Godot that loads this path from disk, so unsaved edits are not what will run.
-	##
-	## Recurses into instanced sub-scenes, because an inheriting scenario holds no BridgeServer of its
-	## own: cars_path_aware_scenario.tscn instances cars_scenario.tscn and gets it from there, which a
-	## plain text scan of the .tscn misses.
+	## Checks the saved scene and its instances for a BridgeServer node.
 	if depth > MAX_DEPTH or path.is_empty() or not ResourceLoader.exists(path):
 		return false
 	var packed := load(path) as PackedScene

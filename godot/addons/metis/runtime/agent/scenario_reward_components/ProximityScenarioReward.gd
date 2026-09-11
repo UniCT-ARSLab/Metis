@@ -1,4 +1,4 @@
-extends "res://addons/metis/runtime/agent/scenario_reward_components/ScenarioRewardComponent.gd"
+extends ScenarioRewardComponent
 class_name ProximityScenarioReward
 
 ## Dense per-step bonus for being close to the target, growing sharply in the final approach.

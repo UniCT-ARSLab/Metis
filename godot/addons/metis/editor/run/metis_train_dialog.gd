@@ -2,16 +2,8 @@
 class_name MetisTrainDialog
 extends AcceptDialog
 
-## A step-by-step wizard to configure and launch a Metis training run without leaving the editor:
-##   1. Algorithm  ->  2. Common settings  ->  3. Algorithm options  ->  4. Review & launch.
-## The run is spawned FULLY DETACHED (see MetisProcess): closing Godot does not stop training, and
-## stopping training does not touch Godot. The review step shows the exact equivalent terminal
-## command. The whole wizard resets to its defaults every time the window is (re)opened.
-##
-## Configuring and launching is ALL this window does. Watching a run and stopping it belong to
-## MetisTrainMonitorDialog, which plugin.gd opens instead of this one whenever a run is already
-## active: a wizard page showing an existing run had four steps of stale defaults sitting behind it,
-## describing a configuration that was not the one executing.
+## Configures and launches a detached Metis training run from the editor.
+## The review page shows the equivalent terminal command.
 
 signal training_started
 
@@ -26,9 +18,7 @@ const PAGE_TITLES := ["Algorithm", "Common settings", "Algorithm options", "Revi
 const SCENE_PLACEHOLDER := "res://path/to/your_scenario.tscn"
 
 
-# Args already exposed as curated fields on the Common page — excluded from the auto-generated
-# "All options" list so nothing is duplicated. The per-algorithm fields are excluded too, but from
-# ALGO_OPTIONS below rather than from here, since which ones exist depends on the algorithm.
+# Options already shown on the common page.
 const CURATED_DESTS := [
 	"algorithm", "godot_bin", "godot_project", "godot_scene", "num_envs", "base_port",
 	"num_episodes", "max_steps_per_episode", "physics_frames_per_step", "batch_size",
@@ -37,11 +27,7 @@ const CURATED_DESTS := [
 	"dashboard_port", "headless", "render_env_count", "render_mode",
 ]
 
-# The flags that actually change how each algorithm learns, in the order they matter -- everything
-# else stays in the collapsible "All options" list. Only the dest and a short label live here: the
-# kind, default, help text and exact flag spelling all come from .metis/argspec.json, which is
-# generated from the Python parsers. Duplicating defaults here instead would let the wizard drift
-# away from the CLI, which is exactly what happened while --network-layers was being added.
+# Prominent algorithm options. Types and defaults still come from argspec.json.
 const ALGO_OPTIONS := {
 	"sac": [
 		["network_layers", "Hidden layers"],
@@ -112,8 +98,7 @@ const ALGO_OPTIONS := {
 	],
 }
 
-# Where each algorithm's default network shape comes from, shown next to the "Hidden layers" field
-# so the value in the box is traceable to a source instead of looking arbitrary.
+# Source labels shown beside each default network layout.
 const ALGO_ARCH := {
 	"sac": "Default hidden layers: 256 256 (Haarnoja et al. 2018).",
 	"ppo": "Default hidden layers: 64 64 (Schulman et al. 2017).",
@@ -148,10 +133,8 @@ var _step_label: Label
 var _back_button: Button
 var _next_button: Button
 
-# Page 1
 var _algorithm: OptionButton
 var _algo_help: Label
-# Page 2 (common)
 var _scene: LineEdit
 var _scene_note: Label
 var _num_envs: SpinBox
@@ -173,7 +156,6 @@ var _show_envs: CheckBox
 var _render_count: SpinBox
 var _render_mode: OptionButton
 var _render_note: Label
-# Page 3 (algorithm-specific)
 var _algo_options_title: Label
 var _algo_box: VBoxContainer
 var _algo_note: Label
@@ -184,7 +166,6 @@ var _extra: LineEdit
 var _all_toggle: Button
 var _all_box: VBoxContainer
 var _all_controls := {}  # dest -> {"control": Control, "arg": Dictionary}
-# Page 4 (review)
 var _preview: TextEdit
 var _train_button: Button
 var _status_label: Label
@@ -192,7 +173,6 @@ var _status_label: Label
 
 func _ready() -> void:
 	title = "Metis — Train"
-	# English by design; see plugin.gd. Keeps the editor dictionary out of our labels.
 	auto_translate_mode = Node.AUTO_TRANSLATE_MODE_DISABLED
 	min_size = Vector2i(660, 470)
 	get_ok_button().text = "Close"
@@ -245,7 +225,7 @@ func configure(manager: MetisRuntimeManager) -> void:
 		await ready
 
 
-# --- pages ----------------------------------------------------------------------------------------
+# pages
 
 func _build_algorithm_page() -> Control:
 	var page := VBoxContainer.new()
@@ -331,9 +311,7 @@ func _build_common_page() -> Control:
 	_dashboard_port = _spin(1024, 65000, 8770)
 	dash_box.add_child(_dashboard_port)
 	_row(form, "Live dashboard", dash_box)
-	# One control for what used to be two that silently fought each other: process_manager computes
-	# `instance_headless = headless or index >= render_env_count`, so leaving Headless ticked made
-	# --render-env-count do nothing at all, with no warning anywhere.
+	# One mode control avoids contradictory headless and render-count settings.
 	var render_box := HBoxContainer.new()
 	_show_envs = CheckBox.new()
 	_show_envs.text = "Show"
@@ -366,8 +344,7 @@ func _build_common_page() -> Control:
 
 
 func _clamp_render_count() -> void:
-	## Never offer to render more windows than there are environments: the extra ones do not exist,
-	## and process_manager would just run every instance rendered.
+	## Keeps rendered windows within the environment count.
 	_render_count.max_value = maxf(1.0, _num_envs.value)
 	_render_count.value = minf(_render_count.value, _render_count.max_value)
 	_update_render_note()
@@ -398,8 +375,6 @@ func _build_algo_options_page() -> Control:
 	_algo_note.add_theme_color_override("font_color", Color(0.78, 0.81, 0.88))
 	page.add_child(_algo_note)
 
-	# Filled by _update_algo_options() from ALGO_OPTIONS + argspec.json, so the fields shown here
-	# change with the selected algorithm instead of only ever covering SAC.
 	_algo_box = VBoxContainer.new()
 	page.add_child(_algo_box)
 
@@ -448,8 +423,6 @@ func _build_review_page() -> Control:
 	var buttons := HBoxContainer.new()
 	_train_button = Button.new()
 	_train_button.text = "Train"
-	# The editor theme has no accent/primary button variation (only Flat* and Inspector* ones), so the
-	# emphasis is built here: the run icon, a taller box, and the editor's own accent colour.
 	_train_button.custom_minimum_size = Vector2(150, 34)
 	var theme := EditorInterface.get_editor_theme()
 	if theme != null:
@@ -467,8 +440,6 @@ func _build_review_page() -> Control:
 	buttons.add_child(buttons_spacer)
 	page.add_child(buttons)
 
-	# Stated before launching, not only after: whether the run survives closing this window is the
-	# first thing a user wants to know, and MetisProcess spawns it fully detached.
 	var detached := Label.new()
 	detached.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	detached.custom_minimum_size = Vector2(460, 0)
@@ -485,7 +456,7 @@ func _build_review_page() -> Control:
 	return page
 
 
-# --- navigation / reset ---------------------------------------------------------------------------
+# navigation / reset
 
 func _show_page(index: int) -> void:
 	_current = clampi(index, 0, _pages.size() - 1)
@@ -514,8 +485,6 @@ func _reset() -> void:
 	_multi_agent.button_pressed = false
 	_best_metric.select(0)
 	_auto_recovery.button_pressed = false
-	# On by default: the dashboard is the only live view of a run's metrics, and a user who did not
-	# know to tick this box got none. Its cost is one Flask thread and a port.
 	_dashboard.button_pressed = true
 	_dashboard_port.value = 8770
 	_show_envs.button_pressed = false
@@ -532,8 +501,6 @@ func _reset() -> void:
 	_options_algo = ""  # force a rebuild: reopening the wizard must clear the previous run's edits
 	_on_algorithm_changed()
 
-	# Reopening with training still going lands straight on the monitoring page: re-walking four
-	# configuration steps to reach the progress bar of a run already under way is pure friction.
 	_train_button.disabled = false
 	_status_label.text = ""
 	_show_page(0)
@@ -542,17 +509,11 @@ func _reset() -> void:
 func _on_algorithm_changed() -> void:
 	if _algo_help != null:
 		_algo_help.text = str(ALGO_INFO.get(_current_algo(), ""))
-	# Rebuilt here rather than only on page 3 so _build_args() always has the controls it reads,
-	# whatever order the user navigates in.
 	_update_algo_options()
 
 
 func _update_algo_options() -> void:
-	## Rebuilds the option rows for the selected algorithm.
-	##
-	## Only when the algorithm actually changed: this used to run on every visit to page 3, so
-	## stepping forward to the review page and back again silently reverted every field the user had
-	## edited there.
+	## Rebuilds option rows after the selected algorithm changes.
 	if _algo_box == null:
 		return
 	var algo := _current_algo()
@@ -586,8 +547,6 @@ func _rebuild_algo_options(algo: String) -> void:
 	for entry in ALGO_OPTIONS.get(algo, []):
 		var dest := str(entry[0])
 		if not spec.has(dest):
-			# The flag was renamed or dropped in Python: skip it rather than emit something the CLI
-			# would reject. It stays reachable through "All options" under its new name.
 			continue
 		_add_option(grid, spec[dest], _algo_controls, str(entry[1]))
 
@@ -596,10 +555,9 @@ func _current_algo() -> String:
 	return _algorithm.get_item_text(_algorithm.selected)
 
 
-# --- option list (auto-generated from python/core/argspec.py) --------------------------------------
+# option list (auto-generated from python/core/argspec.py)
 
-# Python sources whose mtime invalidates the cached spec. Every algorithm parser is built from one
-# of these, so a change to any of them can add, rename or re-default a flag.
+# Parser changes invalidate the cached option list.
 const ARGSPEC_SOURCES := [
 	"core/argspec.py", "core/training.py", "algorithms/sac.py", "algorithms/ppo.py",
 	"algorithms/dqn.py", "algorithms/common.py",
@@ -616,8 +574,6 @@ func _argspec_is_stale() -> bool:
 		return true
 	var source_root := _source_python_root()
 	if source_root.is_empty():
-		# Installed runtime: the CLI only changes when Metis itself is upgraded, and there are no
-		# sources to compare against, so the cached spec is taken as current.
 		return false
 	var spec_time := FileAccess.get_modified_time(path)
 	for relative in ARGSPEC_SOURCES:
@@ -628,9 +584,7 @@ func _argspec_is_stale() -> bool:
 
 
 func _ensure_argspec() -> void:
-	# Generate .metis/argspec.json in the BACKGROUND (imports TF, ~15s) when it is missing or older
-	# than the parsers it was generated from. Without the staleness check the file was written once
-	# and then never again, so flags added later -- --network-layers among them -- stayed invisible.
+	# Python imports can take several seconds, so regenerate without blocking the editor.
 	if not _argspec_is_stale():
 		return
 	var path := _argspec_path()
@@ -653,10 +607,7 @@ func _ensure_argspec() -> void:
 
 
 func _refresh_argspec() -> void:
-	## Regenerate the spec and rebuild both option sections once it lands.
-	##
-	## The generator imports TensorFlow, so it is spawned detached and polled: there is no way to
-	## await an OS process from the editor without blocking the whole UI thread.
+	## Rebuilds option sections after the background specification job finishes.
 	var path := _argspec_path()
 	if FileAccess.file_exists(path):
 		DirAccess.remove_absolute(path)
@@ -701,8 +652,7 @@ func _rebuild_all_options(algo: String) -> void:
 		return
 	_clear(_all_box)
 	_all_controls.clear()
-	# "auto" has no parser of its own, so there is no list to offer -- and claiming one is being
-	# generated would be a promise the wizard cannot keep.
+	# Auto chooses an algorithm later, so it has no dedicated parser here.
 	_all_toggle.visible = algo != "auto"
 	_refresh_button.visible = algo != "auto"
 	if algo == "auto":
@@ -717,8 +667,6 @@ func _rebuild_all_options(algo: String) -> void:
 		note.text = "Generating the full option list in the background — reopen the wizard shortly."
 		_all_box.add_child(note)
 		return
-	# The per-algorithm fields above are also excluded, or the same flag would be editable in two
-	# places and the second one would silently win when the command is built.
 	var curated := PackedStringArray(CURATED_DESTS)
 	for entry in ALGO_OPTIONS.get(algo, []):
 		curated.append(str(entry[0]))
@@ -735,8 +683,6 @@ func _rebuild_all_options(algo: String) -> void:
 			order.append(group_name)
 		by_group[group_name].append(arg)
 	for group_name in order:
-		# One collapsible section per argparse group. Flat, they are ~120 rows of equally-weighted
-		# fields, which is no more navigable than the CLI --help it was meant to replace.
 		var grid := _make_grid()
 		grid.visible = false
 		var section := Button.new()
@@ -756,8 +702,7 @@ func _rebuild_all_options(algo: String) -> void:
 
 func _add_option(grid: GridContainer, arg: Dictionary, controls: Dictionary,
 		label_override: String = "") -> void:
-	## Build one editable row for an argspec entry and register it in `controls` so
-	## _flags_from_controls() can turn it back into command-line arguments.
+	## Adds and registers one option row.
 	var kind := str(arg.get("kind", "str"))
 	var control: Control
 	if kind in ["bool", "flag_true", "flag_false"]:
@@ -793,7 +738,7 @@ func _add_option(grid: GridContainer, arg: Dictionary, controls: Dictionary,
 
 
 func _validation_errors() -> PackedStringArray:
-	## Values the CLI would reject, across both the per-algorithm fields and "All options".
+	## Returns values the CLI would reject.
 	var problems := PackedStringArray()
 	for controls in [_algo_controls, _all_controls]:
 		for dest in controls:
@@ -807,7 +752,6 @@ func _validation_errors() -> PackedStringArray:
 
 
 func _takes_many_values(arg: Dictionary) -> bool:
-	# argparse nargs of "+", "*" or a number: the value has to be split into separate argv tokens.
 	var nargs: Variant = arg.get("nargs", null)
 	if nargs == null:
 		return false
@@ -816,8 +760,7 @@ func _takes_many_values(arg: Dictionary) -> bool:
 
 
 func _flags_from_controls(controls: Dictionary) -> PackedStringArray:
-	## Emit only the values the user actually changed, so the command stays as short as what they
-	## would have typed and a future default change in Python is not frozen into the launch line.
+	## Emits changed values as command-line tokens.
 	var out := PackedStringArray()
 	for dest in controls:
 		var entry: Dictionary = controls[dest]
@@ -854,8 +797,7 @@ func _flags_from_controls(controls: Dictionary) -> PackedStringArray:
 			if not text.is_empty() and text != OPTION_FORM.format_default(arg, arg.get("default", "")):
 				out.append(str(flags[0]))
 				if _takes_many_values(arg):
-					# One argv token per value: "--network-layers 256 256" has to reach argparse as
-					# three tokens, or nargs="+" type=int fails with `invalid int value: '256 256'`.
+					# argparse expects one token per item for nargs options.
 					for token in text.split(" ", false):
 						if not token.strip_edges().is_empty():
 							out.append(token.strip_edges())
@@ -864,17 +806,14 @@ func _flags_from_controls(controls: Dictionary) -> PackedStringArray:
 	return out
 
 
-# --- scene detection ------------------------------------------------------------------------------
+# scene detection
 
 func scene_has_bridge_server(path: String) -> bool:
 	return SCENARIO.has_bridge_server(path)
 
 
 func _apply_open_scene() -> void:
-	## Start from the scene the user already has open, so the common case needs no Browse at all.
-	##
-	## Reached from _reset(), which runs on about_to_popup, so the field reflects whatever is being
-	## edited when the wizard opens rather than whatever was open when the plugin loaded.
+	## Uses the trainable scene open when the wizard appears.
 	var root := EditorInterface.get_edited_scene_root()
 	var path := "" if root == null else root.scene_file_path
 	if path.is_empty():
@@ -899,8 +838,6 @@ func _open_scene_dialog() -> void:
 		_scene_dialog.access = EditorFileDialog.ACCESS_RESOURCES
 		_scene_dialog.clear_filters()
 		_scene_dialog.add_filter("*.tscn", "Godot scenes")
-		# Validate the pick here: choosing a scene with no BridgeServer otherwise fails much later,
-		# as the trainer waiting for a TCP connection that nothing will ever accept.
 		_scene_dialog.file_selected.connect(func(path):
 			if scene_has_bridge_server(path):
 				_set_scene(path, "")
@@ -912,7 +849,7 @@ func _open_scene_dialog() -> void:
 	_scene_dialog.popup_file_dialog()
 
 
-# --- command construction (preview == what is launched) -------------------------------------------
+# command construction (preview == what is launched)
 
 func _project_root() -> String:
 	return ProjectSettings.globalize_path("res://").trim_suffix("/")
@@ -992,7 +929,7 @@ func _update_preview() -> void:
 	_preview.text = " ".join(parts)
 
 
-# --- launch ---------------------------------------------------------------------------------------
+# launch
 
 func _on_train() -> void:
 	if RUN_STATE.is_run_active():
@@ -1005,8 +942,6 @@ func _on_train() -> void:
 		return
 	var problems := _validation_errors()
 	if not problems.is_empty():
-		# Refused here rather than by argparse: training is launched DETACHED, so a parser error
-		# would only exist in a log file the user has no reason to open yet.
 		_status_label.text = "Fix these first — " + ", ".join(problems)
 		return
 	DirAccess.make_dir_recursive_absolute(RUN_STATE.directory())
@@ -1023,8 +958,7 @@ func _on_train() -> void:
 	if not ok:
 		_status_label.text = "Could not start training."
 		return
-	# Recorded before handing off: the monitor reads this to know the episode total and dashboard port,
-	# neither of which appears anywhere in the trainer's output.
+	# The monitor needs values that are not present in the trainer log.
 	RUN_STATE.write({
 		"algorithm": _current_algo(),
 		"scene": _scene.text.strip_edges(),
@@ -1035,10 +969,7 @@ func _on_train() -> void:
 	})
 	_train_button.disabled = true
 	_status_label.text = "Launched."
-	# Hide BEFORE handing off. Popping the monitor while this dialog is still the exclusive child of
-	# the editor window makes Godot refuse the second one:
-	#   "Attempting to make child window exclusive, but the parent window already has another
-	#    exclusive child."
+	# Godot allows only one exclusive child window at a time.
 	hide()
 	training_started.emit()
 
@@ -1052,8 +983,7 @@ func _heading(text: String) -> Label:
 
 
 func _clear(box: Control) -> void:
-	## Detach before freeing: queue_free() only takes effect at the end of the frame, so a rebuild
-	## that reads get_children() in the same frame would still see the previous algorithm's rows.
+	## Detaches children immediately so the form can be rebuilt in the same frame.
 	for child in box.get_children():
 		box.remove_child(child)
 		child.queue_free()

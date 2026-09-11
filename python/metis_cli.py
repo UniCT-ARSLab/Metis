@@ -1,7 +1,5 @@
 """Public command dispatcher for the Metis Python runtime."""
 
-from __future__ import annotations
-
 import importlib
 import sys
 from importlib import metadata
@@ -63,4 +61,3 @@ def main(argv=None):
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

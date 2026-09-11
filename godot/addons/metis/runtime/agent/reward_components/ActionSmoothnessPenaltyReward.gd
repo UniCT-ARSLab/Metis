@@ -1,4 +1,4 @@
-extends "res://addons/metis/runtime/agent/reward_components/RewardComponent.gd"
+extends RewardComponent
 class_name ActionSmoothnessPenaltyReward
 
 @export var input_names: PackedStringArray = ["throttle_input", "rotation_input"]

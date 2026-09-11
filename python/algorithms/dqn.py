@@ -71,6 +71,7 @@ from core.multi_policy import (
     write_multi_policy_manifest,
 )
 from core.policy_artifact import PolicyArtifactSaver, build_policy_metadata, load_policy_into_model
+from core.transition_snapshots import TransitionSnapshotPublisher
 from core.opponent_pool import (
     OpponentMatch,
     OpponentPool,
@@ -92,6 +93,7 @@ from core.training import (
     TrainingBudget,
     BestCheckpointTracker,
     add_training_budget_argument,
+    add_transition_snapshot_arguments,
     add_best_checkpoint_arguments,
     add_training_health_arguments,
     apply_ready_best_checkpoint,
@@ -113,6 +115,7 @@ from core.training import (
     restore_replay_buffer,
     save_replay_snapshot,
     validate_async_arguments,
+    validate_transition_snapshot_arguments,
     argument_group,
     GROUP_CHECKPOINTS,
     GROUP_DEMOS,
@@ -135,11 +138,9 @@ from envs.scenario import ScenarioGymEnv
 SUCCESS_EVENTS = {"level_cleared", "target_reached", "finish_reached", "goal_scored", "success"}
 SUCCESS_TERMINAL_REASONS = {"level_cleared", "target_reached", "finish_reached", "goal_scored", "success"}
 
-# Share of the remaining episode budget a derived --epsilon-decay spends annealing down to
-# epsilon-min; the rest of the run then exploits at the floor.
+# Derived epsilon schedules reserve the tail of the run for exploitation.
 EPSILON_DECAY_HORIZON_FRACTION = 0.5
-# Effective target for a derived decay when --epsilon-min is 0: multiplicative decay is
-# asymptotic, so annealing to exactly 0 has no finite horizon.
+# Multiplicative decay needs a small finite target when epsilon-min is zero.
 EPSILON_DECAY_FLOOR = 0.01
 
 
@@ -217,8 +218,7 @@ def parse_args():
             "The DQN literature counts environment steps for exactly this reason."
         ),
     )
-    # DQN had neither of these until now: it was the only algorithm without gradient clipping, and
-    # every Metis learner hardcoded a squared error. Both default to the previous behaviour.
+    # Defaults preserve the original squared loss and unclipped gradients.
     add_gradient_clip_arguments(parser, default_norm=0.0)
     add_value_loss_arguments(parser)
 
@@ -247,6 +247,18 @@ def parse_args():
         help=(
             "Fraction of the remaining episodes over which a derived --epsilon-decay anneals "
             "epsilon down to epsilon-min. Ignored when --epsilon-decay is given."
+        ),
+    )
+    group.add_argument(
+        "--epsilon-decay-transitions",
+        "--epsilon-decay-steps",
+        dest="epsilon_decay_transitions",
+        type=int,
+        default=0,
+        help=(
+            "Linearly anneal epsilon from --epsilon-start to --epsilon-min over this many "
+            "accepted environment transitions. Zero keeps the episode-based schedule. "
+            "The transition counter is checkpointed and resumes without restarting the anneal."
         ),
     )
 
@@ -290,6 +302,7 @@ def parse_args():
     group.add_argument("--checkpoint-every", type=int, default=25)
     group.add_argument("--keep-checkpoints", type=int, default=5)
     group.add_argument("--resume", action=argparse.BooleanOptionalAction, default=False)
+    add_transition_snapshot_arguments(parser)
 
     group = argument_group(parser, GROUP_REPLAY)
     group.add_argument("--save-replay-buffer", action=argparse.BooleanOptionalAction, default=True)
@@ -359,9 +372,7 @@ def resolve_epsilon_decay(args, start_epsilon, start_episode):
     remaining = max(1, int(args.num_episodes) - int(start_episode))
     horizon = max(1.0, remaining * float(args.epsilon_decay_horizon_fraction))
     start = float(start_epsilon)
-    # A multiplicative decay approaches zero asymptotically and never reaches it, so an
-    # epsilon-min of 0 has no finite horizon. Anneal to a small floor instead; the caller
-    # still clamps to the real epsilon-min.
+    # Use a finite planning target when the requested floor is exactly zero.
     target = max(float(args.epsilon_min), EPSILON_DECAY_FLOOR)
     if start <= target:
         return 1.0
@@ -375,10 +386,117 @@ def episodes_to_reach_epsilon(start_epsilon, target, decay):
     if decay >= 1.0 or decay <= 0.0:
         return None
     exact = math.log(target / start_epsilon) / math.log(decay)
-    # A derived decay is built as (target/start)**(1/horizon), so `exact` is horizon up to
-    # float error. Absorb that error before rounding up, or the reported episode overshoots
-    # the horizon it was derived from by one.
+    # Tolerate floating-point error before rounding the derived horizon.
     return int(math.ceil(exact - 1e-9))
+
+
+def uses_transition_epsilon(args):
+    return int(getattr(args, "epsilon_decay_transitions", 0) or 0) > 0
+
+
+def validate_epsilon_schedule_args(args):
+    transitions = int(getattr(args, "epsilon_decay_transitions", 0) or 0)
+    if transitions < 0:
+        raise ValueError("--epsilon-decay-transitions cannot be negative")
+    if transitions > 0 and getattr(args, "epsilon_decay", None) is not None:
+        raise ValueError(
+            "--epsilon-decay and --epsilon-decay-transitions select different schedule units; "
+            "use only one"
+        )
+    start = float(args.epsilon_start)
+    end = float(args.epsilon_min)
+    if not 0.0 <= end <= start <= 1.0:
+        raise ValueError("DQN epsilon values must satisfy 0 <= epsilon-min <= epsilon-start <= 1")
+
+
+def epsilon_at_transition(start, end, horizon, transition_count):
+    horizon = int(horizon)
+    if horizon <= 0:
+        raise ValueError("Transition epsilon horizon must be positive")
+    progress = min(max(int(transition_count), 0), horizon) / float(horizon)
+    return float(start) + (float(end) - float(start)) * progress
+
+
+def advance_transition_epsilon(args, epsilon, transition_count, added):
+    if not uses_transition_epsilon(args) or int(added) <= 0:
+        return float(epsilon.numpy())
+    transition_count.assign_add(int(added))
+    value = epsilon_at_transition(
+        args.epsilon_start,
+        args.epsilon_min,
+        args.epsilon_decay_transitions,
+        int(transition_count.numpy()),
+    )
+    epsilon.assign(value)
+    return value
+
+
+def epsilon_checkpoint_metadata(args):
+    return {
+        "epsilon_schedule_start": tf.Variable(
+            float(args.epsilon_start), dtype=tf.float32, trainable=False
+        ),
+        "epsilon_schedule_end": tf.Variable(
+            float(args.epsilon_min), dtype=tf.float32, trainable=False
+        ),
+        "epsilon_schedule_transitions": tf.Variable(
+            int(getattr(args, "epsilon_decay_transitions", 0) or 0),
+            dtype=tf.int64,
+            trainable=False,
+        ),
+    }
+
+
+def validate_restored_transition_epsilon(args, checkpoint_path, checkpoint, states):
+    if not uses_transition_epsilon(args):
+        return
+    variable_names = {name for name, _shape in tf.train.list_variables(checkpoint_path)}
+    required = {
+        "epsilon_schedule_start/.ATTRIBUTES/VARIABLE_VALUE",
+        "epsilon_schedule_end/.ATTRIBUTES/VARIABLE_VALUE",
+        "epsilon_schedule_transitions/.ATTRIBUTES/VARIABLE_VALUE",
+    }
+    missing = sorted(required - variable_names)
+    if missing:
+        raise RuntimeError(
+            "Transition-indexed epsilon cannot resume from a checkpoint without its schedule "
+            "metadata: " + ", ".join(missing)
+        )
+
+    restored = (
+        float(checkpoint.epsilon_schedule_start.numpy()),
+        float(checkpoint.epsilon_schedule_end.numpy()),
+        int(checkpoint.epsilon_schedule_transitions.numpy()),
+    )
+    requested = (
+        float(args.epsilon_start),
+        float(args.epsilon_min),
+        int(args.epsilon_decay_transitions),
+    )
+    if not (
+        math.isclose(restored[0], requested[0], rel_tol=0.0, abs_tol=1e-7)
+        and math.isclose(restored[1], requested[1], rel_tol=0.0, abs_tol=1e-7)
+        and restored[2] == requested[2]
+    ):
+        raise RuntimeError(
+            "Transition epsilon schedule differs from the checkpoint: "
+            f"stored={restored}, requested={requested}"
+        )
+
+    for label, epsilon, transition_count, checkpoint_fragment in states:
+        if not any(checkpoint_fragment in name for name in variable_names):
+            raise RuntimeError(
+                f"Transition-indexed epsilon counter is missing for {label!r} in {checkpoint_path}"
+            )
+        expected = epsilon_at_transition(
+            requested[0], requested[1], requested[2], int(transition_count.numpy())
+        )
+        actual = float(epsilon.numpy())
+        if not math.isclose(actual, expected, rel_tol=0.0, abs_tol=1e-6):
+            raise RuntimeError(
+                f"Transition epsilon state is inconsistent for {label!r}: "
+                f"checkpoint epsilon={actual}, schedule epsilon={expected}"
+            )
 
 
 def select_action(model, obs, epsilon, num_actions):
@@ -432,8 +550,7 @@ def build_dqn_learner_step(
 ):
     gamma = tf.constant(float(gamma), dtype=tf.float32)
     optimizer.build(model.trainable_variables)
-    # Both resolved once, before tracing: the traced graph holds the chosen loss and clipper, so
-    # neither adds a branch per step nor a retrace.
+    # Resolve loss and clipping before tracing the learner.
     compute_loss = value_loss_fn(critic_loss, huber_delta)
     clip_grads = make_gradient_clipper(
         "dqn",
@@ -518,16 +635,12 @@ def run_async_dqn(
             build_shared_q_network(obs_dim=obs_dim, num_actions=num_actions)
             for _env in envs
         ]
-    # One traced graph per collector, built once. sync_model only calls set_weights,
-    # which mutates the variables these graphs already close over, so the traces stay
-    # valid across policy syncs.
+    # Collector traces stay valid when sync_model updates their variables.
     greedy_actions = [
         build_greedy_action_fn(local_model, obs_dim)
         for local_model in local_models
     ]
-    # Opponent snapshots are reused objects (the pool keeps one per worker), so a traced
-    # greedy fn cached by model identity stays valid across their load_weights calls --
-    # same trick as PPO's sync sample_fn cache. Keeps opponent inference off eager too.
+    # Cache opponent traces by model identity across snapshot weight loads.
     opponent_greedy_fns = {}
 
     def opponent_greedy_fn(opponent_model):
@@ -555,6 +668,12 @@ def run_async_dqn(
         replay_ready_event.set()
 
     def epsilon_for_episode(episode):
+        if uses_transition_epsilon(args):
+            return (
+                float(checkpoint.epsilon.numpy())
+                if replay_ready_event.is_set()
+                else 1.0
+            )
         warmup_episode = warmup_completed_episode["value"]
         if warmup_episode is None:
             return 1.0
@@ -668,10 +787,7 @@ def run_async_dqn(
 
     def process_step(_worker_id, env, _episode, _step_idx, state, action, step_result):
         next_obs, reward, terminated, truncated, info = step_result
-        # `done` ends the episode loop; `terminated` is what the TD target keys off. A
-        # time-limit truncation cuts an episode that was still going, so bootstrapping
-        # must continue through it -- treating it as terminal teaches the agent that the
-        # world ends at the step cap.
+        # TD bootstrapping stops on termination, not on a time-limit truncation.
         done = bool(terminated or truncated)
         transitions = []
         if args.multi_agent:
@@ -717,9 +833,7 @@ def run_async_dqn(
             state["target_seen"] |= bool(agent_info.get("target_first_seen", False))
             transitions.append((state["obs"], int(action), float(reward), next_obs, bool(terminated)))
             state["ep_reward"] += float(reward)
-            # Scenario progress (0..1). Logged because it is the only scale-invariant
-            # measure of how well the agent plays: episode reward cannot be compared
-            # across reward-tuning experiments, progress can.
+            # Scenario progress remains comparable when reward weights change.
             state["progress"] = float(agent_info.get("progress", state.get("progress", 0.0)))
         state["obs"] = next_obs
         state["done"] = done
@@ -808,6 +922,12 @@ def run_async_dqn(
                 ):
                     warmup_completed_episode["value"] = int(completed)
                     replay_ready_event.set()
+                advance_transition_epsilon(
+                    args,
+                    checkpoint.epsilon,
+                    checkpoint.epsilon_transition_count,
+                    collected_transitions,
+                )
                 budget.consume(collected_transitions)
                 if target_sync.due_after_transitions(collected_transitions):
                     target_model.set_weights(model.get_weights())
@@ -884,6 +1004,10 @@ def run_async_dqn(
                 ("training", [
                     ("completed", f"{completed}/{args.num_episodes}"),
                     ("total_timesteps", budget.collected),
+                    (
+                        "epsilon_transitions",
+                        int(checkpoint.epsilon_transition_count.numpy()),
+                    ),
                     ("queue", f"{throughput['queue_size']}/{throughput['queue_capacity']} ({throughput['queue_saturation']:.0%})"),
                     ("replay", f"{len(buffer)}/{args.replay_capacity}"),
                     ("replay_warmup_left", max(
@@ -922,7 +1046,11 @@ def run_async_dqn(
     finally:
         pool.close()
 
-    epsilon = epsilon_for_episode(completed)
+    epsilon = (
+        float(checkpoint.epsilon.numpy())
+        if uses_transition_epsilon(args)
+        else epsilon_for_episode(completed)
+    )
     snapshot.publish(model.get_weights())
     if last_saved_episode != completed:
         save_training_checkpoint(
@@ -952,7 +1080,17 @@ def save_training_checkpoint(
     save_replay=True,
 ):
     checkpoint.episode.assign(episode)
-    checkpoint.epsilon.assign(epsilon)
+    if uses_transition_epsilon(args):
+        checkpoint.epsilon.assign(
+            epsilon_at_transition(
+                args.epsilon_start,
+                args.epsilon_min,
+                args.epsilon_decay_transitions,
+                int(checkpoint.epsilon_transition_count.numpy()),
+            )
+        )
+    else:
+        checkpoint.epsilon.assign(epsilon)
     saved_path = checkpoint_manager.save(checkpoint_number=episode)
     print(f"Saved {'final checkpoint' if final else 'checkpoint'}: {saved_path}", flush=True)
     policy_artifact = getattr(args, "policy_artifact", None)
@@ -1072,6 +1210,7 @@ class DQNPolicyState:
     optimizer: object
     buffer: ReplayBuffer
     epsilon: object
+    epsilon_transition_count: object
     learner_step: object
     artifact: PolicyArtifactSaver
     trainable: bool
@@ -1121,6 +1260,7 @@ def _save_multi_policy_dqn_checkpoint(
         policy_metadata={
             policy_id: {
                 "epsilon": float(state.epsilon.numpy()),
+                "epsilon_transitions": int(state.epsilon_transition_count.numpy()),
                 "replay_size": len(state.buffer),
             }
             for policy_id, state in policy_states.items()
@@ -1226,6 +1366,12 @@ def run_async_multi_policy_dqn(
     def epsilon_for(policy_id, episode):
         if not policy_states[policy_id].trainable:
             return 0.0
+        if uses_transition_epsilon(args):
+            return (
+                float(policy_states[policy_id].epsilon.numpy())
+                if replay_ready_event.is_set()
+                else 1.0
+            )
         warmup_episode = warmup_completed_episode["value"]
         if warmup_episode is None:
             return 1.0
@@ -1426,11 +1572,15 @@ def run_async_multi_policy_dqn(
                     continue
 
                 collected = 0
+                collected_by_policy = {}
                 for step_event in step_events:
                     for transition in step_event.transitions:
                         policy_id, *payload = transition
                         policy_states[policy_id].buffer.add(*payload)
                         collected += 1
+                        collected_by_policy[policy_id] = (
+                            collected_by_policy.get(policy_id, 0) + 1
+                        )
                 if (
                     not replay_ready_event.is_set()
                     and all(
@@ -1440,6 +1590,14 @@ def run_async_multi_policy_dqn(
                 ):
                     warmup_completed_episode["value"] = int(completed)
                     replay_ready_event.set()
+                for policy_id, count in collected_by_policy.items():
+                    state = policy_states[policy_id]
+                    advance_transition_epsilon(
+                        args,
+                        state.epsilon,
+                        state.epsilon_transition_count,
+                        count,
+                    )
                 budget.consume(collected)
                 updates_due = scheduler.ingest_by_policy(
                     step_events,
@@ -1487,7 +1645,7 @@ def run_async_multi_policy_dqn(
                             state.model.get_weights()
                         )
             for policy_id, state in policy_states.items():
-                if state.trainable:
+                if state.trainable and not uses_transition_epsilon(args):
                     state.epsilon.assign(epsilon_for(policy_id, completed))
 
             payload = event.payload
@@ -1503,6 +1661,9 @@ def run_async_multi_policy_dqn(
                         float(np.mean(rewards)) if rewards else 0.0
                     ),
                     "epsilon": float(state.epsilon.numpy()),
+                    "epsilon_transitions": int(
+                        state.epsilon_transition_count.numpy()
+                    ),
                     "replay": len(state.buffer),
                     "updates": len(losses[policy_id]),
                     "loss": (
@@ -1655,6 +1816,12 @@ def run_sync_multi_policy_dqn(
             dtype=tf.float32,
             name=f"epsilon_{assignment.key_for(policy_id)}",
         )
+        epsilon_transition_count = tf.Variable(
+            0,
+            dtype=tf.int64,
+            trainable=False,
+            name=f"epsilon_transitions_{assignment.key_for(policy_id)}",
+        )
         learner_step = build_dqn_learner_step(
             model,
             target_model,
@@ -1693,6 +1860,7 @@ def run_sync_multi_policy_dqn(
             optimizer=optimizer,
             buffer=buffer,
             epsilon=epsilon,
+            epsilon_transition_count=epsilon_transition_count,
             learner_step=learner_step,
             artifact=PolicyArtifactSaver(model, artifact_dir, metadata),
             trainable=assignment.is_trainable(policy_id),
@@ -1703,11 +1871,13 @@ def run_sync_multi_policy_dqn(
             target_model=target_model,
             optimizer=optimizer,
             epsilon=epsilon,
+            epsilon_transition_count=epsilon_transition_count,
         )
 
     checkpoint = tf.train.Checkpoint(
         episode=tf.Variable(0, dtype=tf.int64),
         policies=tf.train.Checkpoint(**policy_trackables),
+        **epsilon_checkpoint_metadata(args),
     )
     checkpoint_manager = tf.train.CheckpointManager(
         checkpoint,
@@ -1719,6 +1889,24 @@ def run_sync_multi_policy_dqn(
     if resume_checkpoint:
         _validate_restored_assignment(args, assignment)
         checkpoint.restore(resume_checkpoint).expect_partial()
+        validate_restored_transition_epsilon(
+            args,
+            resume_checkpoint,
+            checkpoint,
+            [
+                (
+                    policy_id,
+                    state.epsilon,
+                    state.epsilon_transition_count,
+                    (
+                        f"policies/{assignment.key_for(policy_id)}/"
+                        "epsilon_transition_count/.ATTRIBUTES/VARIABLE_VALUE"
+                    ),
+                )
+                for policy_id, state in policy_states.items()
+                if state.trainable
+            ],
+        )
         start_episode = int(checkpoint.episode.numpy())
         restore_policy_replays(
             args,
@@ -1739,15 +1927,16 @@ def run_sync_multi_policy_dqn(
     for state in policy_states.values():
         state.optimizer.learning_rate.assign(args.learning_rate)
 
-    epsilon_start = max(
-        (
-            float(state.epsilon.numpy())
-            for state in policy_states.values()
-            if state.trainable
-        ),
-        default=args.epsilon_start,
-    )
-    args.epsilon_decay = resolve_epsilon_decay(args, epsilon_start, start_episode)
+    if not uses_transition_epsilon(args):
+        epsilon_start = max(
+            (
+                float(state.epsilon.numpy())
+                for state in policy_states.values()
+                if state.trainable
+            ),
+            default=args.epsilon_start,
+        )
+        args.epsilon_decay = resolve_epsilon_decay(args, epsilon_start, start_episode)
     write_multi_policy_manifest(
         args.checkpoint_dir,
         assignment,
@@ -1948,6 +2137,15 @@ def run_sync_multi_policy_dqn(
                     env_state["done_mask"] = per_agent_done
                     env_state["done"] = done or bool(np.all(per_agent_done))
 
+                    for policy_id, transition_count in transitions_by_policy.items():
+                        policy = policy_states[policy_id]
+                        advance_transition_epsilon(
+                            args,
+                            policy.epsilon,
+                            policy.epsilon_transition_count,
+                            transition_count,
+                        )
+
                     if not best_tracker.health_monitor.verification_pending:
                         for policy_id, policy in policy_states.items():
                             if not policy.trainable:
@@ -1991,6 +2189,7 @@ def run_sync_multi_policy_dqn(
             for policy in policy_states.values():
                 if (
                     policy.trainable
+                    and not uses_transition_epsilon(args)
                     and len(policy.buffer) >= replay_warmup_threshold(args)
                 ):
                     policy.epsilon.assign(
@@ -2028,6 +2227,9 @@ def run_sync_multi_policy_dqn(
                         else 0.0
                     ),
                     "epsilon": float(policy.epsilon.numpy()),
+                    "epsilon_transitions": int(
+                        policy.epsilon_transition_count.numpy()
+                    ),
                     "replay": len(policy.buffer),
                     "updates": len(losses[policy_id]),
                     "loss": (
@@ -2126,6 +2328,8 @@ def run_sync_multi_policy_dqn(
 
 def main():
     args = parse_args()
+    validate_epsilon_schedule_args(args)
+    transition_snapshots_enabled = validate_transition_snapshot_arguments(args)
     budget = TrainingBudget(args.total_timesteps)
     validate_async_arguments(args, supports_opponent_pool=True)
     if int(getattr(args, "target_update_steps", 0) or 0) > 0 and getattr(args, "multi_policy", False):
@@ -2222,6 +2426,18 @@ def main():
             args.checkpoint_dir,
             build_policy_metadata("dqn", envs[0]),
         )
+        transition_publisher = (
+            TransitionSnapshotPublisher(
+                args.transition_snapshot_dir,
+                interval=args.checkpoint_every_transitions,
+                budget=args.total_timesteps,
+                backend="metis",
+                algorithm="dqn",
+            )
+            if transition_snapshots_enabled
+            else None
+        )
+        transition_policy_metadata = build_policy_metadata("dqn", envs[0])
         target_model.set_weights(model.get_weights())
         optimizer = tf.keras.optimizers.Adam(learning_rate=args.learning_rate)
         buffer = ReplayBuffer(capacity=args.replay_capacity)
@@ -2235,6 +2451,10 @@ def main():
             optimizer=optimizer,
             episode=tf.Variable(0, dtype=tf.int64),
             epsilon=tf.Variable(args.epsilon_start, dtype=tf.float32),
+            epsilon_transition_count=tf.Variable(
+                0, dtype=tf.int64, trainable=False
+            ),
+            **epsilon_checkpoint_metadata(args),
         )
         checkpoint_manager = tf.train.CheckpointManager(
             checkpoint,
@@ -2250,6 +2470,19 @@ def main():
             raise RuntimeError("--policy-path cannot be combined with --resume or --resume-checkpoint")
         if resume_checkpoint:
             checkpoint.restore(resume_checkpoint).expect_partial()
+            validate_restored_transition_epsilon(
+                args,
+                resume_checkpoint,
+                checkpoint,
+                [
+                    (
+                        "shared policy",
+                        checkpoint.epsilon,
+                        checkpoint.epsilon_transition_count,
+                        "epsilon_transition_count/.ATTRIBUTES/VARIABLE_VALUE",
+                    )
+                ],
+            )
             start_episode = int(checkpoint.episode.numpy())
             epsilon = float(checkpoint.epsilon.numpy())
             restored_checkpoint = True
@@ -2273,19 +2506,28 @@ def main():
             [("q_network", optimizer)],
         )
 
-        # Resolved here, not at parse time: on --resume the horizon must span the episodes
-        # that are actually left, starting from the epsilon the checkpoint carried.
-        derived_epsilon_decay = args.epsilon_decay is None
-        args.epsilon_decay = resolve_epsilon_decay(args, epsilon, start_episode)
-        origin = "derived" if derived_epsilon_decay else "pinned via --epsilon-decay"
-        floor = max(float(args.epsilon_min), EPSILON_DECAY_FLOOR)
-        reached = episodes_to_reach_epsilon(epsilon, floor, args.epsilon_decay)
-        horizon = "never" if reached is None else f"episode {start_episode + reached}/{args.num_episodes}"
-        print(
-            f"Epsilon schedule: start={epsilon:.3f} min={args.epsilon_min:.3f} "
-            f"decay={args.epsilon_decay:.6f} ({origin}); reaches {floor:.3f} at {horizon}",
-            flush=True,
-        )
+        if uses_transition_epsilon(args):
+            epsilon = float(checkpoint.epsilon.numpy())
+            print(
+                "Epsilon schedule: linear transitions "
+                f"start={args.epsilon_start:.3f} min={args.epsilon_min:.3f} "
+                f"progress={int(checkpoint.epsilon_transition_count.numpy())}/"
+                f"{args.epsilon_decay_transitions} epsilon={epsilon:.3f}",
+                flush=True,
+            )
+        else:
+            # On resume, derive decay from the restored epsilon and remaining episodes.
+            derived_epsilon_decay = args.epsilon_decay is None
+            args.epsilon_decay = resolve_epsilon_decay(args, epsilon, start_episode)
+            origin = "derived" if derived_epsilon_decay else "pinned via --epsilon-decay"
+            floor = max(float(args.epsilon_min), EPSILON_DECAY_FLOOR)
+            reached = episodes_to_reach_epsilon(epsilon, floor, args.epsilon_decay)
+            horizon = "never" if reached is None else f"episode {start_episode + reached}/{args.num_episodes}"
+            print(
+                f"Epsilon schedule: start={epsilon:.3f} min={args.epsilon_min:.3f} "
+                f"decay={args.epsilon_decay:.6f} ({origin}); reaches {floor:.3f} at {horizon}",
+                flush=True,
+            )
 
         demo_data = None
         if args.demo_path:
@@ -2472,6 +2714,11 @@ def main():
                 if all(state["done"] for state in env_states):
                     break
 
+                if uses_transition_epsilon(args):
+                    warmup_exploration = len(buffer) < replay_warmup_threshold(args)
+                    epsilon = float(checkpoint.epsilon.numpy())
+                    action_epsilon = 1.0 if warmup_exploration else epsilon
+
                 step_requests = []
                 for env, state in zip(envs, env_states):
                     if state["done"]:
@@ -2580,6 +2827,24 @@ def main():
                     state["obs"] = next_obs
                     state["done"] = done
 
+                    epsilon = advance_transition_epsilon(
+                        args,
+                        checkpoint.epsilon,
+                        checkpoint.epsilon_transition_count,
+                        transitions_added,
+                    )
+
+                    if transition_publisher is not None:
+                        transition_publisher.publish_due(
+                            budget.collected,
+                            episode,
+                            lambda directory, _threshold: PolicyArtifactSaver(
+                                model,
+                                directory,
+                                transition_policy_metadata,
+                            ).save(episode),
+                        )
+
                     if (
                         len(buffer) >= max(args.replay_warmup, args.batch_size)
                         and not best_tracker.health_monitor.verification_pending
@@ -2602,7 +2867,10 @@ def main():
             if target_sync.due_after_episode(episode + 1):
                 target_model.set_weights(model.get_weights())
 
-            if len(buffer) >= replay_warmup_threshold(args):
+            if (
+                not uses_transition_epsilon(args)
+                and len(buffer) >= replay_warmup_threshold(args)
+            ):
                 epsilon = max(args.epsilon_min, epsilon * args.epsilon_decay)
             rewards_summary = [
                 state["ep_reward"].tolist() if hasattr(state["ep_reward"], "tolist") else state["ep_reward"]
@@ -2682,6 +2950,10 @@ def main():
                 ("outcome", outcome_metrics),
                 ("training", [
                     ("total_timesteps", budget.collected),
+                    (
+                        "epsilon_transitions",
+                        int(checkpoint.epsilon_transition_count.numpy()),
+                    ),
                     ("replay", f"{len(buffer)}/{args.replay_capacity}"),
                     ("updates", len(losses)),
                     ("loss", f"{mean_loss:.5f}"),
@@ -2720,6 +2992,12 @@ def main():
                 break
 
         completed_episode = last_completed_episode if last_completed_episode is not None else start_episode
+        if (
+            transition_publisher is not None
+            and budget.exhausted
+            and not transition_publisher.complete
+        ):
+            raise RuntimeError("Transition budget ended before every policy snapshot was published")
         if last_saved_episode != completed_episode:
             save_training_checkpoint(
                 checkpoint,

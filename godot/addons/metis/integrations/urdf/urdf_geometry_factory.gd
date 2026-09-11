@@ -105,15 +105,13 @@ static func create_mesh_resource_visual(
 	var _scale = 1
 	if opts.has("scale"):
 		_scale = opts.get("scale")
-	# Prefer the URDF's per-mesh <mesh scale="x y z"> (supports non-uniform + mirror) when present;
-	# otherwise fall back to the uniform importer scale option.
+	# URDF mesh scale takes precedence over the importer's uniform fallback.
 	if data.mesh_scale != Vector3.ZERO:
 		instance.scale = data.mesh_scale
 	else:
 		instance.scale = Vector3(_scale, _scale, _scale)
 
 	if opts.get('rotate_x', null) != null:
-		# overwrite rotation
 		instance.rotate_x(opts['rotate_x'])
 	else:
 		var ext = data.mesh_path.get_extension().to_lower()
@@ -158,8 +156,7 @@ static func create_mesh_resource_collision(
 	var resource = load_resource(data.mesh_path, opts, source_path)
 	var urdf_transform = URDFUtils.xyz_rpy_to_transform3d(
 		data.origin_xyz, data.origin_rpy)
-	# Same scale the visual uses: the URDF per-mesh scale (non-uniform + mirror) when present, else
-	# the uniform importer scale option.
+	# Colliders use the same per-axis scale as their visual mesh.
 	var uniform := float(opts.get("scale", 1.0))
 	var scale_vec := data.mesh_scale if data.mesh_scale != Vector3.ZERO \
 		else Vector3(uniform, uniform, uniform)
@@ -179,7 +176,7 @@ static func _recursive_collision_gen(
 		parent: Node3D, owner: Node,
 		opts: Dictionary, scale_vec: Vector3):
 	if node is MeshInstance3D:
-		# Combine the URDF offset with the mesh's internal local transform
+		# Preserve any transform embedded in the imported mesh.
 		var final_transform = base_transform * node.transform
 		_create_col_shape_from_mesh(
 			node.mesh, final_transform, parent, owner, opts, scale_vec)
@@ -195,11 +192,7 @@ static func _create_col_shape_from_mesh(
 		opts: Dictionary, scale_vec: Vector3):
 	var shape = mesh.create_convex_shape(true, true)
 	if shape:
-		# The mesh vertices are in the URDF mesh units (e.g. millimetres); the visual scales the
-		# MeshInstance3D, but the collision is built straight from the raw vertices. Bake the SAME
-		# per-axis scale (including a mirror from a negative component) into the shape points so the
-		# collider matches the model instead of being ~1000x too large or unmirrored. Baking (rather
-		# than scaling the CollisionShape3D node) keeps the physics shape correct for RigidBody3D.
+		# Collision shapes use raw vertices, so bake mesh scale into the points.
 		if scale_vec != Vector3.ONE and shape is ConvexPolygonShape3D:
 			var points: PackedVector3Array = shape.points
 			for i in points.size():
@@ -211,9 +204,8 @@ static func _create_col_shape_from_mesh(
 		parent.add_child(coll)
 		coll.owner = owner
 		coll.transform = tr
-		# TODO: check, if we always need to rotate by -90°
+		# TODO: verify whether every cylinder source needs this axis conversion.
 		if opts.get('rotate_x', null) != null:
-			# overwrite rotation
 			coll.rotate_x(opts['rotate_x'])
 		else:
 			coll.rotate_x(-PI / 2)

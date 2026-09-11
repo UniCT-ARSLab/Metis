@@ -7,8 +7,6 @@ space, which no help request may do; and the frontend-only options have to be st
 argv is handed to a backend that does not accept them.
 """
 
-from __future__ import annotations
-
 import sys
 import unittest
 from pathlib import Path

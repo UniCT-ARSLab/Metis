@@ -1,4 +1,4 @@
-extends "res://addons/metis/runtime/agent/progress/ProgressProvider.gd"
+extends ProgressProvider
 class_name Path3DProgressProvider
 
 @export var path:Path3D

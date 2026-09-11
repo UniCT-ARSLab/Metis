@@ -1,11 +1,6 @@
 @tool
 extends RefCounted
-## Shared Metis branding for editor dialogs and the toolbar.
-##
-## The logo lives at two different paths depending on how Metis is being used, so every call site
-## needs the same fallback: the packaged add-on ships `addons/metis/logo.svg` (build_release.py
-## copies godot/icon.svg there), while the development project has only `res://icon.svg`. Loading it
-## in one place keeps the toolbar and the dialogs from drifting apart.
+## Shared Metis branding for editor controls.
 
 const PACKAGED_LOGO := "res://addons/metis/logo.svg"
 const FALLBACK_LOGO := "res://icon.svg"
@@ -20,10 +15,7 @@ static func logo() -> Texture2D:
 
 
 static func logo_rect(size: int) -> TextureRect:
-	## A TextureRect that renders the logo at `size` px regardless of the source resolution.
-	##
-	## EXPAND_IGNORE_SIZE matters: the SVG rasterises to 576px, and without it that becomes the
-	## control's minimum size, which is what blew the editor's top bar apart the first time.
+	## Creates a logo control with a fixed display size.
 	var rect := TextureRect.new()
 	rect.texture = logo()
 	rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
@@ -35,10 +27,7 @@ static func logo_rect(size: int) -> TextureRect:
 
 
 static func header(title_text: String, subtitle_text: String = "") -> Control:
-	## Logo + title (+ optional subtitle) banner for the top of a dialog, followed by a separator.
-	##
-	## An AcceptDialog's `title` is the editor window's titlebar and cannot hold a texture, so the
-	## brand has to live in the dialog body instead.
+	## Builds the branded header used by Metis dialogs.
 	var box := VBoxContainer.new()
 	box.add_theme_constant_override("separation", 6)
 
@@ -53,15 +42,11 @@ static func header(title_text: String, subtitle_text: String = "") -> Control:
 
 	var title := Label.new()
 	title.text = title_text
-	# Follow the editor theme instead of hardcoding a size, so the header matches whatever font
-	# scale and colour scheme the user runs.
 	title.theme_type_variation = "HeaderMedium"
 	text.add_child(title)
 
 	if subtitle_text != "":
 		var subtitle := Label.new()
-		# Named so a caller whose subtitle changes at runtime can find it with
-		# find_child(SUBTITLE_NAME, true, false) instead of relying on the child order here.
 		subtitle.name = SUBTITLE_NAME
 		subtitle.text = subtitle_text
 		subtitle.theme_type_variation = "HeaderSmall"

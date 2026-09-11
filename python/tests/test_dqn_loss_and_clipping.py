@@ -6,8 +6,6 @@ tutorial silently changes. Second, huber must actually bound the gradient of a l
 because that is the entire reason to offer it.
 """
 
-from __future__ import annotations
-
 import os
 import sys
 import unittest

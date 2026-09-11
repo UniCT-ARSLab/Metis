@@ -1,4 +1,4 @@
-extends "res://addons/metis/runtime/agent/observations/ObservationSource.gd"
+extends ObservationSource
 class_name Path3DNavigationObservationSource
 
 @export var path: Path3D

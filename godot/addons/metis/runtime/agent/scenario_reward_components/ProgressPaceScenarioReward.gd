@@ -1,4 +1,4 @@
-extends "res://addons/metis/runtime/agent/scenario_reward_components/ScenarioRewardComponent.gd"
+extends ScenarioRewardComponent
 class_name ProgressPaceScenarioReward
 
 @export_range(0.001, 1.0, 0.001) var progress_pace_bucket_size := 0.025

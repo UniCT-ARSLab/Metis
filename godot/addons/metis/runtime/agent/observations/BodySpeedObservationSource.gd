@@ -1,4 +1,4 @@
-extends "res://addons/metis/runtime/agent/observations/ObservationSource.gd"
+extends ObservationSource
 class_name BodySpeedObservationSource
 
 @export var include_forward_speed := true

@@ -87,9 +87,7 @@ class GateConfigTests(unittest.TestCase):
 
 class WarmStartZeroInitTests(unittest.TestCase):
     def test_fresh_only_zero_inits(self):
-        # zero-init ONLY for a truly fresh policy — NOT warm-start (--policy-path) nor resume. The resume
-        # signal is an EXPLICIT boolean (is_resuming), never derived from start_episode: a valid resume
-        # from ckpt-0 has start_episode==0 yet must keep its restored residual weights.
+        # Resume state is explicit because checkpoint zero must still preserve residual weights.
         import algorithms.ppo as ppo
         self.assertTrue(ppo.residual_should_zero_init(False, None))              # fresh
         self.assertFalse(ppo.residual_should_zero_init(False, "trained.keras"))  # warm-start -> keep it

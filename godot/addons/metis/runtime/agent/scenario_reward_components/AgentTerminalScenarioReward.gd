@@ -1,4 +1,4 @@
-extends "res://addons/metis/runtime/agent/scenario_reward_components/ScenarioRewardComponent.gd"
+extends ScenarioRewardComponent
 class_name AgentTerminalScenarioReward
 
 @export var penalty := -60.0

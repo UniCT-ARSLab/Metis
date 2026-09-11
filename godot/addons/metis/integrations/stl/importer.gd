@@ -4,7 +4,7 @@ static func LoadFromPath(path: String) -> Variant:
 	'''
 	:return: ArrayMesh or Error
 	'''
-	# first thing is to find wether we're loading text or a binary
+	# STL has no reliable format marker, so inspect the payload first.
 	var bytes := FileAccess.get_file_as_bytes(path)
 	if bytes.is_empty():
 		return FileAccess.get_open_error()
@@ -15,21 +15,17 @@ static func LoadFromPath(path: String) -> Variant:
 
 	var mesh: ArrayMesh = load_result
 	if mesh == null:
-		# if it wasn't an error it should be an ArrayMesh
 		return ERR_BUG
 
 	mesh.surface_set_name(0, path.get_file())
 	return mesh
 
 static func IsAsciiFile(bytes :PackedByteArray) -> bool:
-	# ASCII files will start with 'solid '
-	# Binary files shouldn't-but-may also start with 'solid '
+	# Binary files may also begin with "solid", so size wins over the header.
 	var text_header := bytes.slice(0, 80).get_string_from_ascii().strip_edges()
 	if not text_header.begins_with('solid '):
 		return false
-	# start parsing as binary and if
-	# expected_size = 84 + triangle_count * 50
-	# then it is a binary
+	# Binary size is 84 bytes plus 50 bytes per triangle.
 	var offset:=80
 	var triangle_count := bytes.decode_u32(offset)
 	offset+=4
@@ -47,19 +43,14 @@ static func LoadFromBytes(bytes :PackedByteArray) -> Variant:
 
 	var mesh: ArrayMesh = load_result
 	if mesh == null:
-		# if it wasn't an error it should be an ArrayMesh
 		return ERR_BUG
 
-	# polish
 	var mat := StandardMaterial3D.new()
-	# Light-grey matte, not pure white: a 1.0 albedo blows out and blooms under scene glow/tonemap.
+	# A light-grey matte material remains readable under scene tonemapping.
 	mat.albedo_color = Color(0.8, 0.8, 0.8)
 	mat.roughness = 1.0
 	mat.metallic = 0.0
-	# The binary STL per-triangle attribute (a Magics colour) is read then discarded — no ARRAY_COLOR
-	# is ever built, so enabling vertex_color_use_as_albedo made Godot sample uninitialised vertex
-	# colours and paint the mesh with garbage colours. Off = a clean neutral material; colour the
-	# robot via the URDF <material> tags or a per-node material override instead.
+	# No ARRAY_COLOR is built; URDF materials or node overrides provide colour.
 	mat.vertex_color_use_as_albedo = false
 	mesh.surface_set_material(0, mat)
 	return mesh
@@ -87,12 +78,10 @@ static func LoadAsciiFromBuffer(bytes :PackedByteArray) -> Variant:
 	var normal :Vector3
 	var facet := PackedVector3Array()
 
-	# pump lines
 	var parsing_mode := ASCII_PARSING_MODE.SOLID_HEADER
 	while offset < bytes.size():
 		var next_line_break_index := bytes.find(ASCII.LINE_BREAK, offset)
 		line = bytes.slice(offset, next_line_break_index).get_string_from_ascii().strip_edges()
-		# jump to next line
 		offset = next_line_break_index+1
 		match parsing_mode:
 			ASCII_PARSING_MODE.SOLID_HEADER:
@@ -129,7 +118,7 @@ static func LoadAsciiFromBuffer(bytes :PackedByteArray) -> Variant:
 					tokens[3].to_float(),
 				))
 				if facet.size() == 3:
-					# facet is full but may not be oriented right
+					# Fix winding when the facet normal disagrees with the vertices.
 					if Plane(facet[0], facet[1], facet[2]).normal.dot(normal) > 0:
 						vertices.append_array(facet)
 					else:

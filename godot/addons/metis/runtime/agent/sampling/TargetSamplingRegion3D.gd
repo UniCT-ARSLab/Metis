@@ -4,18 +4,13 @@ class_name TargetSamplingRegion3D
 
 ## A reusable 3D target volume with stratified sampling.
 ##
-## The box is divided into cells. Every cell is visited once in a shuffled order
-## before a new coverage cycle begins, avoiding the clustering of uniform random
-## sampling while retaining randomness inside each cell.
+## Cells are visited in shuffled cycles, with a random position inside each cell.
 
 @export var region_name: StringName = &"region"
 @export var grid_size := Vector3i(4, 3, 4)
 @export var sampling_inset := Vector3(0.005, 0.005, 0.005)
 @export_node_path("CollisionShape3D") var collision_shape_path := NodePath("CollisionShape3D")
-## Optional allowlist of cell indices this region may sample. Empty = every cell (default,
-## backward-compatible). When set, stratified sampling visits ONLY these cells, so a workspace
-## probe can mask cells that are physically invalid (unreachable / endpoint-collision / joint
-## limit) while keeping the rest. Indices outside [0, total_cells) are ignored.
+## Optional cell allowlist. Empty means every cell.
 @export var allowed_cells: PackedInt32Array = PackedInt32Array()
 
 var _cell_order: Array[int] = []
@@ -48,11 +43,7 @@ func active_cells() -> Array[int]:
 	return _eligible_cells(total_cells())
 
 
-## Sample a target inside the region. ``forced_cell`` >= 0 pins the sample to that exact cell
-## (deterministic demo generation): it is honoured ONLY when the cell is in the eligible set
-## (allowlist-filtered), otherwise the call fails closed (cell -1, valid:false, error) — a forced
-## cell that is not allowed must never silently fall back to another cell. ``forced_cell`` == -1
-## (default) keeps the shuffled stratified coverage-cycle behaviour.
+## Samples a target, optionally forcing an eligible cell. Invalid forced cells fail closed.
 func sample_transform(
 	rng: RandomNumberGenerator,
 	target_basis := Basis.IDENTITY,
@@ -82,8 +73,7 @@ func sample_transform(
 	var cell_index: int
 	var coverage_fraction: float
 	if forced_cell >= 0:
-		# Explicit deterministic cell (demo generation). Fail-closed if the caller asks for a cell
-		# outside the allowlist/range: never substitute a different cell.
+		# Forced cells must not silently fall back to another target.
 		var eligible := _eligible_cells(resolved_grid.x * resolved_grid.y * resolved_grid.z)
 		if not eligible.has(forced_cell):
 			push_error(
@@ -101,8 +91,7 @@ func sample_transform(
 		coverage_fraction = 0.0
 	else:
 		_ensure_cell_order(rng, resolved_grid)
-		# Fail-closed: a broken/empty allowlist leaves no cells to sample -> return a degenerate
-		# sample (cell -1) rather than indexing an empty order or opening the whole region.
+		# An empty filtered allowlist must not reopen the full region.
 		if _cell_order.is_empty():
 			return {
 				"transform": Transform3D(target_basis, global_position),
@@ -173,10 +162,7 @@ func total_cells() -> int:
 		* maxi(grid_size.z, 1))
 
 
-## Cells eligible for sampling this cycle: the allowlist (filtered to the valid range) when set,
-## otherwise every cell. FAIL-CLOSED: an allowlist that is set but filters to nothing (every
-## index out of range) yields NO cells and an error — never the whole region — so a broken
-## allowlist cannot silently train on masked/invalid targets.
+## Returns valid allowlisted cells, or all cells when no allowlist is configured.
 func _eligible_cells(cell_total: int) -> Array[int]:
 	var out: Array[int] = []
 	if allowed_cells.is_empty():

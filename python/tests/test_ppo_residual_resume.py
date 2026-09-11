@@ -185,11 +185,7 @@ class TwoProcessResumeEquivalenceTests(unittest.TestCase):
         self.assertEqual(cont["shuffle"], res["shuffle"])              # same NumPy shuffle order
 
 
-# ---------------------------------------------------------------------------
-# REAL entry-point two-process resume: this drives train.py --algorithm ppo --policy-mode residual end to
-# end (arg parsing -> ppo.main -> sync single-policy loop -> _save_ckpt/resume) with a Godot-less fake env,
-# proving the resume helpers are wired into the OFFICIAL path (not just called by the tests/M8 orchestrator).
-# ---------------------------------------------------------------------------
+# Exercise two-process resume through the public train.py entry point with a Godot-free fake env.
 _ENTRY_SCRIPT = textwrap.dedent('''
     import os, sys
     os.environ["CUDA_VISIBLE_DEVICES"] = ""; os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"

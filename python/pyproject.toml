@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "metis-rl"
-version = "0.7.0"
+version = "0.8.0"
 description = "Python training runtime for the Metis Godot reinforcement-learning framework."
 readme = "PACKAGE.md"
 requires-python = ">=3.11"
@@ -39,6 +39,5 @@ py-modules = ["train", "run", "recorder", "export", "metis_cli"]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["algorithms*", "backends*", "core*", "dashboard*", "envs*", "tools*"]
-exclude = ["tests*"]
-
+include = ["algorithms*", "backends*", "core*", "dashboard*", "envs*"]
+exclude = ["tests*", "tools*", "build*"]

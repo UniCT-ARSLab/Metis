@@ -1,4 +1,4 @@
-extends Node
+extends Metis
 class_name ScenarioRewardSystem
 
 var _last_component_values := {}

@@ -226,6 +226,18 @@ def parse_args(argv=None):
         help="Scenario curriculum episode. Defaults to the episode encoded in a checkpoint name, or 0.",
     )
     group.add_argument(
+        "--reverse-curriculum",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Ask the scenario to enable or disable its reverse curriculum for this run. Only sent "
+            "when given, so scenarios keep their own setting by default. Needed to evaluate the "
+            "HOME start on tasks whose curriculum seeds the arm near the object: at full retreat "
+            "the xArm pick-and-place still begins 135 mm above the cube, so 'solved' measured "
+            "through the curriculum is not solved from home."
+        ),
+    )
+    group.add_argument(
         "--curriculum-level",
         type=float,
         default=None,
@@ -943,6 +955,8 @@ def main():
             scenario_config["curriculum_level"] = float(
                 np.clip(args.curriculum_level, 0.0, 1.0)
             )
+        if args.reverse_curriculum is not None:
+            scenario_config["reverse_curriculum"] = bool(args.reverse_curriculum)
         if args.continue_after_success:
             scenario_config.update(
                 continue_after_success=True,

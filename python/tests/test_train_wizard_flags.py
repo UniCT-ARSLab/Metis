@@ -8,8 +8,6 @@ entry against the real parsers, then replays the exact argv the wizard would bui
 CLI accepts it and lands the value on the right attribute.
 """
 
-from __future__ import annotations
-
 import importlib
 import os
 import re

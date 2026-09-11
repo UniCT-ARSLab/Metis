@@ -108,12 +108,9 @@ class OpponentPool:
         self.metadata = dict(metadata or {})
         self.state_getter = state_getter
         self.entries = []
-        # One opponent model per caller. A single shared instance was fine while only the
-        # sync loop existed, but async collectors each pick their own snapshot per episode
-        # and would load_weights over each other's model.
+        # one opponent model per caller. A single shared instance was fine while only the sync loop existed, but async collectors each pick their own snapshot per episode and would load_weights over each other's model.
         self._opponent_models = {}
-        # Guards `entries`, the manifest, and the snapshot files. Pruning deletes files a
-        # collector may be loading, so the load happens under the lock too.
+        # guards `entries`, the manifest, and the snapshot files. Pruning deletes files a  collector may be loading, so the load happens under the lock too.
         self._lock = threading.RLock()
 
         if not self.enabled:

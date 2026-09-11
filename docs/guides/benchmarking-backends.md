@@ -20,9 +20,11 @@ Training runs are sequential. This avoids two learners competing for the same GP
 CPU cores, and Godot processes. Several seeds are required because one RL run is not a
 reliable result.
 
-Intermediate checkpoints and replay snapshots are disabled during benchmark runs.
-Both can pause a learner for very different amounts of time and would contaminate the
-wall-clock comparison. Each trainer still writes its final model for evaluation.
+Ordinary episode-indexed checkpoints and replay snapshots are disabled during the
+strict comparison. Policy-only snapshots are instead published at fixed accepted-
+transition thresholds. They are immutable, intentionally exclude replay and optimiser
+state, and provide the candidates used to build the learning curve. Their publication
+time must be reported separately from learner throughput.
 
 The implementations will still differ internally. Replay sampling, network
 initialization, optimizer details, target updates, and exploration schedules are part
@@ -73,6 +75,26 @@ python/.venv/bin/python python/tools/benchmark_backends.py \
 Arguments after `--` are forwarded to both trainers. Do not put backend-specific
 options there. Run separate experiments when a parameter has different semantics in
 the two implementations.
+
+## Transition-indexed selection
+
+For a fresh, synchronous, single-policy run, both backends accept:
+
+```text
+--checkpoint-every-transitions N
+--transition-snapshot-dir PATH
+```
+
+The snapshot directory contains an ordered `transitions-N/` series. Each directory
+has the native policy (`policy.keras` for Metis or `model.zip` for SB3), its supporting
+metadata, and `snapshot.json` with requested and actually accepted transition counts
+and SHA-256 checksums. The last transition budget is always included even when it is
+not divisible by the interval. A missing threshold, changed file, unexpected directory,
+or incomplete staging directory stops the workflow.
+
+The framework exposes immutable snapshot creation and validation under `core`.
+Experiment-specific policy loading, candidate ranking, seed decks, and release rules
+belong to the caller rather than the framework package.
 
 The runner uses synchronous vector collection for both backends. SB3's vector
 environment advances the independent Godot processes concurrently, but the learner

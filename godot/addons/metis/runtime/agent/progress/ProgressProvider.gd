@@ -1,4 +1,4 @@
-extends Node
+extends Metis
 class_name ProgressProvider
 
 @export var clamp_to_unit_range := true

@@ -107,11 +107,7 @@ from envs.scenario import ScenarioGymEnv
 
 LOG_2PI = np.float32(np.log(2.0 * np.pi))
 
-# 'hybrid' mixes discrete and continuous heads; 'discrete' is the same model with the
-# continuous head absent; 'continuous' is the mirror case -- only the continuous (Gaussian) head, no
-# discrete heads. All three are driven from action_space_spec components, and the continuous machinery
-# (Gaussian sample/log-prob/entropy in build_sample_action_fn) is already exercised by hybrid's
-# continuous part, so a continuous-only env needs no new code beyond being accepted here.
+# Model heads follow the components declared by the action-space specification.
 SUPPORTED_ACTION_TYPES = {"hybrid", "discrete", "continuous"}
 
 
@@ -184,9 +180,7 @@ def parse_args():
         default=-20.0,
         help="Lower bound on the policy log-std (prevents a premature collapse to a deterministic policy).",
     )
-    # Generic policy-mode / residual-adapter options (task-agnostic; standard PPO is the default and is
-    # bit-identical to before). 'residual' makes the SAME PPO control a bounded gated residual around a
-    # FROZEN base policy via core.policy_action_adapter.
+    # Residual mode learns a bounded correction around a frozen base policy.
 
     group = argument_group(parser, GROUP_RESIDUAL)
     group.add_argument("--policy-mode", choices=["standard", "residual"], default="standard")
@@ -332,12 +326,9 @@ def build_action_metadata(action_space_spec):
         "continuous_size": int(offset),
         "continuous_low": np.asarray(continuous_low, dtype=np.float32),
         "continuous_high": np.asarray(continuous_high, dtype=np.float32),
-        # One discrete component and nothing else: the env exposes Discrete(n) and wants
-        # a bare int, not the hybrid dict. See pack_action.
+        # A pure discrete space expects a scalar rather than a hybrid mapping.
         "single_discrete": len(discrete) == 1 and not continuous,
-        # Continuous components and no discrete: a pure-continuous env (action_type "continuous")
-        # exposes a Box and its decode reshapes a FLAT vector, so it wants the bare continuous array,
-        # not the hybrid {name: values} dict. See pack_action.
+        # A pure continuous space expects a flat array rather than a hybrid mapping.
         "single_continuous": bool(continuous) and not discrete,
     }
 
@@ -377,8 +368,7 @@ def pack_action(discrete_actions, continuous_action, action_meta):
     if action_meta["single_discrete"]:
         return int(discrete_actions[0])
 
-    # Pure-continuous env: the Box decode reshapes a flat vector, so emit the bare array (mirrors the
-    # single_discrete bare-int case), not the {name: values} hybrid dict.
+    # Box decoding expects the bare continuous array.
     if action_meta["single_continuous"]:
         return np.asarray(continuous_action, dtype=np.float32).tolist()
 
@@ -457,17 +447,13 @@ def build_sample_action_fn(model, obs_dim, action_meta, device="/CPU:0", rng_gen
                 else tf.zeros((0,), dtype=tf.int32)
             )
 
-            # continuous_size is a Python constant, so this branch is resolved at trace
-            # time -- a discrete-only scenario never traces the continuous ops at all.
+            # This constant branch disappears from discrete-only traces.
             if continuous_size > 0:
                 mean = continuous_mean[0]
                 std = tf.exp(log_std)
                 noise = rng_gen.normal(tf.shape(mean)) if rng_gen is not None else tf.random.normal(tf.shape(mean))
                 raw_action = mean + noise * std
-                # Return the UNCLIPPED raw sample; the action adapter maps it to the env action (the
-                # StandardActionAdapter simply clips to [low, high] -> identical to the old behaviour;
-                # a residual adapter maps it to base+gated-bounded-residual). log-prob is scored on the
-                # raw sample either way.
+                # Score log-probability before the adapter maps the raw sample to the environment.
                 continuous_out = raw_action
                 log_prob += gaussian_log_prob(raw_action[None, :], continuous_mean, log_std)[0]
             else:
@@ -479,8 +465,7 @@ def build_sample_action_fn(model, obs_dim, action_meta, device="/CPU:0", rng_gen
 
 
 def _standard_adapter_for(action_meta):
-    # Cache one StandardActionAdapter per action_meta so existing call sites (adapter=None) keep the
-    # exact pre-adapter behaviour without constructing an object per step.
+    # Reuse adapters because this path runs once per environment step.
     key = id(action_meta)
     ad = _STANDARD_ADAPTERS.get(key)
     if ad is None:
@@ -532,16 +517,12 @@ def validate_residual_mode(args):
         raise RuntimeError("--policy-mode residual is validated for SYNC collectors only; "
                            "use --collector-mode sync.")
     if getattr(args, "auto_recovery", False):
-        # The residual best is a deployable policy.keras and the residual training checkpoint keeps the
-        # model weights in a versioned .weights.h5 (not the tf checkpoint), so TensorFlowCheckpointRecovery
-        # (which restores a tf checkpoint) cannot recover residual training. Refuse until a residual-aware
-        # recovery exists, rather than hand a Keras file to a tf-checkpoint restore.
+        # Generic TensorFlow recovery cannot restore the residual policy bundle yet.
         raise RuntimeError("--policy-mode residual does not support --auto-recovery yet (recovery restores a "
                            "TensorFlow checkpoint; the residual best is a policy.keras and its weights live in "
                            "a versioned .weights.h5). Run without --auto-recovery.")
     if not getattr(args, "freeze_base_policy", True):
-        # The whole residual premise is a FROZEN base; the base is a separate model never added to the
-        # trainable variables, so --no-freeze-base-policy would promise base training that does not happen.
+        # The base model is deliberately outside the residual optimizer and checkpoint.
         raise RuntimeError("--policy-mode residual requires a frozen base; --no-freeze-base-policy is not "
                            "supported (base training would break the protected-residual design).")
 
@@ -563,8 +544,7 @@ def build_action_adapter(args, model, action_meta, *, zero_init_head=True):
     from core.policy_artifact import load_policy_model
     base_model, _mani, _kind, _bpath = load_policy_model(args.base_policy)
     if base_model is None:
-        # A weights-only file (.weights.h5, or a bare .h5 with no embedded architecture) has no graph to
-        # run as the frozen base. Fail closed rather than crash later on `base_model(obs)`.
+        # A frozen base needs a complete model graph, not only weights.
         raise RuntimeError(
             f"--policy-mode residual requires a COMPLETE base model (.keras or a full .h5 with architecture); "
             f"got a weights-only file with no architecture: {args.base_policy}. Re-export the base as policy.keras.")
@@ -591,11 +571,7 @@ def build_action_adapter(args, model, action_meta, *, zero_init_head=True):
     return adapter
 
 
-# ---------------------------------------------------------------------------
-# Residual-policy checkpointing. Self-contained for the standard train.py residual run (training,
-# checkpoint, resume, evaluation). Any experimental protected-evaluation runner reuses these helpers
-# rather than reimplementing weight/optimizer persistence, adding only its own protocol sidecar.
-# ---------------------------------------------------------------------------
+# Shared checkpoint helpers for residual training and protected evaluations.
 def _atomic_write_json(path, obj):
     p = Path(path); tmp = Path(str(p) + ".tmp")
     tmp.write_text(json.dumps(obj, default=str))
@@ -690,7 +666,7 @@ def load_residual_checkpoint(ckdir, tf_checkpoint, expected_manifest, np_rng, mo
     mw = ckdir / f"model-{n}.weights.h5"
     if not mw.exists():
         raise RuntimeError(f"model-{n}.weights.h5 missing (partial checkpoint) -- refusing to resume")
-    # Explicitly REQUIRE the mandatory tf components (no expect_partial masking).
+    # Missing optimizer or RNG state makes a residual resume invalid.
     present = set(tf.train.load_checkpoint(tf_path).get_variable_to_shape_map().keys())
     required = ["log_std", "optimizer", "value_optimizer", "tf_gen", "generation", "policy_updates"]
     missing = [r for r in required if not any(k == r or k.startswith(r + "/") or ("/" + r + "/") in k for k in present)]
@@ -776,10 +752,9 @@ def new_trajectory():
         "values": [],
         "rewards": [],
         "dones": [],
-        # Per-step policy-loss weight (1.0 standard; an adapter may zero out states it must not train,
-        # e.g. a residual policy on approach states where the gate is 0).
+        # Adapters may mask states where their policy must remain frozen.
         "train_masks": [],
-        # V(s_T), set only when the episode was cut by the step cap rather than ending.
+        # Non-terminal tails carry V(s_T) for GAE bootstrapping.
         "bootstrap_value": 0.0,
     }
 
@@ -821,17 +796,14 @@ def build_update_batch(trajectories, action_meta, gamma, gae_lambda):
             trajectory.get("bootstrap_value", 0.0),
         )
         obs_parts.append(np.asarray(trajectory["obs"], dtype=np.float32))
-        # State the row count explicitly (mirrors the continuous side below): a continuous-only
-        # scenario has zero discrete components, and numpy cannot infer a -1 row count against a
-        # zero-width column, so reshape(-1, 0) on the empty array raises.
+        # NumPy cannot infer rows when the second dimension is zero.
         discrete_parts.append(
             np.asarray(trajectory["discrete_actions"], dtype=np.int32).reshape(
                 len(trajectory["rewards"]),
                 len(action_meta["discrete"]),
             )
         )
-        # A discrete-only scenario has continuous_size == 0, and numpy cannot infer a -1
-        # row count against a zero-width column, so state the rows explicitly.
+        # State the row count explicitly for a zero-width continuous block.
         continuous_parts.append(
             np.asarray(trajectory["continuous_actions"], dtype=np.float32).reshape(
                 len(trajectory["rewards"]),
@@ -962,7 +934,7 @@ def ppo_update(model, log_std, optimizer, batch, action_meta, args, value_optimi
     train_masks = tf.convert_to_tensor(mask_np, dtype=tf.float32)
     active = mask_np > 0.5
 
-    # Normalize advantages over the GATE-ACTIVE population (all-ones mask -> all states -> unchanged).
+    # Normalize over trainable states; a standard policy uses the full batch.
     adv_np = np.asarray(batch["advantages"], np.float64)
     sub = adv_np[active] if active.sum() > 1 else adv_np
     advantages = tf.convert_to_tensor((adv_np - sub.mean()) / (sub.std() + 1e-8), dtype=tf.float32)
@@ -998,8 +970,7 @@ def ppo_update(model, log_std, optimizer, batch, action_meta, args, value_optimi
         if target_kl > 0.0:                                  # approx-KL early stop (0 = OFF = unchanged)
             new_lp, _, _ = evaluate_actions(model, log_std, obs, discrete_actions, continuous_actions, action_meta)
             log_ratio = (new_lp - old_log_probs).numpy()
-            # Schulman NON-NEGATIVE KL estimator (expm1(log_ratio) - log_ratio); the signed mean(old-new)
-            # can cancel opposite contributions and even go negative -> unsafe for a safety gate.
+            # Schulman's estimator stays non-negative when signed terms cancel.
             schulman = np.expm1(log_ratio) - log_ratio
             approx_kl = float(np.mean(schulman[active])) if active.sum() > 0 else float(np.mean(schulman))  # gate-active, non-neg -> early-stop/rollback
             approx_kl_global = float(np.mean(schulman))
@@ -1059,11 +1030,7 @@ def run_async_ppo(
         policy_version = -1
         rollout_steps = int(getattr(args, "ppo_rollout_steps", 0))
         if rollout_steps > 0 and not args.multi_agent:
-            # FIXED-LENGTH rollouts: collect exactly rollout_steps transitions per generation, resetting
-            # the env whenever an episode ends mid-chunk, so no worker idles waiting for the slowest
-            # episode. Intermediate terminals cut the GAE chain (done flags); a non-terminal tail is
-            # bootstrapped with the value head. training_episode advances per real episode so the
-            # scenario's episode-paced curriculum keeps progressing.
+            # Fixed chunks reset completed episodes immediately and bootstrap non-terminal tails.
             episode_counter = start_episode
             need_reset = True
             obs = None
@@ -1132,9 +1099,7 @@ def run_async_ppo(
                 }
                 if not put(AsyncEpisodeEvent(worker_id, generation, payload)):
                     return
-                # Gate the next generation on the learner publishing its update (same as the dynamic
-                # path). Without this the fast fixed-length workers race ahead and hand the barrier
-                # mixed policy versions for one generation -> "mixed collector policy versions" crash.
+                # Keep every worker on the same policy version for a generation.
                 if generation + 1 < args.num_episodes:
                     if not snapshot.wait_for_newer(policy_version, stop_event):
                         return
@@ -2450,9 +2415,7 @@ def main():
             )
             return
 
-        # Residual mode needs a LINEAR continuous head (the adapter applies the tanh squash; a tanh head
-        # would double-squash) and a SEPARATE value tower (so the value loss cannot flow into the residual
-        # policy trunk). Standard mode keeps the shared tanh model unchanged.
+        # The adapter owns tanh in residual mode, and its value tower must not update the actor.
         _residual = getattr(args, "policy_mode", "standard") == "residual"
         model = build_hybrid_actor_critic(
             obs_dim=obs_dim,
@@ -2473,16 +2436,13 @@ def main():
             trainable=True,
         )
         optimizer = tf.keras.optimizers.Adam(learning_rate=args.learning_rate)
-        # Residual mode ALWAYS trains its separate value tower with its own optimizer (round-5); the checkpoint
-        # therefore always carries value_optimizer and load_residual_checkpoint requires it. If --value-learning-rate
-        # was left at 0, default it to 3e-4 so a fresh run and its resume build the SAME config. Standard: unchanged.
+        # Residual checkpoints always include the separate value optimizer.
         if _residual and float(getattr(args, "value_learning_rate", 0.0)) <= 0.0:
             args.value_learning_rate = 3e-4
         value_optimizer = (tf.keras.optimizers.Adam(learning_rate=args.value_learning_rate)
                            if (_residual and float(getattr(args, "value_learning_rate", 0.0)) > 0.0) else None)
         start_episode = 0
-        # Residual mode: EXPLICIT checkpointable generators (so a resumed run reproduces action sampling +
-        # minibatch shuffle) + generation/policy-update counters + a fail-closed manifest. Standard: None.
+        # Residual runs persist both TensorFlow and NumPy random streams.
         episode_var = tf.Variable(0, dtype=tf.int64)
         if _residual:
             residual_tf_gen = tf.random.Generator.from_seed(int(args.env_seed_base))
@@ -2511,9 +2471,7 @@ def main():
         if resume_checkpoint and args.policy_path:
             raise RuntimeError("--policy-path cannot be combined with --resume or --resume-checkpoint")
         if resume_checkpoint and _residual:
-            # Residual resume goes through the shared residual helpers: materialise optimizer slots, then
-            # restore model weights + log_std + BOTH optimizers + tf RNG + counters, validating the manifest
-            # fail-closed and requiring the matching sidecar + versioned model weights.
+            # Materialize optimizer slots before restoring the complete residual state.
             materialize_optimizer_slots(model, log_std, optimizer, value_optimizer, obs_dim,
                                         action_meta["continuous_size"], action_meta)
             counters, _saved, _p = load_residual_checkpoint(args.checkpoint_dir, checkpoint, residual_manifest_obj,
@@ -2532,24 +2490,18 @@ def main():
                 flush=True,
             )
         optimizer.learning_rate.assign(args.learning_rate)
-        # Action adapter (None for standard = unchanged). Residual zero-inits the mean head ONLY for a
-        # truly FRESH policy -- NOT on a resume (explicit flag: a valid resume from ckpt-0 has
-        # start_episode==0 yet must keep its restored residual weights) and NOT when warm-starting from
-        # --policy-path. The frozen base is a SEPARATE model, never added to checkpoint/train_vars/snapshots.
+        # Zero-initialize only a fresh residual policy; resumes and warm starts keep their weights.
         _fresh_residual = residual_should_zero_init(resume_checkpoint is not None, args.policy_path)
         action_adapter = build_action_adapter(args, model, action_meta, zero_init_head=_fresh_residual)
 
         def _save_ckpt(ep, final=False):
-            # Residual checkpoints use the shared atomic residual helper (versioned model weights +
-            # tf.train.Checkpoint of log_std/optimizers/tf_gen/counters + sidecar + latest_complete);
-            # standard mode keeps save_training_checkpoint exactly as before.
+            # Residual saves publish their model, optimizer, RNG and sidecar atomically.
             if _residual:
                 episode_var.assign(int(ep)); generation_var.assign(int(ep))
                 saved = save_residual_checkpoint(
                     args.checkpoint_dir, checkpoint_manager, residual_manifest_obj, residual_shuffle_rng,
                     {"episode": int(ep), "generation": int(ep), "policy_updates": int(policy_updates_var.numpy())}, model)
-                # Also export the deployable effective policy.keras (fused base+residual), same as the
-                # standard path does for its raw actor -- so a residual run yields a standalone runnable policy.
+                # Export the fused policy so deployment needs no residual-aware runtime.
                 _artifact = getattr(args, "policy_artifact", None)
                 if _artifact is not None:
                     _artifact.save(int(ep))
@@ -2562,13 +2514,7 @@ def main():
         )
 
         if _residual:
-            # Residual PPO uses the STANDARD evaluation/best-checkpoint machinery like any other algorithm.
-            # The learner's raw actor is not directly runnable (its continuous head is the pre-tanh residual
-            # LATENT, not an action), so both the exported policy.keras and the best-checkpoint evaluation use
-            # the FUSED effective policy = clip(base + gate*delta_max*tanh(residual), low, high). The fused model
-            # shares the live actor's layers, so it always reflects current weights; the evaluator (run.py)
-            # loads it generically via --load-from policy with no residual awareness. The env action bounds are
-            # baked into the fused layer so the exported action matches the runtime adapter for ANY bounds.
+            # Evaluation uses the live fused policy, including the environment action bounds.
             from core.composite_policy import build_residual_export_policy
 
             _effective_manifest = build_policy_metadata("ppo", env0)
@@ -2582,15 +2528,14 @@ def main():
                     action_low=action_meta["continuous_low"], action_high=action_meta["continuous_high"])
 
             def _export_effective_bundle(dest):
-                # A deployable bundle: the effective policy.keras + a coherent policy.json manifest beside it.
+                # Keep the exported policy and its manifest together.
                 _build_effective_policy().save(str(dest))
                 Path(dest).with_suffix(".json").write_text(json.dumps(_effective_manifest, indent=2))
 
-            # policy.keras export is the deployable effective policy (usable standalone via run.py); the
-            # PolicyArtifactSaver writes policy.keras + policy.json in the checkpoint dir at every save.
+            # Each residual checkpoint includes a standalone effective policy bundle.
             args.policy_artifact = PolicyArtifactSaver(
                 _build_effective_policy(), args.checkpoint_dir, _effective_manifest)
-            # best-checkpoint evaluation re-exports a frozen snapshot (bundle) at each requested episode.
+            # Best-checkpoint evaluation receives a frozen fused snapshot.
             best_tracker.set_policy_artifact_exporter(_export_effective_bundle)
 
         opponent_teams = validate_team_layout(envs, args.opponent_pool)
@@ -2639,9 +2584,7 @@ def main():
         def sample_fn_for(sampled_model):
             fn = sample_fns.get(id(sampled_model))
             if fn is None:
-                # Residual mode: the LEARNER policy samples with the explicit checkpointable tf RNG so a
-                # resume reproduces the action stream. Opponents (never used in residual single-policy) and
-                # standard mode keep the global tf.random.normal -> unchanged.
+                # Residual sampling uses its checkpointed RNG for reproducible resumes.
                 _rng = residual_tf_gen if (_residual and sampled_model is model) else None
                 fn = build_sample_action_fn(sampled_model, obs_dim, action_meta, rng_gen=_rng)
                 sample_fns[id(sampled_model)] = fn
@@ -2832,9 +2775,7 @@ def main():
                 else ppo_update(model, log_std, optimizer, update_batch, action_meta, args, value_optimizer,
                                 shuffle_rng=residual_shuffle_rng)
             )
-            # Count a policy update ONLY when the residual actor optimizer actually applied a gate-active
-            # step (n_active>0). A rollout with no gate-active transitions masks the policy loss to zero and
-            # moves nothing, so it must NOT bump the counter (a frozen verification epoch already returns None).
+            # Count only updates that contained at least one trainable residual state.
             if _residual and metrics is not None and int(metrics.get("n_active", 0)) > 0:
                 policy_updates_var.assign_add(1)
             training_metrics = [
@@ -2867,8 +2808,7 @@ def main():
             else:
                 saved_path = None
             if best_tracker.should_evaluate(episode + 1):
-                # Residual mode evaluates through the same machinery: the tracker's policy-artifact exporter
-                # (set above) stages the fused effective policy.keras, so no residual special-casing here.
+                # The tracker evaluates the staged fused policy through the standard path.
                 if saved_path is None:
                     saved_path = _save_ckpt(episode + 1)
                     last_saved_episode = episode + 1

@@ -41,11 +41,14 @@ from core.training import (
     add_lockstep_tuning_arguments,
     add_parallel_env_arguments,
     add_training_health_arguments,
+    add_transition_snapshot_arguments,
     build_lockstep_user_args,
     maybe_start_dashboard,
     print_episode_metrics,
     report_training_time,
+    validate_transition_snapshot_arguments,
 )
+from core.transition_snapshots import TransitionSnapshotPublisher
 from envs.process_manager import GodotProcessManager
 from envs.scenario import ScenarioGymEnv
 
@@ -156,6 +159,7 @@ def parse_args(argv=None):
     parser.add_argument("--require-replay-buffer", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--tensorboard-log", default=None)
     parser.add_argument("--verbose", type=int, choices=[0, 1, 2], default=1)
+    add_transition_snapshot_arguments(parser)
 
     parser.add_argument("--evaluation-episodes", type=int, default=0)
     parser.add_argument("--evaluation-seed", type=int, default=10_000)
@@ -184,6 +188,7 @@ def parse_args(argv=None):
 
 
 def validate_args(args):
+    validate_transition_snapshot_arguments(args)
     if args.multi_policy:
         raise ValueError(
             "The SB3 comparison backend does not support independent --multi-policy "
@@ -416,6 +421,7 @@ class MetisSB3Callback(BaseCallback):
         # arm that got close and then drifted away, which is exactly the failure to watch.
         self._progress_peak = {}
         self._initial_updates = 0.0
+        self.transition_publisher = None
 
     def _updates_per_second(self):
         """Gradient steps per second, so the dashboard can show the update rate the way the
@@ -433,6 +439,42 @@ class MetisSB3Callback(BaseCallback):
         values = getattr(getattr(self.model, "logger", None), "name_to_value", None) or {}
         updates = values.get("train/n_updates")
         self._initial_updates = float(updates) if isinstance(updates, (int, float)) else 0.0
+        if int(self.args.checkpoint_every_transitions or 0) > 0:
+            self.transition_publisher = TransitionSnapshotPublisher(
+                self.args.transition_snapshot_dir,
+                interval=self.args.checkpoint_every_transitions,
+                budget=self.args.total_timesteps,
+                backend="sb3",
+                algorithm=self.args.algorithm,
+            )
+
+    def _publish_transition_snapshots(self):
+        if self.transition_publisher is None:
+            return
+
+        def save_policy(directory, _threshold):
+            model_path = directory / "model.zip"
+            self.model.save(model_path)
+            state_path = directory / "training_state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "backend": "sb3",
+                        "algorithm": self.args.algorithm,
+                        "completed_episodes": self.completed_episodes,
+                        "num_timesteps": int(self.num_timesteps),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            return model_path
+
+        self.transition_publisher.publish_due(
+            int(self.num_timesteps), self.completed_episodes, save_policy
+        )
 
     def _checkpoint(self):
         directory = Path(self.args.checkpoint_dir)
@@ -472,6 +514,8 @@ class MetisSB3Callback(BaseCallback):
             _replay_path_for_model(path).unlink(missing_ok=True)
 
     def _on_step(self):
+        # SB3 invokes callbacks after collection and before the corresponding learner update.
+        self._publish_transition_snapshots()
         dones = np.asarray(self.locals.get("dones", []), dtype=np.bool_)
         infos = list(self.locals.get("infos", []))
         for index, info in enumerate(infos):
@@ -745,6 +789,14 @@ def main():
             reset_num_timesteps=not is_resume,
             progress_bar=False,
         )
+        if (
+            callback.transition_publisher is not None
+            and int(model.num_timesteps) >= int(args.total_timesteps)
+            and not callback.transition_publisher.complete
+        ):
+            raise RuntimeError(
+                "Transition budget ended before every SB3 policy snapshot was published"
+            )
     except KeyboardInterrupt:
         interrupted = True
         print("\nInterrupt received: saving the current SB3 state...", flush=True)

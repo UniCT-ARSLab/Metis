@@ -7,9 +7,8 @@ from pathlib import Path
 import numpy as np
 import tensorflow as tf
 
-# Registers the Metis-serializable composite-policy layers so tf.keras.models.load_model can restore
-# a fused gated-residual policy.keras with NO custom_objects at the call site (run.py stays generic).
-from core import composite_policy  # noqa: F401,E402
+# Registers the Metis-serializable composite-policy layers so tf.keras.models.load_model can restore a fused gated-residual policy.keras with NO custom_objects at the call site (run.py stays generic).
+from core import composite_policy
 
 
 POLICY_FORMAT = "metis-policy"
@@ -132,8 +131,7 @@ def load_policy_model(policy_path):
         if path.suffix.lower() not in {".h5", ".hdf5"}:
             raise RuntimeError(f"Could not load Keras policy model: {path}") from model_error
 
-        # Historical Metis commands wrote weights with arbitrary .h5 names. A target
-        # architecture is needed before Keras can distinguish and restore those files.
+        # historical Metis commands wrote weights with arbitrary .h5 names. A target architecture is needed before Keras can distinguish and restore those files.
         return None, manifest, "weights", path
 
 

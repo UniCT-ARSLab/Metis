@@ -12,12 +12,8 @@ func reset_ball(reset_transform:Transform2D, launch_velocity:Vector2) -> void:
 	_reset_pending = true
 	freeze = false
 	sleeping = false
-	# Move NOW, not just on the next _integrate_forces. Deferring the teleport left the ball at the
-	# position where the previous episode ended for one physics frame, and the scenario re-enables
-	# every brick during that same frame -- so the bricks reappeared on top of the stale ball,
-	# reported contacts, and handed out one or two free bricks at the start of every episode after
-	# the first. _integrate_forces still runs: it is the only place a RigidBody2D's velocity can be
-	# set without the solver overwriting it.
+	# Move immediately so reset contacts cannot be generated at the old position.
+	# _integrate_forces still owns the final velocity update.
 	PhysicsServer2D.body_set_state(
 		get_rid(), PhysicsServer2D.BODY_STATE_TRANSFORM, reset_transform)
 	PhysicsServer2D.body_set_state(
@@ -50,10 +46,6 @@ func _finish_reset_interpolation() -> void:
 
 func park_outside(somewhere:Vector2) -> void:
 	## Teleport the ball far off the playfield, immediately, with no velocity.
-	##
-	## Called before a scenario re-enables its obstacles: whatever reappears cannot collide with a
-	## ball that is no longer there. Cancels any pending reset so _integrate_forces does not put the
-	## ball back at the old target after this.
 	_reset_pending = false
 	freeze = false
 	sleeping = false

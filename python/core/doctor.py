@@ -1,7 +1,5 @@
 """Runtime diagnostics used by the Metis CLI and Godot editor add-on."""
 
-from __future__ import annotations
-
 import argparse
 import importlib
 import json

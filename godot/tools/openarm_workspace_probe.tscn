@@ -1,6 +1,0 @@
-[gd_scene load_steps=2 format=3 uid="uid://c0wkarmprobe01"]
-
-[ext_resource type="Script" path="res://tools/openarm_workspace_probe.gd" id="1_probe"]
-
-[node name="WorkspaceProbe" type="Node3D"]
-script = ExtResource("1_probe")

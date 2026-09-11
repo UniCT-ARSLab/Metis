@@ -1,4 +1,4 @@
-extends "res://addons/metis/runtime/agent/scenario_reward_components/ScenarioRewardComponent.gd"
+extends ScenarioRewardComponent
 class_name ProgressStallScenarioReward
 
 @export var terminate_on_stalled_progress := false

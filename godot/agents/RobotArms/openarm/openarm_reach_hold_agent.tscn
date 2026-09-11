@@ -1,6 +1,6 @@
 [gd_scene format=3 uid="uid://creachholdagent1"]
 
-[ext_resource type="Script" uid="uid://cgg74e466ew1n" path="res://agents/RobotArms/urdf_robot_arm_agent.gd" id="1_body"]
+[ext_resource type="Script" uid="uid://cgg74e466ew1n" path="res://addons/metis/integrations/urdf/agent/urdf_robot_arm_agent.gd" id="1_body"]
 [ext_resource type="Script" uid="uid://byrdvsguqdev3" path="res://addons/metis/runtime/agent/Agent.gd" id="2_agent"]
 [ext_resource type="Script" uid="uid://bjhxcss2ima54" path="res://addons/metis/runtime/agent/action_space/ActionSpace.gd" id="3_actionspace"]
 [ext_resource type="Script" uid="uid://clefx53jebtj3" path="res://addons/metis/runtime/agent/observations/ObservationSystem.gd" id="4_obs"]

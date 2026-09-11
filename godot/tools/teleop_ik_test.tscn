@@ -1,6 +1,0 @@
-[gd_scene load_steps=2 format=3 uid="uid://cteleopiktest01"]
-
-[ext_resource type="Script" path="res://tools/teleop_ik_test.gd" id="1_ik"]
-
-[node name="TeleopIKTest" type="Node3D"]
-script = ExtResource("1_ik")

@@ -51,7 +51,7 @@ class MetisSB3VecEnv(VecEnv):
             int(training_episode_start) for _env in self.envs
         ]
         # The Godot curriculum keys on a GLOBAL episode count -- openarm_scenario.gd calls it
-        # "the REAL global episode count" -- and that is what every native Metis trainer sends.
+        # Send the global completed-episode count used by native Metis trainers.
         # The per-env counters above stay per-env because the episode seed derives from them,
         # but feeding them to the scene would pace its curriculum num_envs times slower: with 8
         # envs the assist schedule that should be over by episode 6000 was still sitting on its

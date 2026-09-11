@@ -11,6 +11,25 @@ robotics examples.
 After copying the `addons/metis` directory into a Godot project, open
 **Project > Project Settings > Plugins** and enable **Metis**.
 
+### Node palette
+
+In **Create New Node**, the framework's Node-based runtime types live under the
+`Metis` branch. Their normal inheritance provides smaller subtrees for observation
+sources, reward components, scenario rewards, event sources, and progress providers.
+This keeps the main Node list readable while preserving every public class name used
+by existing scenes and scripts.
+
+`URDFIKController` is part of the main `Metis` branch. Spatial URDF components appear
+under `Node3D > MetisRobot3D`, including `GodotRobot` and the reusable
+`URDFRobotArmAgentBody`. The serializable model appears in the resource picker as
+`MetisURDFResource > URDFRobot`. These parallel Metis-labelled roots are necessary
+because Godot uses single inheritance: moving a robot or resource under the plain
+`Metis` Node would remove its transforms or resource serialization.
+
+Other types that require a more specific engine base remain in the corresponding
+native branch. For example, `TargetSamplingRegion3D` stays under `Area3D`, while URDF
+rigid bodies and joints retain their physics or joint type.
+
 A release downloaded from the Godot Asset Library carries a matching Python wheel.
 The first time the packaged add-on is enabled, Metis offers to create a project-local
 runtime in:

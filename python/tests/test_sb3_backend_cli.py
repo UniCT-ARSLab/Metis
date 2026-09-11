@@ -130,6 +130,45 @@ class SB3BackendCliTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "does not support independent"):
             module.validate_args(args)
 
+    def test_transition_snapshots_are_accepted_for_fresh_sync_training(self):
+        module = load_sb3_backend_module()
+        args = module.parse_args(
+            [
+                "--algorithm",
+                "dqn",
+                "--total-timesteps",
+                "1000",
+                "--checkpoint-every-transitions",
+                "250",
+                "--transition-snapshot-dir",
+                "/tmp/metis-sb3-snapshots",
+                "--collector-mode",
+                "sync",
+            ]
+        )
+
+        module.validate_args(args)
+
+    def test_transition_snapshots_reject_resume_and_async_collection(self):
+        module = load_sb3_backend_module()
+        base = [
+            "--algorithm",
+            "dqn",
+            "--total-timesteps",
+            "1000",
+            "--checkpoint-every-transitions",
+            "250",
+            "--transition-snapshot-dir",
+            "/tmp/metis-sb3-snapshots",
+        ]
+
+        with self.assertRaisesRegex(ValueError, "fresh policy run"):
+            module.validate_args(module.parse_args([*base, "--resume"]))
+        with self.assertRaisesRegex(ValueError, "sync collection"):
+            module.validate_args(
+                module.parse_args([*base, "--collector-mode", "async"])
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,4 +1,4 @@
-extends Node
+extends Metis
 class_name ScenarioRewardComponent
 
 @export var enabled := true

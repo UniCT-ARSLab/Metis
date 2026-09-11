@@ -8,8 +8,6 @@ The property that matters most here is the boring one: with --target-update-step
 changes for any existing run.
 """
 
-from __future__ import annotations
-
 import os
 import sys
 import unittest

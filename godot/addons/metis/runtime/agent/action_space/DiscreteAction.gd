@@ -1,4 +1,4 @@
-extends Node
+extends Metis
 class_name DiscreteAction
 
 @export var action_name := ""

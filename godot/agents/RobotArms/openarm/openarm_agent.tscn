@@ -1,6 +1,6 @@
 [gd_scene format=3 uid="uid://b3j24f8qtif12"]
 
-[ext_resource type="Script" uid="uid://cgg74e466ew1n" path="res://agents/RobotArms/urdf_robot_arm_agent.gd" id="1_body"]
+[ext_resource type="Script" uid="uid://cgg74e466ew1n" path="res://addons/metis/integrations/urdf/agent/urdf_robot_arm_agent.gd" id="1_body"]
 [ext_resource type="Script" uid="uid://byrdvsguqdev3" path="res://addons/metis/runtime/agent/Agent.gd" id="2_agent"]
 [ext_resource type="Script" uid="uid://bjhxcss2ima54" path="res://addons/metis/runtime/agent/action_space/ActionSpace.gd" id="3_actionspace"]
 [ext_resource type="Script" uid="uid://clefx53jebtj3" path="res://addons/metis/runtime/agent/observations/ObservationSystem.gd" id="4_obs"]
@@ -22,26 +22,27 @@ albedo_color = Color(1, 0, 0, 1)
 [node name="OpenarmAgent" type="Node3D" unique_id=1614782724]
 script = ExtResource("1_body")
 robot_path = NodePath("openarm")
-controlled_joint_names = PackedStringArray("openarm_right_joint1", "openarm_right_joint2", "openarm_right_joint3", "openarm_right_joint4", "openarm_right_joint5", "openarm_right_joint6", "openarm_right_joint7")
-joint_home_positions = PackedFloat32Array(0, 0, 0, 0, 0, 0, 0)
+controlled_joint_names = PackedStringArray("openarm_right_joint1", "openarm_right_joint2", "openarm_right_joint3", "openarm_right_joint4", "openarm_right_joint5", "openarm_right_joint6", "openarm_right_joint7", "openarm_right_finger_joint1")
+joint_home_positions = PackedFloat32Array(0, 0, 0, 0, 0, 0, 0, 0.025)
 default_joint_speed = 0.1
 max_joint_speed_override = 0.5
 tcp_link_name = "openarm_right_hand"
 tcp_local_offset = Vector3(0, 0.08, 0)
+tool_pose_path = NodePath("EndEffector/ToolPose/GraspCenter")
+gripper_joint_name = &"openarm_right_finger_joint1"
+gripper_finger_link_names = PackedStringArray("openarm_right_left_finger", "openarm_right_right_finger")
+gripper_max_speed = 0.04
 workspace_scale = 0.5
 success_distance = 0.02
-hold_stillness_speed_reference = 0.0
 terminate_on_success = false
-collision_terminates = true
 hold_activation_distance = 0.1
+hold_stillness_speed_reference = 0.0
 self_body_collision_enabled = true
 self_collision_debug = true
-self_body_link_names = PackedStringArray("openarm_body_link0")
-self_check_link_names = PackedStringArray("openarm_right_link3", "openarm_right_link4", "openarm_right_link5", "openarm_right_link6", "openarm_right_link7", "openarm_right_left_finger", "openarm_right_right_finger")
-manual_extra_joint_names = PackedStringArray("openarm_right_finger_joint1")
 manual_gripper_joint_name = &"openarm_right_finger_joint1"
 ik_manual_enabled = true
 ik_manual_mode = "teleop"
+measure_self_clearance = true
 
 [node name="Agent" type="Node" parent="." unique_id=56391477]
 script = ExtResource("2_agent")
@@ -54,7 +55,7 @@ metadata/_custom_type_script = "uid://bjhxcss2ima54"
 [node name="JointVelocity" type="Node" parent="Agent/ActionSpace" unique_id=957338224]
 script = ExtResource("7_continuous")
 action_name = "joint_velocity"
-size = 7
+size = 8
 exploration_low = -0.35
 exploration_high = 0.35
 use_custom_exploration_bounds = true
@@ -82,6 +83,16 @@ method_name = &"get_target_error_observation"
 script = ExtResource("8_method")
 observation_name = "target_orientation_error"
 method_name = &"get_target_orientation_error_observation"
+
+[node name="TargetErrorTool" type="Node" parent="Agent/ObservationSystem" unique_id=78770804]
+script = ExtResource("8_method")
+observation_name = "target_error_tool"
+method_name = &"get_target_error_tool_observation"
+
+[node name="GraspState" type="Node" parent="Agent/ObservationSystem" unique_id=78770805]
+script = ExtResource("8_method")
+observation_name = "grasp_state"
+method_name = &"get_grasp_state_observation"
 
 [node name="PreviousAction" type="Node" parent="Agent/ObservationSystem" unique_id=1324850493]
 script = ExtResource("8_method")
@@ -143,7 +154,6 @@ node_caller = NodePath("../../..")
 
 [node name="Smoothness" type="Node" parent="Agent/RewardSystem" unique_id=1438737165]
 script = ExtResource("10_smoothness")
-input_names = PackedStringArray("joint_velocity_0", "joint_velocity_1", "joint_velocity_2", "joint_velocity_3", "joint_velocity_4", "joint_velocity_5", "joint_velocity_6")
 penalty_scale = -0.005
 normalize_by_input_count = true
 term_name = "action_smoothness"
@@ -156,6 +166,7 @@ term_name = "time"
 control_mode = 1
 
 [node name="EndEffector" type="Marker3D" parent="." unique_id=1520264945]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.017830249, 0)
 
 [node name="MeshInstance3D" type="MeshInstance3D" parent="EndEffector" unique_id=1017964206]
 mesh = SubResource("SphereMesh_openarm")
@@ -163,3 +174,6 @@ surface_material_override/0 = SubResource("StandardMaterial3D_c7otc")
 
 [node name="ToolPose" type="Marker3D" parent="EndEffector" unique_id=1478404502]
 transform = Transform3D(0, 1, 0, 1, 0, 0, 0, 0, -1, 0, 0, 0)
+
+[node name="GraspCenter" type="Marker3D" parent="EndEffector/ToolPose" unique_id=1478404503]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.0075, 0, 0)

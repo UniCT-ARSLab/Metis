@@ -1,4 +1,4 @@
-extends Node
+extends Metis
 class_name RewardSystem
 
 @export var enabled := true

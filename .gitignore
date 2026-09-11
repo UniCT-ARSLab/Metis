@@ -5,6 +5,10 @@
 checkpoints
 .runtime/
 .research/
+.journale/
+godot/tests/local/
+godot/tools/local/
+godot/scenarios/robotarms/local/
 .metis/
 dist/
 python/build/
@@ -17,3 +21,5 @@ tmp
 research
 *.h5
 *.log
+__pycache__/
+*.py[cod]

@@ -1,8 +1,5 @@
 extends SceneTree
-## Unit tests for TargetSamplingRegion3D.allowed_cells (M1.1 hardening).
-## Verifies: empty allowlist = all cells; a set allowlist restricts sampling to exactly those
-## cells; fail-closed on a broken allowlist (out-of-range indices -> no cells, cell -1, never the
-## whole region); active_cells() reflects the effective set.
+## Unit tests for TargetSamplingRegion3D.allowed_cells.
 
 func _make_region(grid: Vector3i, allowed: PackedInt32Array):
 	var region = load("res://addons/metis/runtime/agent/sampling/TargetSamplingRegion3D.gd").new()
@@ -83,7 +80,7 @@ func _initialize() -> void:
 	if bad_sample.get("valid", true) != false:
 		failures.append("valid-field: broken-allowlist sample not marked invalid")
 
-	# 6) forced_cell IN the allowlist -> every draw is exactly that cell, marked valid (M5 demos).
+	# 6) forced_cell IN the allowlist -> every draw is exactly that cell, marked valid.
 	var rng3 := RandomNumberGenerator.new()
 	rng3.seed = 7
 	var forced_counts := {}

@@ -1,7 +1,5 @@
 extends CanvasLayer
-## Live debug HUD (top-left): the three success gates with pass/fail, hold counter, per-step
-## Reward, current-episode running total, and the previous episode's total, outcome and
-## distances. Renders only in a windowed env; skipped in headless training.
+## Shows the live success gates, rewards and previous episode outcome.
 
 @onready var _label: Label = $Label
 
@@ -22,11 +20,11 @@ var _last_ep_min_angle := 0.0
 var _last_step := -1
 var _last_outcome := "-"
 var _ep_had_success := false
+## Whether the glass was ever actually in the hand this episode.
+var _ep_had_grasp := false
 var _ep_had_collision := false
 var _ep_collision_src := ""
-## The controller publishes last_reward only after advancing physics, so _process sees the new
-## step_count while last_reward still belongs to the previous step. This flag keeps that stale
-## value from leaking into the next episode's running total.
+## Accounts for the one-step delay between step_count and last_reward.
 var _episode_closed := true
 
 
@@ -35,6 +33,8 @@ func _ready() -> void:
 	if DisplayServer.get_name() == "headless":
 		visible = false
 		set_process(false)
+		# The outcome latch also runs on the physics frame; headless envs must not pay for it.
+		set_physics_process(false)
 		return
 	_scenario = get_parent()
 	if _scenario != null:
@@ -48,9 +48,7 @@ func _on_episode_reset(_seed: int = 0) -> void:
 	_finalize_episode()
 
 
-## Close out the episode that just ended: add its final step reward (still pending in
-## last_reward), freeze total/outcome/distances, then zero the running state. The reset signal
-## fires before the arm returns home, so the distances read here are the real end-of-episode ones.
+## Adds the pending final reward before resetting the HUD state.
 func _finalize_episode() -> void:
 	if _episode_closed:
 		return
@@ -71,7 +69,11 @@ func _finalize_episode() -> void:
 	if _ep_had_collision:
 		_last_outcome = "COLLISION [%s]" % ("self" if _ep_collision_src == "self_body" else "table/env")
 	elif _ep_had_success:
-		_last_outcome = "REACHED"
+		# Reaching the pose and actually taking the glass are different results, and only the second
+		# one is the task. Kept apart so the render says which of the two happened.
+		_last_outcome = "GRASPED" if _ep_had_grasp else "REACHED (no grasp)"
+	elif _ep_had_grasp:
+		_last_outcome = "GRASP LOST"
 	else:
 		_last_outcome = "STALL / TIMEOUT"
 	_episode_reward = 0.0
@@ -79,6 +81,7 @@ func _finalize_episode() -> void:
 	_episode_min_angle = INF
 	_last_step = _controller.step_count if _controller != null else -1
 	_ep_had_success = false
+	_ep_had_grasp = false
 	_ep_had_collision = false
 	_ep_collision_src = ""
 
@@ -87,16 +90,33 @@ func _gate_flag(passed: bool) -> String:
 	return "OK  " if passed else "MISS"
 
 
+## Latched from the PHYSICS frame, not the idle one.
+##
+## `_succeeded` is raised and cleared inside the step, and with strict_physics_frames there is only
+## one idle frame per env step -- so a success could be set and reset between two _process calls and
+## never be seen. The outcome then fell through to the catch-all branch, and a completed grasp worth
+## +60 was displayed as "STALL / TIMEOUT". The reward and the grasp were real; only the label lied.
+func _latch_outcome_flags() -> void:
+	if _arm == null:
+		return
+	if _arm._succeeded:
+		_ep_had_success = true
+	if _arm.has_method("is_grasp_attached") and _arm.is_grasp_attached():
+		_ep_had_grasp = true
+	if _arm._collided:
+		_ep_had_collision = true
+		_ep_collision_src = str(_arm.get_last_collision_details().get("source", ""))
+
+
+func _physics_process(_delta: float) -> void:
+	_latch_outcome_flags()
+
+
 func _process(_delta: float) -> void:
 	if _arm == null or _label == null:
 		return
 
-	# Latch the outcome the instant it happens (survives continue-after-success / truncation).
-	if _arm._succeeded:
-		_ep_had_success = true
-	if _arm._collided:
-		_ep_had_collision = true
-		_ep_collision_src = str(_arm.get_last_collision_details().get("source", ""))
+	_latch_outcome_flags()
 
 	# Tracked before the step bookkeeping below, because _finalize_episode() reads these to freeze
 	# the ending episode's values.
@@ -150,7 +170,7 @@ func _process(_delta: float) -> void:
 		+ "progress: %.3f   level %.2f   step %d\n" % [progress, level, step]
 		+ "Reward  : %+7.2f   Episode %+8.1f\n" % [reward, _episode_reward]
 		+ "-- prev ep --\n"
-		+ "outcome : %-14s rew %+8.1f\n" % [_last_outcome, _last_ep_reward]
+		+ "outcome : %-18s rew %+8.1f\n" % [_last_outcome, _last_ep_reward]
 		+ "dist    : fin %6.2f   min %6.2f  cm\n" % [
 			_last_ep_final_distance * 100.0,
 			_last_ep_min_distance * 100.0]

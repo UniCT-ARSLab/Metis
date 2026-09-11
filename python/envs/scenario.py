@@ -126,6 +126,10 @@ class ScenarioGymEnv(gym.Env):
             raise RuntimeError(f"Godot spec failed: {msg}")
         return msg
 
+    def request_spec(self):
+        """Read the current live contract after any runtime configuration changes."""
+        return self._request_spec()
+
     def _spec_for_agent(self, agent_id):
         for item in self.agent_specs:
             if str(item["id"]) == agent_id:

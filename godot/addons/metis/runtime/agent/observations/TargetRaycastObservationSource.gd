@@ -1,4 +1,4 @@
-extends "res://addons/metis/runtime/agent/observations/ObservationSource.gd"
+extends ObservationSource
 class_name TargetRaycastObservationSource
 
 @export var target_group := "target"

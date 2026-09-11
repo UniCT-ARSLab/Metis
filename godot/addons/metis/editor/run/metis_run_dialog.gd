@@ -4,13 +4,7 @@ extends AcceptDialog
 
 ## Runs or evaluates a trained policy against a Godot scenario (python run.py).
 ##
-## Single page rather than a wizard: unlike training, running a policy is a short, repeated action --
-## pick a checkpoint, pick a scene, watch it. Every remaining run.py flag is still reachable under
-## "All options", built from the CLI specification exactly as the Train wizard's is.
-##
-## Unlike training, this launches ATTACHED and streams into the log panel: an evaluation is seconds
-## to minutes, so surviving the editor buys nothing and a lingering detached viewer would be a
-## nuisance. Stopping it therefore really does stop it.
+## Runs stay attached to the editor and stream output into this window.
 
 signal run_finished
 
@@ -33,8 +27,6 @@ const CURATED := [
 	["evaluation_mode", "Evaluation mode"],
 	["curriculum_level", "Curriculum level"],
 	["headless", "Headless"],
-	# Multi-agent is a mode, not a tweak: a scenario either drives several agents or it does not, and
-	# burying that under thirty collapsed options made a whole class of scene look unsupported.
 	["multi_agent", "Multi-agent scenario"],
 	["agent_id", "Single agent to drive"],
 	["multi_policy", "One policy per agent"],
@@ -63,7 +55,6 @@ var _log: TextEdit
 
 func _ready() -> void:
 	title = "Metis — Run"
-	# English by design; see plugin.gd. Keeps the editor dictionary out of our labels.
 	auto_translate_mode = Node.AUTO_TRANSLATE_MODE_DISABLED
 	min_size = Vector2i(660, 470)
 	get_ok_button().text = "Close"
@@ -169,11 +160,10 @@ func configure(manager: MetisRuntimeManager) -> void:
 		await ready
 
 
-# --- form ------------------------------------------------------------------------------------------
+# form
 
 func _reset() -> void:
 	if _runner.is_running():
-		# A run is still streaming; leave the form and the output exactly as they are.
 		return
 	OPTION_FORM.ensure_spec(_python(), _source_python_root())
 	_form = OPTION_FORM.new()
@@ -207,8 +197,6 @@ func _build_form() -> void:
 	for entry in CURATED:
 		var dest := str(entry[0])
 		if not spec.has(dest):
-			# Renamed or dropped in Python: skip rather than emit something the CLI would reject. It
-			# stays reachable under "All options" with its new name.
 			continue
 		var control := _form.add(grid, spec[dest], str(entry[1]))
 		_attach_browse(dest, grid, control)
@@ -225,11 +213,7 @@ func _build_form() -> void:
 
 
 func _wire_multi_agent_interlock() -> void:
-	## Grey out what the CLI would reject anyway.
-	##
-	## run.py raises "--multi-policy requires --multi-agent", and --policy-assignment means nothing
-	## without one policy per agent. Showing all three as equals invites a combination that dies on
-	## launch; a disabled control carrying the reason is the same information, earlier.
+	## Disables multi-policy settings until multi-agent mode is active.
 	var multi_agent := _control_for("multi_agent")
 	var multi_policy := _control_for("multi_policy")
 	var assignment := _control_for("policy_assignment")
@@ -255,7 +239,7 @@ func _control_for(dest: String) -> Control:
 
 
 func _skipped_dests() -> PackedStringArray:
-	## Curated fields plus the ones this window supplies itself, so neither is editable twice.
+	## Returns options already represented elsewhere in the window.
 	var skip := PackedStringArray(["godot_bin", "godot_project"])
 	for entry in CURATED:
 		skip.append(str(entry[0]))
@@ -263,8 +247,7 @@ func _skipped_dests() -> PackedStringArray:
 
 
 func _attach_browse(dest: String, grid: GridContainer, control: Control) -> void:
-	## Add a Browse… button beside the fields that name a file or directory. Done by wrapping the
-	## control after the fact so the generic form builder stays free of per-field knowledge.
+	## Adds file browsing without making the generic form builder path-aware.
 	if dest not in ["godot_scene", "checkpoint_dir", "checkpoint_path", "policy_path"]:
 		return
 	var index := control.get_index()
@@ -315,8 +298,7 @@ func _browse(dest: String, control: Control) -> void:
 
 
 func _apply_open_scene() -> void:
-	## Prefill from the scene open in the editor, when it is a trainable scenario. Same rule as the
-	## Train wizard: a scenario is a scene holding a BridgeServer, the TCP endpoint Python connects to.
+	## Uses the open scene when it exposes a BridgeServer.
 	var path := SCENARIO.open_scenario_path()
 	if path.is_empty():
 		_scene_note.text = ("Pick the scenario to run in — a scene containing a %s node."
@@ -327,7 +309,7 @@ func _apply_open_scene() -> void:
 	_update_preview()
 
 
-# --- command -----------------------------------------------------------------------------------
+# command
 
 func _project_root() -> String:
 	return ProjectSettings.globalize_path("res://").trim_suffix("/")
@@ -371,7 +353,7 @@ func _update_preview() -> void:
 	_preview.text = " ".join(parts)
 
 
-# --- launch ------------------------------------------------------------------------------------
+# launch
 
 func _on_launch() -> void:
 	if _runner.is_running():
@@ -382,8 +364,6 @@ func _on_launch() -> void:
 		return
 	var problems := _form.validation_errors()
 	if not problems.is_empty():
-		# Refused here rather than by argparse: a detached launch that dies on
-		# `invalid int value` leaves nothing on screen to read.
 		_status_label.text = "Fix these first — " + ", ".join(problems)
 		return
 	var metis_dir := ProjectSettings.globalize_path("res://.metis")
@@ -391,8 +371,7 @@ func _on_launch() -> void:
 	var command := _command_prefix()
 	var command_args := command.slice(1)
 	command_args.append_array(_build_args())
-	# A separate log and pidfile from training's: an evaluation run alongside a training run must not
-	# overwrite the file the training monitor is tailing.
+	# Evaluation and training may run at the same time.
 	var ok := _runner.start_command(
 		command[0],
 		command_args,
@@ -427,8 +406,7 @@ func _poll() -> void:
 	if _runner.is_running():
 		return
 	if not _runner.has_pidfile():
-		# The launcher writes the pidfile a moment after the spawn returns; until then "not running"
-		# means "not up yet", not "finished".
+		# The child can start before its pidfile is visible.
 		_status_label.text = "Starting…"
 		return
 	_poll_timer.stop()

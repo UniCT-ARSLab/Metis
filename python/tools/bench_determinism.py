@@ -1,10 +1,7 @@
 """Check that a lockstep tuning change does not alter simulation dynamics.
 
-Replays one fixed, seeded action sequence under two Godot configurations and diffs
-the observation trajectories. Pacing knobs (idle sleep, spin polls) change *when*
-the bridge polls, never the physics dt, so their diff must be exactly 0.0. A knob
-that changes dt (Engine.time_scale, Engine.physics_ticks_per_second) would instead
-diverge slowly and compound -- which no throughput number would ever reveal, and
+Replays one fixed, seeded action sequence under two Godot configurations and diffs the observation trajectories. Pacing knobs (idle sleep, spin polls) change *when* the bridge polls, never the physics dt, so their diff must be exactly 0.0. A knob
+that changes dt (Engine.time_scale, Engine.physics_ticks_per_second) would instead diverge slowly and compound -- which no throughput number would ever reveal, and
 which would mean the policy learned physics that differ from evaluation.
 
 Usage:

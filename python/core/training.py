@@ -80,9 +80,7 @@ def episode_step_indices(max_steps):
     return count() if max_steps == 0 else range(max_steps)
 
 
-# Section titles for --help, shared by every parser so the same topic never appears twice under two
-# spellings. The Godot add-on renders these as the headings of its "All options" list, which is why
-# they read as short noun phrases rather than sentences.
+# Shared section names keep CLI help and the Godot option list consistent.
 GROUP_GODOT = "Godot environment"
 GROUP_LOOP = "training loop"
 GROUP_EXPLORATION = "exploration"
@@ -205,7 +203,7 @@ def make_gradient_clipper(
     clip_k_c = tf.constant(float(grad_clip_k), dtype=tf.float32)
     clip_decay_c = tf.constant(float(grad_clip_decay), dtype=tf.float32)
     clip_warmup_c = tf.constant(float(warmup_steps), dtype=tf.float32)
-    # Created eagerly and captured by any traced graph that uses the returned closure.
+    # Create state before a traced graph captures the closure.
     ema = tf.Variable(0.0, dtype=tf.float32, trainable=False, name=f"clip_ema_{name}")
     seen = tf.Variable(0.0, dtype=tf.float32, trainable=False, name=f"clip_seen_{name}")
 
@@ -343,6 +341,62 @@ def add_training_budget_argument(parser):
     )
 
 
+def add_transition_snapshot_arguments(parser):
+    group = argument_group(parser, GROUP_CHECKPOINTS)
+    group.add_argument(
+        "--checkpoint-every-transitions",
+        type=int,
+        default=0,
+        help=(
+            "Publish an immutable policy snapshot every N accepted transitions. "
+            "Zero disables transition-indexed snapshots."
+        ),
+    )
+    group.add_argument(
+        "--transition-snapshot-dir",
+        default=None,
+        help=(
+            "Directory for immutable transitions-N policy snapshots. Required when "
+            "--checkpoint-every-transitions is enabled."
+        ),
+    )
+
+
+def validate_transition_snapshot_arguments(args):
+    interval = int(getattr(args, "checkpoint_every_transitions", 0) or 0)
+    if interval < 0:
+        raise ValueError("--checkpoint-every-transitions cannot be negative")
+    if interval == 0:
+        if getattr(args, "transition_snapshot_dir", None):
+            raise ValueError(
+                "--transition-snapshot-dir requires --checkpoint-every-transitions"
+            )
+        return False
+    if int(getattr(args, "total_timesteps", 0) or 0) < 1:
+        raise ValueError(
+            "Transition-indexed snapshots require a positive --total-timesteps budget"
+        )
+    if not getattr(args, "transition_snapshot_dir", None):
+        raise ValueError(
+            "--checkpoint-every-transitions requires --transition-snapshot-dir"
+        )
+    if getattr(args, "collector_mode", "sync") != "sync":
+        raise ValueError("Transition-indexed benchmark snapshots currently require sync collection")
+    if bool(getattr(args, "multi_agent", False)) or bool(
+        getattr(args, "multi_policy", False)
+    ):
+        raise ValueError("Transition-indexed benchmark snapshots require one agent and one policy")
+    warm_start_fields = (
+        "resume",
+        "resume_checkpoint",
+        "policy_path",
+        "initial_weights_path",
+    )
+    if any(bool(getattr(args, field, False)) for field in warm_start_fields):
+        raise ValueError("Transition-indexed benchmark snapshots require a fresh policy run")
+    return True
+
+
 class TrainingBudget:
     """Counts learner transitions and exposes a common optional stopping condition."""
 
@@ -420,8 +474,7 @@ def add_godot_render_argument(parser, *, default="light-gpu"):
 
 
 def add_best_checkpoint_arguments(parser):
-    # Kept separately: the curriculum arguments below open their own section, and argparse deprecated
-    # nesting one argument group inside another.
+    # Curriculum options use their own top-level argparse group.
     root = parser
     parser = argument_group(parser, GROUP_EVALUATION)
     parser.add_argument(
@@ -704,11 +757,7 @@ class BestCheckpointTracker:
         self._pending = None  # (future, episode, staged_prefix)
         self._pending_training_updates = None
         self._pending_replay_path = None
-        # Optional generic hook: when set to a callable exporter(dest_keras_path)->None, evaluation runs on
-        # a self-contained policy.keras the exporter writes (staged/promoted as a single artifact) instead of
-        # a tf checkpoint. Lets a policy whose runnable form is not the raw checkpoint (e.g. residual PPO,
-        # whose effective action is base+gated-residual) use the standard best-checkpoint machinery. Default
-        # None keeps every existing algorithm on the unchanged checkpoint path.
+        # Policies whose runnable form differs from their checkpoint may stage a Keras artifact.
         self._policy_exporter = None
         self._ready = None  # (result, staged_prefix, replay_path) awaiting promote or discard
         self._retained = []  # [(episode, prefix)] oldest first
@@ -833,7 +882,17 @@ class BestCheckpointTracker:
         if self.args.best_metric == "reward_mean":
             return reward_mean, success_rate
         if self.args.best_metric == "success_rate":
-            return success_rate, reward_mean
+            # The PLAIN success rate, which is what this option says it selects on.
+            #
+            # `success_rate` above resolves to `selection_success_rate` -- the rate floored by the
+            # worst region -- and that is right for `auto`, where the floor is what guards against a
+            # policy that only works in the easy corner. It is wrong here: on a task where no region
+            # succeeds yet, the floor is identically 0.00, so every evaluation ties and the tracker
+            # keeps whichever came first. Measured on openarm_transport_v1: it kept episode 800 with
+            # zero successes while an 8/20 at episode 1200 came and went, and checkpoint rotation
+            # then deleted it. Asking for `success_rate` has to give the metric that can vary.
+            plain_success = float(summary.get("success_rate", success_rate))
+            return plain_success, reward_mean
 
         progress = float(
             summary.get("regular_progress_mean", summary.get("progress_mean", -np.inf))
@@ -843,8 +902,7 @@ class BestCheckpointTracker:
                 summary.get("regular_collision_rate", summary.get("collision_rate", 0.0))
             )
             safe_progress = progress if np.isfinite(progress) else 0.0
-            # success first, then FEWER collisions, then progress, then reward. task_progress can
-            # only break ties among equally-safe checkpoints -- it can never outweigh a collision.
+            # Prefer success, safety, progress and reward in that order.
             return (success_rate, -collision_rate, safe_progress, reward_mean)
         if not np.isfinite(progress):
             return success_rate, reward_mean
@@ -876,8 +934,7 @@ class BestCheckpointTracker:
         candidate_key = self.comparison_key(result.summary)
         if not all(np.isfinite(value) for value in candidate_key):
             return False
-        # Never crown a fully collapsed policy: a 0-success run that collides on every episode is
-        # not a "best", no matter how high its task_progress reads.
+        # A policy with no success and universal collisions is never a best checkpoint.
         summary = result.summary
         success_rate = float(
             summary.get("selection_success_rate", summary.get("success_rate", 0.0))
@@ -896,8 +953,7 @@ class BestCheckpointTracker:
         training_episode = self.args.best_evaluation_training_episode
         if training_episode is None:
             training_episode = int(self.args.num_episodes)
-        # An explicit fixed episode always wins. Otherwise evaluate the same curriculum stage
-        # the learner is collecting from, rather than silently jumping to final difficulty.
+        # Without an override, evaluate at the learner's current curriculum stage.
         if (
             self.args.best_evaluation_training_episode is None
             and getattr(self.args, "best_evaluation_follow_curriculum", True)
@@ -911,8 +967,7 @@ class BestCheckpointTracker:
                 max_steps = 10_000
 
         runner = Path(__file__).resolve().parents[1] / "run.py"
-        # A staged policy.keras (artifact mode) is a standard runnable policy: run.py loads it generically
-        # via --load-from policy, with no knowledge of how it was produced. Otherwise load the tf checkpoint.
+        # Artifact mode evaluates a standalone Keras policy through run.py.
         if self._is_artifact_prefix(checkpoint_path):
             load_args = ["--load-from", "policy", "--policy-path", str(checkpoint_path)]
         else:
@@ -937,9 +992,7 @@ class BestCheckpointTracker:
             "--headless",
             "--multi-agent" if self.args.multi_agent else "--no-multi-agent",
         ]
-        # The evaluator rebuilds the networks from scratch before loading the checkpoint, so it needs
-        # the same architecture the trainer used. Without this the weights fail to load with a shape
-        # mismatch and every frozen evaluation dies, leaving the health monitor stuck in warming_up.
+        # Frozen evaluation must rebuild the same network architecture as training.
         network_layers = getattr(self.args, "network_layers", None)
         if network_layers:
             command.append("--network-layers")
@@ -1171,11 +1224,9 @@ class BestCheckpointTracker:
             )
             return False
         episode = int(episode)
-        # Stage now, not on promotion. The training directory prunes to --keep-checkpoints while the
-        # evaluation runs, so by the time a result comes back the evaluated bytes may already be gone -- and
-        # the evaluator itself has been reading a file the trainer was free to delete underneath it.
+        # Stage before evaluation so checkpoint pruning cannot remove the bytes in use.
         if self._policy_exporter is not None:
-            # Artifact mode: export a frozen, self-contained policy.keras of the CURRENT effective policy.
+            # Export a frozen snapshot of the current effective policy.
             staged_prefix = self.staging_directory / f"policy-{episode}.keras"
             try:
                 self._policy_exporter(staged_prefix)
@@ -1319,9 +1370,7 @@ class BestCheckpointTracker:
         self._ready = None
         episode = int(result.episode)
         if self._is_artifact_prefix(staged_prefix):
-            # Artifact mode: promote the staged bundle (policy.keras + coherent policy.json) as the single best
-            # deployable policy. No tf-shard retention / replay / checkpoint-state file -- the bundle IS the
-            # runnable best. The .json is copied first so a reader never sees policy.keras without its manifest.
+            # Publish the manifest before the Keras file so readers never see a partial bundle.
             best_artifact = self.directory / "policy.keras"
             staged_manifest = Path(staged_prefix).with_suffix(".json")
             if staged_manifest.is_file():
@@ -1453,8 +1502,7 @@ class BestCheckpointTracker:
     def _clear_staging(self):
         for index_path in self.staging_directory.glob("ckpt-*.index"):
             remove_checkpoint_files(index_path.with_suffix(""))
-        # Policy-artifact staging (residual best) leaves policy-N.keras (+ its sibling policy-N.json)
-        # instead of tf shards; a killed run can strand them, so clear those too.
+        # Remove staged policy bundles left by interrupted evaluations.
         for artifact in self.staging_directory.glob("policy-*.keras"):
             for path in (artifact, artifact.with_suffix(".json")):
                 try:
@@ -2465,8 +2513,7 @@ def apply_ready_best_checkpoint(tracker, wait_timeout=0.0):
     result = tracker.poll_ready(timeout=wait_timeout)
     if result is None:
         return None
-    # The promotion cooldown lives inside observe_evaluation now (per-transition update count, not
-    # cumulative). Always observe; the controller freezes promotion until enough NEW updates.
+    # The curriculum controller enforces its own per-transition cooldown.
     curriculum_promoted = tracker.curriculum.observe_evaluation(
         result.episode,
         result.summary,

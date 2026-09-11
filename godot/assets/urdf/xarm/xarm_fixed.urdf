@@ -48,14 +48,14 @@
 
     <link name="xarm_6_link">
         <visual>
-            <origin rpy="0 0 0" xyz="0.0 0.0 0.0" />
+            <origin rpy="0 3.14 0" xyz="0.0 0.0 0.0" />
             <geometry>
                 <mesh filename="package://xarm/meshes/link6.stl" scale="1.0 1.0 1.0" />
             </geometry>
             <material name="DarkGrey" />
         </visual>
         <collision>
-            <origin rpy="0 0 0" xyz="0.0 0.0 0.0" />
+            <origin rpy="0 3.14 0" xyz="0.0 0.0 0.0" />
             <geometry>
                 <mesh filename="package://xarm/meshes/link6.stl" scale="1.0 1.0 1.0" />
             </geometry>
@@ -307,7 +307,7 @@
     <child link="grip_left_link"/>
     <origin xyz="-0.0055 +0.0138 0.031" rpy="-1.57 0 0"/>
     <axis xyz="-1 0 0"/>
-    <limit lower="-1.57" upper="0" effort="1000" velocity="0.5"/>
+    <limit lower="-1.57" upper="0" effort="1000" velocity="15.0"/>
   </joint>
 
    <joint name="grip_right" type="revolute">

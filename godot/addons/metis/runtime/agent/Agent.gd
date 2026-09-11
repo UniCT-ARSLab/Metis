@@ -1,4 +1,4 @@
-extends Node
+extends Metis
 class_name Agent
 
 @export var actions : Dictionary = {}
@@ -184,6 +184,33 @@ func update_observation(observable:String, new_value:Variant) -> int:
 
 func get_observation_names() -> Array:
 	return _observation_names.duplicate()
+
+func get_observation_layout() -> Array:
+	var result := []
+	var offset := 0
+	for observable in _observation_names:
+		var flattened := []
+		_append_observation_value(flattened, _read_observation(observable))
+		var scalar_names := []
+		if flattened.size() == 1:
+			scalar_names.append(observable)
+		else:
+			for index in range(flattened.size()):
+				scalar_names.append("%s[%d]" % [observable, index])
+		result.append({
+			"name": observable,
+			"offset": offset,
+			"size": flattened.size(),
+			"scalar_names": scalar_names,
+		})
+		offset += flattened.size()
+	return result
+
+func get_observation_scalar_names() -> Array:
+	var result := []
+	for block in get_observation_layout():
+		result.append_array(block["scalar_names"])
+	return result
 	
 func get_observations() -> Dictionary:
 	var resolved := {}

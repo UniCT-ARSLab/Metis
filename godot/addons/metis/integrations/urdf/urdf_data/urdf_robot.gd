@@ -1,6 +1,6 @@
 @tool
 class_name URDFRobot
-extends Resource
+extends MetisURDFResource
 
 @export var name: String
 @export var links: Array[URDFLink] = []

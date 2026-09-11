@@ -1,9 +1,6 @@
 """Training health monitoring and conservative automatic recovery.
 
-The monitor deliberately treats deterministic/frozen policy evaluation as the
-authoritative signal. Episode returns and optimization losses remain useful
-telemetry, but they are too noisy and task-dependent to justify an automatic
-rollback on their own (except for NaN/Inf).
+The monitor deliberately treats deterministic/frozen policy evaluation as the authoritative signal.
 """
 
 import json

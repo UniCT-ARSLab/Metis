@@ -4,13 +4,7 @@ extends AcceptDialog
 
 ## Records manual expert demonstrations from a Godot scenario (python recorder.py).
 ##
-## Same single-page shape as the Run window, and for the same reason: this is a short, hands-on
-## action, not a configuration exercise. Every remaining recorder.py flag stays reachable under
-## "All options", built from the CLI specification.
-##
-## Recording is inherently NOT headless -- you drive the agent yourself -- so this window says so
-## rather than letting a headless run silently record nothing. The process is launched attached and
-## streams into the output panel, because a recording session ends when you are done with it.
+## Recording stays attached to the editor and always opens a Godot window for manual control.
 
 signal recording_finished
 
@@ -21,7 +15,7 @@ const SCENARIO := preload("res://addons/metis/editor/run/metis_scenario_scan.gd"
 const ENTRY_POINT := "record"
 const POLL_SECONDS := 0.5
 
-# Shown as dedicated fields; excluded from "All options" so no flag is editable twice.
+# Options already shown as dedicated fields.
 const CURATED := [
 	["output", "Output .npz"],
 	["append", "Append to it"],
@@ -58,7 +52,6 @@ var _log: TextEdit
 
 func _ready() -> void:
 	title = "Metis — Record"
-	# English by design; see plugin.gd. Keeps the editor dictionary out of our labels.
 	auto_translate_mode = Node.AUTO_TRANSLATE_MODE_DISABLED
 	min_size = Vector2i(660, 470)
 	get_ok_button().text = "Close"
@@ -174,7 +167,7 @@ func configure(manager: MetisRuntimeManager) -> void:
 		await ready
 
 
-# --- form ------------------------------------------------------------------------------------------
+# form
 
 func _reset() -> void:
 	if _runner.is_running():
@@ -221,8 +214,7 @@ func _build_form() -> void:
 		elif control is OptionButton:
 			control.item_selected.connect(func(_i): _update_preview())
 
-	# `headless` is withheld deliberately: a headless recording session has no window to drive, so it
-	# would record nothing but idle steps.
+	# A headless recording has no window to control.
 	_form.add_all(_all_box, ENTRY_POINT, _skipped_dests())
 	_apply_open_scene()
 
@@ -289,7 +281,7 @@ func _apply_open_scene() -> void:
 	_update_preview()
 
 
-# --- command -----------------------------------------------------------------------------------
+# command
 
 func _project_root() -> String:
 	return ProjectSettings.globalize_path("res://").trim_suffix("/")
@@ -333,7 +325,7 @@ func _update_preview() -> void:
 	_preview.text = " ".join(parts)
 
 
-# --- launch ------------------------------------------------------------------------------------
+# launch
 
 func _on_launch() -> void:
 	if _runner.is_running():
@@ -344,8 +336,6 @@ func _on_launch() -> void:
 		return
 	var problems := _form.validation_errors()
 	if not problems.is_empty():
-		# Refused here rather than by argparse: a detached launch that dies on
-		# `invalid int value` leaves nothing on screen to read.
 		_status_label.text = "Fix these first — " + ", ".join(problems)
 		return
 	var output := str(_form.value_of("output")).strip_edges()
@@ -357,8 +347,7 @@ func _on_launch() -> void:
 	var command := _command_prefix()
 	var command_args := command.slice(1)
 	command_args.append_array(_build_args())
-	# Its own log and pidfile, so a recording session and a training run can coexist without either
-	# overwriting the file the other is tailing.
+	# Recording and training may run at the same time.
 	var ok := _runner.start_command(
 		command[0],
 		command_args,
@@ -380,8 +369,7 @@ func _on_launch() -> void:
 
 func _on_stop() -> void:
 	_runner.stop()
-	# Killing the recorder mid-episode is not destructive the way stopping training is: recorder.py
-	# writes the .npz at the end, so an interrupted session simply saves nothing new.
+	# Interrupted sessions do not publish an incomplete dataset.
 	_status_label.text = "Stop requested. Any episodes not written yet are lost."
 	_stop_button.disabled = true
 

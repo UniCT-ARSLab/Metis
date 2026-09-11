@@ -258,10 +258,7 @@ def parse_args(trainer_variant):
     group.add_argument("--critic-audit-cell-margin-tol", type=float, default=0.0,
                         help="stop-after-critic-warmup gate: a cell fails if its MEAN good-vs-bad "
                         "margin is below -tol (0 = no clearly-negative cell allowed).")
-    # Generic dataset separation (task-agnostic):
-    #   --demo-path             complete transitions -> BC AND replay.
-    #   --demo-replay-only-path complete transitions -> replay ONLY (never in the BC sampler).
-    #   --demo-bc-path          (obs, action) pairs   -> BC imitation loss ONLY (never in replay).
+    # Demo sources can feed BC, replay, or both without crossing those boundaries.
 
     group = argument_group(parser, GROUP_DEMOS)
     group.add_argument("--demo-replay-only-path", action="append", default=[],
@@ -298,8 +295,7 @@ def parse_args(trainer_variant):
         group.add_argument("--demo-bc-weight-start", type=float, default=1.0)
         group.add_argument("--demo-bc-weight-end", type=float, default=0.05)
         group.add_argument("--demo-bc-decay-updates", type=int, default=100000)
-        # Separate Q-term schedule: grow the TD3 Q-maximisation weight 0 -> end over policy updates
-        # since the warmup, so it is NOT applied at full strength the instant the actor unfreezes.
+        # Ramp Q maximization only after the actor leaves critic warmup.
         group.add_argument("--demo-q-weight-start", type=float, default=0.0)
         group.add_argument("--demo-q-weight-end", type=float, default=1.0)
         group.add_argument("--demo-q-weight-ramp-updates", type=int, default=50000)
@@ -374,9 +370,7 @@ def parse_args(trainer_variant):
     add_godot_render_argument(parser)
     args = parser.parse_args()
     args.trainer_variant = trainer_variant
-    # scheduled_q_weight is wired into every deterministic loop. The critic-warmup audit and the
-    # separate-gradient telemetry are implemented for the SINGLE-policy loops only; fail loudly
-    # rather than silently ignore the flag on a multi-policy run.
+    # Multi-policy runs reject audit options they cannot execute faithfully.
     if getattr(args, "multi_policy", False):
         if getattr(args, "stop_after_critic_warmup", False):
             parser.error("--stop-after-critic-warmup is not supported with --multi-policy "
@@ -565,7 +559,7 @@ def initialize_actor_action_prior(actor, action_low, action_high, action_names, 
     high = np.asarray(action_high, dtype=np.float32)
     names = [str(name).lower() for name in action_names]
 
-    # Start DDPG from a sane driving policy: forward throttle and neutral steering.
+    # Driving policies start with forward throttle and neutral steering.
     kernel[:] = 0.0
     for idx, name in enumerate(names):
         if idx >= bias.shape[0]:
@@ -684,9 +678,7 @@ def update_episode_diagnostics(state, agent_info, agent_idx=None):
     scenario_component_values = scenario_terms.get("component_values", {}) or {}
     events = agent_info.get("events", {}) or {}
     terminal_reason = str(agent_info.get("terminal_reason", "")).strip().lower()
-    # ScenarioRewardSystem stores scalar component outputs below `component_values`; component
-    # diagnostics such as progress_stalled remain top-level dictionaries. Accept both shapes and
-    # the explicit event/terminal signals so collision accounting does not depend on reward weight.
+    # Read both scalar reward components and top-level event diagnostics.
     collision_term = (
         float(local_terms.get("collision", 0.0))
         + float(scenario_terms.get("collision", 0.0))
@@ -1167,8 +1159,7 @@ def soft_update(target_model, source_model, tau):
     if len(target_weights) != len(source_weights):
         raise ValueError("Target and source models must expose the same number of weights")
 
-    # Keep Polyak averaging on the TensorFlow device. get_weights()/set_weights()
-    # copies every tensor through NumPy, which stalls the GPU on every learner update.
+    # Keep Polyak averaging on-device to avoid a NumPy round trip per update.
     for target_weight, source_weight in zip(target_weights, source_weights):
         if target_weight.shape != source_weight.shape:
             raise ValueError(
@@ -1371,11 +1362,7 @@ def train_deterministic_step(
             else:
                 q_scale = tf.constant(1.0, dtype=tf.float32)
                 q_term = q_loss
-            # The Q-maximisation term is gated behind q_weight (a schedule that ramps 0 -> end over
-            # real policy updates). At q_weight==0 the just-unfrozen actor is pulled ONLY by the BC
-            # anchor, so a critic that has never scored the actor's own actions cannot yank it into a
-            # collision basin (the TD3+BC v4 collapse). q_weight defaults to 1.0 (unchanged for the
-            # plain variants and for callers that do not schedule it).
+            # Ramp Q pressure after warmup so BC anchors the first actor updates.
             weighted_q_term = float(q_weight) * q_term
 
             demo_batch = sample_demo_actions(demo_data, demo_batch_size)
@@ -1388,11 +1375,8 @@ def train_deterministic_step(
                     actor(demo_obs, training=True), action_low, action_high
                 )
                 per_sample_bc = tf.reduce_mean(tf.square(demo_policy_actions - demo_actions), axis=1)
-                # Q-filter is DELAYED: only when demo_q_filter AND q_filter_active (the caller keeps
-                # it off until N policy updates after the critic warmup). Before that, imitate every
-                # demo (unfiltered), so a not-yet-reliable critic cannot reject good demo actions.
-                # NOTE: the Q-filter gates the BC term only -- it is NOT a guard against the Q term
-                # collapsing the actor; that is what q_weight is for.
+                # Delay Q-filtering until the critic has observed post-warmup actor updates.
+                # The filter affects BC selection; q_weight controls the Q objective itself.
                 if demo_q_filter and q_filter_active:
                     expert_q = critic([demo_obs, demo_actions], training=False)
                     policy_demo_q = critic([demo_obs, demo_policy_actions], training=False)
@@ -1449,9 +1433,7 @@ def train_deterministic_step(
             ref_actions = scale_action_tensor(
                 bc_reference_actor(obs, training=False), action_low, action_high
             )
-            # policy_actions were computed inside the tape, BEFORE apply_gradients -> pre-update
-            # deviation. Re-run the (now updated) actor for the post-update deviation, so the drift
-            # caused by THIS step is visible, not just the drift before it.
+            # Recompute after apply_gradients to measure drift caused by this update.
             actor_bc_deviation_pre_update = float(
                 tf.reduce_mean(tf.norm(policy_actions - ref_actions, axis=1)).numpy()
             )
@@ -1462,8 +1444,7 @@ def train_deterministic_step(
                 tf.reduce_mean(tf.norm(post_actions - ref_actions, axis=1)).numpy()
             )
 
-    # Q-filter telemetry (floats for logs/dashboard/checkpoint). None means "not applicable this
-    # step" (the filter did not run) -- callers must render it as N/A, never as 0.
+    # None means the Q-filter did not run and should be displayed as N/A.
     if _qf_used:
         qf_total = int(_qf_mask.shape[0])
         qf_selected = int(tf.reduce_sum(_qf_mask).numpy())
@@ -1695,8 +1676,7 @@ def build_deterministic_learner_step(
     def learner_step(buffer, *, update_actor, learner_update, bc_weight=0.0,
                      q_filter_active=True, q_weight=1.0, gradient_telemetry=False,
                      bc_reference_actor=None):
-        # The compiled path serves the plain ddpg/td3 variants only (no BC, no Q-schedule); the
-        # demo/telemetry kwargs are accepted for a uniform call signature and ignored.
+        # Plain compiled variants accept the shared signature but do not use demo controls.
         obs, actions, rewards, next_obs, dones = buffer.sample(batch_size, action_dtype=np.float32)
         obs = tf.convert_to_tensor(obs, dtype=tf.float32)
         actions = tf.convert_to_tensor(actions, dtype=tf.float32)
@@ -1807,8 +1787,7 @@ def load_demonstration_arrays(paths, obs_dim, action_size, max_transitions=0):
                 if "agent_ids" in data
                 else None
             )
-            # Opaque per-transition trajectory id for group-balanced BC sampling (task-agnostic):
-            # an explicit group_ids key, else episode_indices, else all-zero for this file.
+            # Prefer explicit group ids, then episode ids, for balanced BC sampling.
             if "group_ids" in data:
                 file_groups = np.asarray(data["group_ids"]).astype(np.int64)
             elif "episode_indices" in data:
@@ -1840,7 +1819,7 @@ def load_demonstration_arrays(paths, obs_dim, action_size, max_transitions=0):
         reward_parts.append(rewards[:count])
         next_obs_parts.append(next_obs[:count])
         done_parts.append(dones[:count])
-        # Offset each file's group ids so trajectories stay disjoint across concatenated files.
+        # Keep trajectory ids disjoint when combining files.
         file_g = file_groups[:count] + group_offset
         group_parts.append(file_g)
         group_offset = int(file_g.max()) + 1 if len(file_g) else group_offset
@@ -1925,9 +1904,7 @@ def _run_critic_warmup_audit(args, checkpoint, checkpoint_manager, buffer, episo
         )
     obs = np.asarray(demo_validation["obs"], dtype=np.float32)
     expert_actions = np.asarray(demo_validation["actions"], dtype=np.float32)
-    # Per-sample cell/group ids for the per-cell worst-margin gate. Prefer the loaded dict; fall
-    # back to reading `cells` straight from the validation npz(s) (load_demonstration_arrays may
-    # not carry it). Gate degrades gracefully (win-rate only) if absent.
+    # Cell ids enable worst-cell auditing; without them the audit falls back to win rate.
     group_ids = demo_validation.get("cells") if isinstance(demo_validation, dict) else None
     if group_ids is None:
         parts = []
@@ -2188,13 +2165,12 @@ def run_async_ddpg(
     critic_losses = []
     critic2_losses = []
     bc_losses = []
-    # Q-filter is enabled only after this many REAL policy updates since the critic warmup ended.
+    # Count Q-filter delay in real actor updates after critic warmup.
     q_filter_start = max(0, int(getattr(args, "demo_q_filter_start_policy_updates", 0)))
     last_bc_weight = 0.0
     qf_last = {"active": False, "fraction": None, "selected": 0, "total": 0,
                "expert_q": None, "policy_q": None}
-    # Frozen snapshot of the warm-started (BC-clone) actor, used only for the actor-vs-BC deviation
-    # telemetry. Built lazily/cheaply here so the running actor can drift while this stays put.
+    # Keep a frozen BC reference for actor-deviation telemetry.
     bc_reference_actor = None
     if getattr(args, "gradient_telemetry_every", 0) > 0 and variant_uses_joint_bc(args.trainer_variant):
         bc_reference_actor = tf.keras.models.clone_model(actor)
@@ -2236,10 +2212,7 @@ def run_async_ddpg(
                     for _update in range(updates_due):
                         update_actor = recovery_runtime.should_update_policy()
                         next_update = int(critic_optimizer.iterations.numpy()) + 1
-                        # BC weight decays over POLICY updates since the warmup ended -- NOT over
-                        # critic updates. During the warmup (policy_updates_since_warmup == 0) it
-                        # stays at the start weight, so BC is not silently annealed before a single
-                        # policy step has run.
+                        # Decay BC weight only when the actor actually updates.
                         policy_updates_since_warmup = policy_update_count(
                             policy_update_counter
                         )
@@ -2249,11 +2222,9 @@ def run_async_ddpg(
                             args.demo_bc_weight_end,
                             args.demo_bc_decay_updates,
                         )
-                        # Delay the Q-filter: keep it OFF until enough real policy updates have run
-                        # since the warmup (before that the critic is not yet trustworthy).
+                        # Keep Q-filtering off until enough actor updates have run.
                         q_filter_active = policy_updates_since_warmup >= q_filter_start
-                        # Ramp the Q-maximisation term in from q_weight_start (0) over policy updates
-                        # so it is not applied at full strength the instant the actor unfreezes.
+                        # Ramp Q pressure from its configured start after warmup.
                         q_weight = (
                             scheduled_q_weight(
                                 policy_updates_since_warmup,
@@ -2299,8 +2270,7 @@ def run_async_ddpg(
                             bc_losses.append(result["bc_loss"])
                         warmup_completed = recovery_runtime.record_critic_update()
                         if warmup_completed and getattr(args, "stop_after_critic_warmup", False):
-                            # The critic warmup just finished and the actor is still the frozen BC
-                            # clone. Audit the critic and STOP before the first actor update.
+                            # Audit at the end of warmup, before the first actor update.
                             _run_critic_warmup_audit(
                                 args, checkpoint, checkpoint_manager, buffer, completed,
                                 actor, critic, critic2, demo_validation,
@@ -2663,8 +2633,7 @@ class DeterministicPolicyState:
     critic2: object = None
     target_critic2: object = None
     critic2_optimizer: object = None
-    # REAL policy updates since this policy's critic warmup ended -- drives BC-weight decay and the
-    # Q-filter delay (NOT the critic-update count, which advances during the warmup).
+    # Post-warmup actor updates drive BC decay and Q-filter delay.
     policy_updates_since_warmup: object = None
 
 
@@ -3588,9 +3557,7 @@ def run_sync_multi_policy_deterministic(
             flush=True,
         )
 
-    # Critic warmup runs (actor frozen) after ANY warm start of the actor: a checkpoint resume, a
-    # --policy-path load, OR a freshly-run behavior cloning. Otherwise random critics would wreck
-    # the warm-started actor on the first policy-gradient step.
+    # Any actor warm start freezes policy updates while fresh critics catch up.
     bc_will_run = bool(args.demo_bc_epochs > 0 and (not resume_checkpoint or args.demo_bc_on_resume))
     warmup_source = (
         "checkpoint resume" if resume_checkpoint
@@ -3743,8 +3710,7 @@ def run_sync_multi_policy_deterministic(
         flush=True,
     )
 
-    # Deterministic BC gate: after BC (+ saved BC actor), run ONE frozen evaluation and STOP
-    # before any RL update. Fails closed if BC did not actually run.
+    # The BC-only gate runs one frozen evaluation before any RL update.
     if getattr(args, "stop_after_bc", False):
         if not _bc_ran_policies:
             raise SystemExit(
@@ -4483,7 +4449,7 @@ def main(trainer_variant):
             )
             print(f"Prefilled replay buffer with demonstration transitions={added}", flush=True)
 
-        # Replay-ONLY demos: complete transitions added to the critics' replay but NEVER to BC.
+        # Replay-only demonstrations never enter the BC sampler.
         if getattr(args, "demo_replay_only_path", None) and args.demo_prefill and restored_replay_count == 0:
             replay_only = load_demonstration_arrays(
                 args.demo_replay_only_path, obs_dim, action_size, max_transitions=0)
@@ -4727,7 +4693,7 @@ def main(trainer_variant):
             recovery_handler.set_post_restore(recovery_runtime.post_restore)
 
         sync_throttle = SyncUpdateThrottle(args)
-        # Q-filter is enabled only after this many REAL policy updates since the critic warmup ended.
+        # Enable Q-filtering after this many post-warmup actor updates.
         q_filter_start = max(0, int(getattr(args, "demo_q_filter_start_policy_updates", 0)))
         policy_update_counter = checkpoint.policy_updates_since_warmup
         last_bc_weight = 0.0

@@ -53,6 +53,7 @@ from core.multi_policy import (
     write_multi_policy_manifest,
 )
 from core.policy_artifact import PolicyArtifactSaver, build_policy_metadata, load_policy_into_model
+from core.transition_snapshots import TransitionSnapshotPublisher
 from core.opponent_pool import OpponentPool, add_opponent_pool_arguments, validate_team_layout
 from core.replay_buffer import ReplayBuffer
 from core.training_health import OffPolicyRecoveryRuntime
@@ -69,6 +70,7 @@ from core.training import (
     TrainingBudget,
     BestCheckpointTracker,
     add_training_budget_argument,
+    add_transition_snapshot_arguments,
     add_best_checkpoint_arguments,
     add_training_health_arguments,
     apply_ready_best_checkpoint,
@@ -88,6 +90,7 @@ from core.training import (
     restore_replay_buffer,
     save_replay_snapshot,
     validate_async_arguments,
+    validate_transition_snapshot_arguments,
     argument_group,
     GROUP_CHECKPOINTS,
     GROUP_DEMOS,
@@ -305,6 +308,7 @@ def parse_args():
     group.add_argument("--keep-checkpoints", type=int, default=5)
     group.add_argument("--best-checkpoint-window", type=int, default=None, help=argparse.SUPPRESS)
     group.add_argument("--resume", action=argparse.BooleanOptionalAction, default=False)
+    add_transition_snapshot_arguments(parser)
 
     group = argument_group(parser, GROUP_REPLAY)
     group.add_argument("--save-replay-buffer", action=argparse.BooleanOptionalAction, default=True)
@@ -388,7 +392,7 @@ def parse_args():
     add_tensorflow_runtime_arguments(parser, include_compile_learner=True)
     add_godot_render_argument(parser)
 
-    # Accepted for command compatibility with DDPG runs; SAC exploration is entropy-based.
+    # Kept for CLI compatibility; SAC exploration is entropy-driven.
 
     group = argument_group(parser, GROUP_EXPLORATION)
     group.add_argument("--exploration-noise", type=float, default=None, help=argparse.SUPPRESS)
@@ -591,16 +595,11 @@ def build_sac_learner_step(
     action_low_tensor = tf.constant(np.asarray(action_low, dtype=np.float32).reshape(1, -1))
     action_high_tensor = tf.constant(np.asarray(action_high, dtype=np.float32).reshape(1, -1))
     target_entropy_c = tf.constant(float(target_entropy), dtype=tf.float32)
-    # Alpha floor: auto-tuned alpha can decay too low late in training, collapsing entropy and
-    # letting Q drift upward. Clamp log_alpha so alpha never falls below min_alpha.
+    # Keep enough entropy late in training to avoid a brittle deterministic policy.
     alpha_floor_active = bool(min_alpha and min_alpha > 0.0)
     log_min_alpha_c = tf.constant(
         float(np.log(min_alpha)) if alpha_floor_active else 0.0, dtype=tf.float32)
-    # CAPS (Conditioning for Action Policy Smoothness): penalize the deterministic policy for
-    # producing different actions on temporally-adjacent states (temporal) and on nearby states
-    # (spatial). This trains a smooth, jitter-free controller that holds steady at the target
-    # (where consecutive states are ~identical, so the actions must be too). Uses the mean action
-    # tanh(mu), not the sampled one.
+    # CAPS regularizes mean actions across adjacent and nearby states.
     caps_enabled = bool(caps) and (caps_lambda_temporal > 0.0 or caps_lambda_spatial > 0.0)
     caps_lt_c = tf.constant(float(caps_lambda_temporal), dtype=tf.float32)
     caps_ls_c = tf.constant(float(caps_lambda_spatial), dtype=tf.float32)
@@ -611,27 +610,18 @@ def build_sac_learner_step(
         float(actor_anchor_log_std_coef), dtype=tf.float32)
     anchor_actor = None
     if actor_anchor_enabled:
-        # Snapshot the policy after checkpoint/policy loading. The frozen copy stays outside
-        # the checkpoint so recovery restores the trainable actor without moving its trust
-        # reference. A later process resume deliberately establishes a new reference.
+        # Recovery must not move the frozen trust-region reference with the actor.
         anchor_actor = tf.keras.models.clone_model(actor)
         anchor_actor.set_weights(actor.get_weights())
         anchor_actor.trainable = False
 
-    # Build slots eagerly (outside any graph) so a deferred checkpoint restore populates them
-    # deterministically and no variable is created inside the traced function after resume.
+    # Create optimizer slots before tracing or deferred restore.
     critic1_optimizer.build(critic1.trainable_variables)
     critic2_optimizer.build(critic2.trainable_variables)
     actor_optimizer.build(actor.trainable_variables)
     alpha_optimizer.build([log_alpha])
 
-    # -- gradient clipping: safety net against deadly-triad Q-divergence to NaN ------------
-    # The fixed cap (grad_clip_norm) is a hard backstop. Adaptive mode instead clips at
-    # grad_clip_k * EMA(grad_norm), bounded by that hard cap -- so the framework needs no
-    # per-scenario tuning of the norm: each network's own gradient scale is tracked, while the
-    # hard cap still bounds every finite update. The EMA ignores non-finite norms so NaN/Inf
-    # cannot poison its state; finite spikes can affect the EMA but still cannot loosen the
-    # threshold past the hard value.
+    # Adaptive clipping follows each network's gradient scale but never exceeds the hard cap.
     has_hard = bool(grad_clip_norm and grad_clip_norm > 0.0)
     clip_enabled = has_hard or bool(grad_clip_adaptive)
     hard_clip_c = tf.constant(float(grad_clip_norm) if has_hard else 0.0, dtype=tf.float32)
@@ -640,7 +630,7 @@ def build_sac_learner_step(
     clip_warmup_c = tf.constant(25.0, dtype=tf.float32)
 
     def _make_clipper(name):
-        # EMA state persists across calls (created eagerly, captured by the traced graph).
+        # The traced update keeps this EMA across calls.
         ema = tf.Variable(0.0, dtype=tf.float32, trainable=False, name=f"clip_ema_{name}")
         seen = tf.Variable(0.0, dtype=tf.float32, trainable=False, name=f"clip_seen_{name}")
 
@@ -762,8 +752,7 @@ def build_sac_learner_step(
             if alpha_floor_active:
                 log_alpha.assign(tf.maximum(log_alpha, log_min_alpha_c))
         else:
-            # Fixed alpha: skip the entropy-coefficient update entirely. The auto-tuner is
-            # unstable on this task (alpha runs away up or collapses), so hold it constant.
+            # Fixed alpha bypasses the entropy-coefficient optimizer.
             alpha_loss = tf.constant(0.0, dtype=tf.float32)
         return actor_loss, critic1_loss, critic2_loss, alpha_loss, tf.exp(log_alpha)
 
@@ -996,13 +985,13 @@ def _run_stop_after_bc_eval(
     except Exception as exc:
         print(f"stop-after-bc: frozen evaluation raised: {exc}", flush=True)
     if result is None or not getattr(result, "summary", None):
-        # Fail closed: no summary means the gate did NOT pass -> non-zero exit.
+        # A missing evaluation summary cannot satisfy the BC gate.
         raise SystemExit(
             "stop-after-bc: frozen evaluation produced no summary (failed/timeout); "
             "exiting non-zero without a gate result."
         )
     s = result.summary
-    # Generic reset/cell breakdowns as produced by the task's eval -- never hardcode cell ids.
+    # Report whatever reset and cell labels the task provides.
     breakdown = {
         key: s[key]
         for key in (
@@ -2198,9 +2187,7 @@ def run_sync_multi_policy_sac(
             flush=True,
         )
         if args.actor_anchor_coef > 0.0:
-            # The first learner instances were built before checkpoint restoration. Rebuild
-            # them now so every policy anchors to its restored actor, not to random startup
-            # weights.
+            # Rebuild learners so trust references use restored actor weights.
             for state in policy_states.values():
                 state.learner = build_sac_learner_step(
                     state.actor,
@@ -2316,17 +2303,13 @@ def run_sync_multi_policy_sac(
     last_completed_episode = start_episode
     last_saved_episode = None
     interrupted = False
-    # Action selection goes through the traced, CPU-pinned sample graph, like the async paths.
-    # Calling sample_actor eagerly instead makes TF execute RandomStandardNormal as a wrapped
-    # single-op function; with a GPU present that function is multi-device (the shape input is
-    # host-side), and every call instantiates a partitioned function that carries a copy of the
-    # whole function library -- ~74 kB leaked per action, ~5 MB/s at 70 actions/s.
+    # A traced CPU sampler avoids repeated multi-device function construction.
     sample_fn_cache = {}
 
     def policy_sample_fn(policy_id, actor):
         cached = sample_fn_cache.get(policy_id)
         if cached is None or cached[0] is not actor:
-            # Keyed on the model object so a checkpoint that swaps the actor retraces once.
+            # Replacing the actor invalidates its cached sampler once.
             cached = (
                 actor,
                 build_sac_sample_fn(
@@ -2786,6 +2769,7 @@ def run_sync_multi_policy_sac(
 
 def main():
     args = parse_args()
+    transition_snapshots_enabled = validate_transition_snapshot_arguments(args)
     budget = TrainingBudget(args.total_timesteps)
     validate_async_arguments(args)
     if args.policy_update_every < 1:
@@ -2896,6 +2880,18 @@ def main():
             args.checkpoint_dir,
             build_policy_metadata("sac", env0),
         )
+        transition_publisher = (
+            TransitionSnapshotPublisher(
+                args.transition_snapshot_dir,
+                interval=args.checkpoint_every_transitions,
+                budget=args.total_timesteps,
+                backend="metis",
+                algorithm="sac",
+            )
+            if transition_snapshots_enabled
+            else None
+        )
+        transition_policy_metadata = build_policy_metadata("sac", env0)
         critic1 = build_continuous_critic(obs_dim=obs_dim, action_size=action_size)
         critic2 = build_continuous_critic(obs_dim=obs_dim, action_size=action_size)
         target_critic1 = build_continuous_critic(obs_dim=obs_dim, action_size=action_size)
@@ -3048,10 +3044,7 @@ def main():
                 flush=True,
             )
 
-        # A freshly-run behavior cloning warm-starts the actor from the demos, so the critics (which
-        # start random) must catch up on the prefilled replay with the actor + alpha FROZEN before
-        # SAC begins -- otherwise the first policy-gradient steps chase a garbage Q and wreck the BC
-        # actor. Resume / actor warm-start trigger the same warmup.
+        # Keep a warm-started actor frozen while fresh critics catch up on replay.
         critic_warmup_source = (
             "checkpoint resume"
             if resume_checkpoint
@@ -3073,7 +3066,7 @@ def main():
                 flush=True,
             )
 
-        # Persist the BC-pretrained actor BEFORE any SAC/warmup update touches it.
+        # Preserve the pure BC actor before warmup or SAC updates.
         if run_behavior_cloning:
             bc_actor_path = (
                 args.bc_actor_weights_path
@@ -3083,7 +3076,7 @@ def main():
             actor.save_weights(bc_actor_path)
             print(f"Saved BC actor weights (pre-SAC): {bc_actor_path}", flush=True)
 
-        # Gate: BC + frozen evaluation, then STOP before the SAC loop.
+        # The BC-only gate evaluates once and exits before SAC.
         if args.stop_after_bc:
             if not run_behavior_cloning:
                 raise SystemExit(
@@ -3208,20 +3201,15 @@ def main():
         if recovery_handler is not None:
             recovery_handler.set_post_restore(recovery_runtime.post_restore)
 
-        # Transition-based update throttle so the sync path runs the SAME updates-per-transition (UTD)
-        # as async (update_every); otherwise sync did 1 update/transition and diverged on high rewards.
+        # Sync and async share the same transition-based update ratio.
         sync_throttle = SyncUpdateThrottle(args)
         sync_learner_updates = 0
         last_saved_episode = None
-        # Action selection goes through the traced, CPU-pinned sample graph, like the async path.
-        # Calling sample_actor eagerly instead makes TF execute RandomStandardNormal as a wrapped
-        # single-op function; with a GPU present that function is multi-device (the shape input is
-        # host-side), and every call instantiates a partitioned function carrying a copy of the
-        # whole function library -- ~74 kB leaked per action, ~5 MB/s at 70 actions/s.
+        # Use a traced CPU sampler to avoid repeated GPU-side function construction.
         sync_sample_fns = {}
 
         def sync_sample_fn(model, deterministic=False):
-            # Keyed on the model object, so a swapped opponent or restored actor retraces once.
+            # A swapped or restored actor retraces only its own sampler.
             key = (id(model), bool(deterministic))
             cached = sync_sample_fns.get(key)
             if cached is None or cached[0] is not model:
@@ -3240,28 +3228,12 @@ def main():
                 sync_sample_fns[key] = cached
             return cached[1]
 
-        # Envs auto-reset the moment they terminate, exactly like an SB3 VecEnv, instead of idling
-        # until the slowest env in the batch finishes. With an episode-wide barrier a collision on
-        # step 10 parked that env for the remaining 290 steps: measured barrier utilisation was 40%,
-        # and the tail of every barrier was fed by a single trajectory. The batch is therefore only a
-        # step budget now -- episodes are never aligned across envs, and `sync_completed_episodes`
-        # (not the batch index) is what counts toward --num-episodes.
-        # One sync iteration runs every env at once, so `episode` counts BARRIERS, not
-        # episodes. The Godot curriculum keys on a global episode count (openarm_scenario.gd:
-        # "the REAL global episode count"), which is what the async path sends; handing it the
-        # barrier index paces every episode-driven schedule in the scene len(envs) times slower.
-        # Envs auto-reset the moment they terminate, like an SB3 VecEnv, instead of idling until
-        # the slowest env in the batch finishes. With an episode-wide barrier a collision on step
-        # 10 parked that env for the remaining 290 steps: measured batch utilisation was 40%, and
-        # the tail of every batch was fed by a single trajectory. A batch is only a step budget
-        # now -- episodes never align across envs, and `sync_completed_episodes` (not the batch
-        # index) is what counts toward --num-episodes.
+        # Environments reset independently; batches are step windows, not episode barriers.
+        # Curriculum progress follows completed episodes rather than batch count.
         sync_next_episode = start_episode
         sync_completed_episodes = start_episode
         env_states = []
-        # A batch is only a REPORTING window: episodes span batches, so shortening it costs no
-        # telemetry. These accumulators therefore live across batches and are cleared when a
-        # report actually goes out.
+        # Episode metrics span reporting windows and reset only after publication.
         batch_step_budget = (
             args.sync_batch_steps
             if getattr(args, "sync_batch_steps", 0) > 0
@@ -3500,12 +3472,21 @@ def main():
                     state["obs"] = next_obs
                     state["done"] = done
                     if done:
-                        # Harvest now, reset after the whole step batch has been received:
-                        # `stepper` still has in-flight replies for the other envs, and injecting a
-                        # reset mid-drain would interleave it with them on the lockstep connection.
+                        # Drain all in-flight replies before sending reset commands.
                         finished_states.append(dict(state))
                         sync_completed_episodes += 1
                         pending_resets.append(state["env_idx"])
+
+                    if transition_publisher is not None:
+                        transition_publisher.publish_due(
+                            budget.collected,
+                            sync_completed_episodes,
+                            lambda directory, _threshold: PolicyArtifactSaver(
+                                actor,
+                                directory,
+                                transition_policy_metadata,
+                            ).save(sync_completed_episodes),
+                        )
 
                     if len(buffer) >= max(args.replay_warmup, args.batch_size):
                         update_policy = recovery_runtime.should_update_policy()
@@ -3541,8 +3522,7 @@ def main():
             batch_transitions = budget.collected - batch_transitions_start
             batch_env_steps = max(step_idx + 1, 1)
             if not finished_states:
-                # No episode closed in this window: keep the accumulators running -- they are only
-                # cleared once a report goes out -- and try again after the next window.
+                # Keep metrics until at least one complete episode can be reported.
                 continue
             entropy_gap = None
             mean_log_prob = None
@@ -3668,6 +3648,12 @@ def main():
                 break
 
         completed_episode = last_completed_episode if last_completed_episode is not None else start_episode
+        if (
+            transition_publisher is not None
+            and budget.exhausted
+            and not transition_publisher.complete
+        ):
+            raise RuntimeError("Transition budget ended before every policy snapshot was published")
         if last_saved_episode != completed_episode:
             save_training_checkpoint(
                 checkpoint,

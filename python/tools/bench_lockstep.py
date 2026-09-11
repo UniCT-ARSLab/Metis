@@ -1,10 +1,6 @@
 """Measure Godot<->Python bridge round-trip latency in isolation.
 
-No TensorFlow, no replay buffer, no learner: just the bridge. Actions come from a
-seeded RNG, so a run is reproducible and the only cost measured is the transport
-plus Godot's own step. Instance startup happens before the timing window opens,
-which is what makes the aggregate number trustworthy -- driving this from the
-training logs instead gives per-episode windows too short to be a throughput.
+No TensorFlow, no replay buffer, no learner: just the bridge. Actions come from a seeded RNG, so a run is reproducible and the only cost measured is the transport plus Godot's own step. Instance startup happens before the timing window opens, which is what makes the aggregate number trustworthy -- driving this from the training logs instead gives per-episode windows too short to be a throughput.
 
 Usage:
   python python/tools/bench_lockstep.py --godot-bin /path/to/godot --num-envs 1 4 8
@@ -68,8 +64,7 @@ def run_cell(args, num_envs, sleep_usec, spin_polls):
     envs = [ScenarioGymEnv(port=port) for port in ports]
     pids = [item["proc"].pid for item in manager.processes]
 
-    # Startup is deliberately outside the window: including it makes the
-    # denominator depend on num_envs and the aggregate number meaningless.
+    # startup is deliberately outside the window: including it makes the denominator depend on num_envs and the aggregate number meaningless.
     cpu_before = [_proc_cpu_seconds(pid) for pid in pids]
     per_env_latencies = [[] for _ in envs]
     threads = [
@@ -115,8 +110,7 @@ def run_cell(args, num_envs, sleep_usec, spin_polls):
         "p50": pct(0.50),
         "p90": pct(0.90),
         "p99": pct(0.99),
-        # Cores' worth of CPU the Godot instances burned, summed. With
-        # sleep=0 each instance spins, so this is what a low sleep costs.
+        # Cores' worth of CPU the Godot instances burned, summed. With sleep=0 each instance spins, so this is what a low sleep costs.
         "godot_cores": godot_cpu / wall,
     }
 

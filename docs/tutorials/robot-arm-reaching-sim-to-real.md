@@ -6,7 +6,7 @@ object. The policy does not rely on proximity sensors that the real robot lacks.
 
 The repository includes a working URDF-based XArm grasping example:
 
-- [`urdf_robot_arm_agent.gd`](../../godot/agents/RobotArms/urdf_robot_arm_agent.gd)
+- [`urdf_robot_arm_agent.gd`](../../godot/addons/metis/integrations/urdf/agent/urdf_robot_arm_agent.gd)
 - [`x_arm_agent.tscn`](../../godot/agents/RobotArms/xarm/x_arm_agent.tscn)
 - [`XarmScenario.tscn`](../../godot/scenarios/robotarms/XarmScenario.tscn)
 - [`xarm_scenario.gd`](../../godot/scenarios/robotarms/xarm_scenario.gd)

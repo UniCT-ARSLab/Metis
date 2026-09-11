@@ -153,6 +153,7 @@ func _initialize() -> void:
 			"mimic_right_ok": mimic_right_ok,
 			"mimic_tendon_ok": mimic_tendon_ok,
 			"reset_position": reset_position,
+			"reward_terms": reward_terms,
 			"reward_terms_ok": reward_terms_ok,
 			"reward_caller_ok": reward_caller_ok,
 			"home_reset_ok": home_reset_ok,

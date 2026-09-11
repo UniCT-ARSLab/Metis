@@ -1,4 +1,4 @@
-extends "res://addons/metis/runtime/agent/scenario_reward_components/ScenarioRewardComponent.gd"
+extends ScenarioRewardComponent
 class_name TargetDistanceDeltaScenarioReward
 
 ## Method exposed by the controlled agent that returns its current target distance.

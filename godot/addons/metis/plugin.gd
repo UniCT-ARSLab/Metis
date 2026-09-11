@@ -23,6 +23,11 @@ const RECORD_DIALOG_SCRIPT := preload(
 	"res://addons/metis/editor/run/metis_record_dialog.gd")
 const RUN_STATE := preload("res://addons/metis/editor/run/metis_run_state.gd")
 const BRANDING := preload("res://addons/metis/editor/metis_branding.gd")
+const METIS_MENU_TRAIN := 0
+const METIS_MENU_RUN := 1
+const METIS_MENU_RECORD := 2
+const METIS_MENU_RUNTIME_SETUP := 3
+const METIS_MENU_HEADER := 100
 
 var _inspector_plugin: EditorInspectorPlugin
 var _urdf_importer: EditorImportPlugin
@@ -30,12 +35,16 @@ var _urdf_dock: VBoxContainer
 var _stl_loader: ResourceFormatLoader
 var _runtime_manager: MetisRuntimeManager
 var _runtime_dialog: MetisRuntimeSetupDialog
-var _metis_toolbar: HBoxContainer
-var _toolbar_in_container := false
-# Untyped on purpose (it is a MetisTrainDialog): keeps plugin.gd from depending on that class_name
-# being registered before the project rescan, and lets us call its custom configure() dynamically.
+var _metis_menu: PopupMenu
+var _metis_tools_menu: PopupMenu
+var _main_menu_bar: MenuBar
+var _renderer_selector: OptionButton
+var _main_screen_button_texts: Dictionary = {}
+var _main_screen_buttons: Control
+var _title_bar: Container
+var _layout_refresh_serial := 0
+# These dialogs may load before their class_name cache is refreshed.
 var _train_dialog
-# Untyped for the same reason as _train_dialog: its class_name may not be registered yet.
 var _monitor_dialog
 var _run_dialog
 var _record_dialog
@@ -57,7 +66,6 @@ func _enter_tree() -> void:
 	_runtime_dialog = RUNTIME_SETUP_DIALOG_SCRIPT.new()
 	EditorInterface.get_base_control().add_child(_runtime_dialog)
 	_runtime_dialog.configure(_runtime_manager)
-	add_tool_menu_item("Metis Runtime Setup…", _show_runtime_setup)
 
 	_train_dialog = TRAIN_DIALOG_SCRIPT.new()
 	EditorInterface.get_base_control().add_child(_train_dialog)
@@ -75,34 +83,32 @@ func _enter_tree() -> void:
 	EditorInterface.get_base_control().add_child(_record_dialog)
 	_record_dialog.configure(_runtime_manager)
 
-	_metis_toolbar = HBoxContainer.new()
-	# Metis's own labels are English by design -- the CLI flags, logs and docs they name are English
-	# too. Left on AUTO, Godot runs them through the EDITOR's dictionary, which translates any string
-	# that happens to collide with its own vocabulary: on an Italian editor "Run" rendered as
-	# "Esegui" while "Train" and "Record" stayed put, giving a half-translated toolbar. DISABLED
-	# propagates to children that are themselves AUTO, so one call covers the buttons.
-	_metis_toolbar.auto_translate_mode = Node.AUTO_TRANSLATE_MODE_DISABLED
-	var brand := BRANDING.logo_rect(18)
-	brand.tooltip_text = "Metis"
-	_metis_toolbar.add_child(brand)
-	_add_toolbar_button("Train", _show_train)
-	_add_toolbar_button("Run", _show_run)
-	_add_toolbar_button("Record", _show_record)
-	_metis_toolbar.add_child(VSeparator.new())
-	# Preferred: drop the bar immediately LEFT of the editor's run/play buttons. If the run bar can't
-	# be located (Godot internals change), fall back to the standard top toolbar container.
+	# Keep labels consistent with the CLI, regardless of the editor language.
+	_metis_menu = _build_metis_popup()
+	_metis_menu.title = "Metis"
+	_metis_tools_menu = _build_metis_popup()
+	add_tool_submenu_item("Metis", _metis_tools_menu)
+	# Appending the popup places Metis after Help without replacing Godot's own toolbar.
 	var run_bar := _find_run_bar(EditorInterface.get_base_control())
 	if run_bar != null and run_bar.get_parent() != null:
 		var run_parent := run_bar.get_parent()
-		run_parent.add_child(_metis_toolbar)
-		run_parent.move_child(_metis_toolbar, run_bar.get_index())
-		_toolbar_in_container = false
-	else:
-		add_control_to_container(CONTAINER_TOOLBAR, _metis_toolbar)
-		_toolbar_in_container = true
-		var toolbar_parent := _metis_toolbar.get_parent()
-		if toolbar_parent != null:
-			toolbar_parent.move_child(_metis_toolbar, 0)
+		_title_bar = run_parent as Container
+		var menu_bar := _find_menu_bar_child(run_parent)
+		if menu_bar != null:
+			menu_bar.add_child(_metis_menu)
+			_main_menu_bar = menu_bar
+		_renderer_selector = _find_renderer_selector(run_parent)
+		_capture_main_screen_buttons(run_parent)
+	if _metis_menu.get_parent() == null:
+		push_warning("Metis could not locate Godot's main MenuBar; use Project > Tools > Metis.")
+		_metis_menu.queue_free()
+		_metis_menu = null
+	var editor_root := EditorInterface.get_base_control()
+	if not editor_root.resized.is_connected(_schedule_metis_menu_visibility):
+		editor_root.resized.connect(_schedule_metis_menu_visibility)
+	if not main_screen_changed.is_connected(_on_main_screen_changed):
+		main_screen_changed.connect(_on_main_screen_changed)
+	_schedule_metis_menu_visibility()
 
 	var selection := EditorInterface.get_selection()
 	if not selection.selection_changed.is_connected(_on_selection_changed):
@@ -117,12 +123,22 @@ func _enter_tree() -> void:
 
 
 func _exit_tree() -> void:
-	remove_tool_menu_item("Metis Runtime Setup…")
-	if _metis_toolbar != null:
-		if _toolbar_in_container:
-			remove_control_from_container(CONTAINER_TOOLBAR, _metis_toolbar)
-		_metis_toolbar.queue_free()
-	_metis_toolbar = null
+	remove_tool_menu_item("Metis")
+	_set_main_screen_compact(false)
+	var editor_root := EditorInterface.get_base_control()
+	if editor_root.resized.is_connected(_schedule_metis_menu_visibility):
+		editor_root.resized.disconnect(_schedule_metis_menu_visibility)
+	if main_screen_changed.is_connected(_on_main_screen_changed):
+		main_screen_changed.disconnect(_on_main_screen_changed)
+	if _metis_menu != null:
+		_metis_menu.queue_free()
+	_metis_menu = null
+	_metis_tools_menu = null
+	_main_menu_bar = null
+	_renderer_selector = null
+	_main_screen_button_texts.clear()
+	_main_screen_buttons = null
+	_title_bar = null
 	if _train_dialog != null:
 		_train_dialog.queue_free()
 	_train_dialog = null
@@ -160,10 +176,7 @@ func _exit_tree() -> void:
 	_inspector_plugin = null
 
 	if _stl_loader != null:
-		# ResourceLoader may tear down its list before editor plugins receive
-		# _exit_tree(). It owns this reference for the editor lifetime, and the
-		# extension check in _register_stl_loader() prevents duplicate loaders if
-		# the plugin is toggled off and on.
+		# ResourceLoader may shut down before editor plugins do.
 		_stl_loader = null
 
 
@@ -200,11 +213,7 @@ func _on_selection_changed() -> void:
 func _show_runtime_setup() -> void:
 	if _runtime_dialog == null:
 		return
-	# EXPLICIT compact size, centered, hard-clamped to the screen. An explicit WIDTH is essential:
-	# the AUTOWRAP labels only report a short minimum height once they have a width to wrap at
-	# (auto-sizing/reset_size measured them at ~0 width -> they wrapped tall and ran off-screen). The
-	# 0.6 fallback ratio caps the window at 60% of the editor height, so it can NEVER exceed the
-	# screen regardless of content or editor DPI scale.
+	# A fixed width lets wrapped labels report a useful minimum height.
 	var editor_size := EditorInterface.get_base_control().size
 	var dialog_size := Vector2i(
 		clampi(int(editor_size.x * 0.4), 520, 600),
@@ -223,14 +232,117 @@ func _find_run_bar(node: Node) -> Control:
 	return null
 
 
-func _add_toolbar_button(text: String, handler: Callable) -> void:
-	# The "coming soon" variant this used to take is gone with the last disabled button: a parameter
-	# every caller passes false to is a claim the toolbar no longer makes.
-	var button := Button.new()
-	button.text = text
-	button.flat = true  # match the top-left menu-bar items (Scene / Project / …)
-	button.pressed.connect(handler)
-	_metis_toolbar.add_child(button)
+func _find_menu_bar_child(parent: Node) -> MenuBar:
+	for child in parent.get_children():
+		if child is MenuBar:
+			return child
+	return null
+
+
+func _find_renderer_selector(parent: Node) -> OptionButton:
+	for child in parent.get_children():
+		if child is OptionButton and child.text in ["Forward+", "Mobile", "Compatibility"]:
+			return child
+		var nested := _find_renderer_selector(child)
+		if nested != null:
+			return nested
+	return null
+
+
+func _capture_main_screen_buttons(parent: Node) -> void:
+	var container := parent.get_node_or_null("EditorMainScreenButtons")
+	if container == null:
+		return
+	_main_screen_buttons = container as Control
+	for child in container.get_children():
+		if child is Button:
+			_main_screen_button_texts[child] = child.text
+			if child.tooltip_text.is_empty():
+				child.tooltip_text = child.text
+
+
+func _set_main_screen_compact(compact: bool) -> void:
+	for control in _main_screen_button_texts:
+		if not is_instance_valid(control):
+			continue
+		var button := control as Button
+		button.text = "" if compact and button.icon != null else str(
+			_main_screen_button_texts[control])
+		button.update_minimum_size()
+	if _main_screen_buttons != null:
+		_main_screen_buttons.update_minimum_size()
+		if _main_screen_buttons is Container:
+			(_main_screen_buttons as Container).queue_sort()
+	if _title_bar != null:
+		_title_bar.update_minimum_size()
+		_title_bar.queue_sort()
+
+
+func _build_metis_popup() -> PopupMenu:
+	var popup := PopupMenu.new()
+	popup.auto_translate_mode = Node.AUTO_TRANSLATE_MODE_DISABLED
+	popup.add_theme_constant_override("icon_max_width", 18)
+	popup.add_icon_item(BRANDING.logo(), "Metis", METIS_MENU_HEADER)
+	popup.set_item_disabled(0, true)
+	popup.add_separator()
+	popup.add_item("Train", METIS_MENU_TRAIN)
+	popup.add_item("Run", METIS_MENU_RUN)
+	popup.add_item("Record", METIS_MENU_RECORD)
+	popup.add_separator()
+	popup.add_item("Runtime Setup…", METIS_MENU_RUNTIME_SETUP)
+	popup.id_pressed.connect(_on_metis_menu_pressed)
+	return popup
+
+
+func _schedule_metis_menu_visibility() -> void:
+	if _main_menu_bar == null or _metis_menu == null:
+		return
+	var index := _metis_menu_index()
+	if index < 0:
+		return
+	# On narrow windows, icon-only workspace buttons leave room for Metis and the renderer selector.
+	_main_menu_bar.set_menu_hidden(index, false)
+	_set_main_screen_compact(EditorInterface.get_base_control().size.x < 1500.0)
+	_layout_refresh_serial += 1
+	call_deferred("_finish_metis_menu_visibility", _layout_refresh_serial)
+
+
+func _finish_metis_menu_visibility(serial: int) -> void:
+	# Minimum-size changes need two layout passes to reach the title bar.
+	await get_tree().process_frame
+	await get_tree().process_frame
+	if serial != _layout_refresh_serial or _main_menu_bar == null:
+		return
+	var index := _metis_menu_index()
+	if index < 0:
+		return
+	_main_menu_bar.set_menu_hidden(index, false)
+	_set_main_screen_compact(EditorInterface.get_base_control().size.x < 1500.0)
+
+
+func _on_main_screen_changed(_screen_name: String) -> void:
+	_schedule_metis_menu_visibility()
+
+
+func _metis_menu_index() -> int:
+	if _main_menu_bar == null or _metis_menu == null:
+		return -1
+	for index in range(_main_menu_bar.get_menu_count()):
+		if _main_menu_bar.get_menu_popup(index) == _metis_menu:
+			return index
+	return -1
+
+
+func _on_metis_menu_pressed(id: int) -> void:
+	match id:
+		METIS_MENU_TRAIN:
+			_show_train()
+		METIS_MENU_RUN:
+			_show_run()
+		METIS_MENU_RECORD:
+			_show_record()
+		METIS_MENU_RUNTIME_SETUP:
+			_show_runtime_setup()
 
 
 func _dialog_size() -> Vector2i:
@@ -242,8 +354,7 @@ func _dialog_size() -> Vector2i:
 
 
 func _show_train() -> void:
-	# One button, two windows: configure a new run, or watch the one already going. Offering the
-	# wizard while training is active would only lead to a launch it has to refuse.
+	# Reuse the Train entry as a shortcut to the active monitor.
 	if _monitor_dialog != null and RUN_STATE.is_run_active():
 		_monitor_dialog.popup_centered_clamped(_dialog_size(), 0.8)
 		return
@@ -255,8 +366,7 @@ func _show_train() -> void:
 func _on_training_started() -> void:
 	if _monitor_dialog == null:
 		return
-	# Deferred so the wizard's hide() has been processed: two exclusive child windows cannot overlap
-	# even for one frame, and the editor logs an error and drops the second.
+	# Wait until the wizard is hidden before opening another exclusive window.
 	_monitor_dialog.call_deferred("popup_centered_clamped", _dialog_size(), 0.8)
 
 

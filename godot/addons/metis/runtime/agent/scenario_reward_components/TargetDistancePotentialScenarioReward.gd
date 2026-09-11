@@ -1,4 +1,4 @@
-extends "res://addons/metis/runtime/agent/scenario_reward_components/ScenarioRewardComponent.gd"
+extends ScenarioRewardComponent
 class_name TargetDistancePotentialScenarioReward
 
 ## Potential-based final-approach shaping for tasks that expose a target distance.
