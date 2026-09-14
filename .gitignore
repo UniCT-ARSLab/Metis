@@ -10,6 +10,7 @@ checkpoints
 # scenes. Put it in a `local/` directory next to the code it refers to and it stays out of the repo.
 # Any depth, anywhere.
 local/
+
 .metis/
 dist/
 python/build/
@@ -21,7 +22,6 @@ experiments
 tmp
 research
 *.h5
-# The whole directory, not just *.log: the .pid files written next to the logs were being tracked.
 logs/
 __pycache__/
 *.py[cod]
