@@ -68,6 +68,11 @@ class StepModeTests(unittest.TestCase):
         self.assertFalse(schedule.due_after_transitions(99))
         self.assertTrue(schedule.due_after_transitions(1))
 
+    def test_resume_restores_partial_interval_credit(self):
+        schedule = TargetSyncSchedule(Args(target_update_steps=100), initial_transition_count=75)
+        self.assertFalse(schedule.due_after_transitions(24))
+        self.assertTrue(schedule.due_after_transitions(1))
+
     def test_episodes_never_fire_in_step_mode(self):
         schedule = TargetSyncSchedule(Args(target_update_steps=100, target_update_every=1))
         self.assertFalse(any(schedule.due_after_episode(e) for e in range(1, 20)))

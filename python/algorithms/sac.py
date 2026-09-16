@@ -3203,7 +3203,7 @@ def main():
 
         # Sync and async share the same transition-based update ratio.
         sync_throttle = SyncUpdateThrottle(args)
-        sync_learner_updates = 0
+        sync_learner_updates = int(critic1_optimizer.iterations.numpy())
         last_saved_episode = None
         # Use a traced CPU sampler to avoid repeated GPU-side function construction.
         sync_sample_fns = {}
@@ -3340,10 +3340,23 @@ def main():
 
             pending_resets = []
             for step_idx in episode_step_indices(batch_step_budget):
+                active_envs = [
+                    (env, state)
+                    for env, state in zip(envs, env_states)
+                    if not state["done"]
+                ]
+                single_agent_actions = None
+                if not args.multi_agent and not use_random_exploration and active_envs:
+                    single_agent_actions = select_actions_with(
+                        sync_sample_fn(actor),
+                        np.stack([state["obs"] for _env, state in active_envs]),
+                        None,
+                        action_low,
+                        action_high,
+                    )
+
                 step_requests = []
-                for env, state in zip(envs, env_states):
-                    if state["done"]:
-                        continue
+                for active_index, (env, state) in enumerate(active_envs):
 
                     if args.multi_agent:
                         if use_random_exploration:
@@ -3387,12 +3400,7 @@ def main():
                                 exploration_high=random_action_high,
                             )
                         else:
-                            action = select_action_with(
-                                sync_sample_fn(actor),
-                                state["obs"],
-                                action_low,
-                                action_high,
-                            )
+                            action = single_agent_actions[active_index]
                             action = smooth_actions(
                                 action,
                                 state["previous_action"],
@@ -3420,7 +3428,9 @@ def main():
 
                     step_requests.append((env, state, action))
 
-                for env, state, action, step_result in stepper.step(step_requests):
+                step_results = stepper.step(step_requests)
+                batch_transitions_added = 0
+                for env, state, action, step_result in step_results:
                     next_obs, reward, terminated, truncated, info = step_result
                     # `done` ends the episode loop; the replay flag must carry `terminated` only,
                     # so a time-limit truncation still bootstraps instead of teaching
@@ -3448,6 +3458,7 @@ def main():
                                     bool(per_agent_terminated[agent_idx] or terminated),
                                 )
                                 budget.consume(1)
+                                batch_transitions_added += 1
                             state["ep_reward"][agent_idx] += per_agent_rewards[agent_idx]
                             state["action_sum"][agent_idx] += action[agent_idx]
                             state["action_count"][agent_idx, 0] += 1.0
@@ -3461,6 +3472,7 @@ def main():
                         update_episode_diagnostics(state, info.get("agent_info", {}))
                         buffer.add(state["obs"], action, float(reward), next_obs, bool(terminated))
                         budget.consume(1)
+                        batch_transitions_added += 1
                         state["ep_reward"] += float(reward)
                         state["action_sum"] += action
                         state["action_count"] += 1.0
@@ -3488,13 +3500,19 @@ def main():
                             ).save(sync_completed_episodes),
                         )
 
-                    if len(buffer) >= max(args.replay_warmup, args.batch_size):
+                if len(buffer) >= max(args.replay_warmup, args.batch_size):
+                    updates_due = sync_throttle.updates_due(
+                        batch_transitions_added,
+                        env_steps=len(step_results),
+                    )
+                    for _update in range(updates_due):
                         update_policy = recovery_runtime.should_update_policy()
                         batch = buffer.sample(args.batch_size, action_dtype=np.float32)
                         losses = sac_learner(*batch, update_policy=update_policy)
                         critic1_losses.append(losses[1])
                         critic2_losses.append(losses[2])
                         warmup_completed = recovery_runtime.record_critic_update()
+                        sync_learner_updates += 1
                         if update_policy:
                             actor_losses.append(losses[0])
                             alpha_losses.append(losses[3])
@@ -3505,10 +3523,9 @@ def main():
                                 "actor and alpha will be unfrozen on the next update.",
                                 flush=True,
                             )
-
-                if len(buffer) >= max(args.replay_warmup, args.batch_size) and (step_idx + 1) % args.target_update_every == 0:
-                    soft_update(target_critic1, critic1, args.tau)
-                    soft_update(target_critic2, critic2, args.tau)
+                        if sync_learner_updates % args.target_update_every == 0:
+                            soft_update(target_critic1, critic1, args.tau)
+                            soft_update(target_critic2, critic2, args.tau)
 
                 for env_idx in pending_resets:
                     env_states[env_idx] = start_env_episode(

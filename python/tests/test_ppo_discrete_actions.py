@@ -151,6 +151,17 @@ class TracedSamplerTests(unittest.TestCase):
         self.assertIn("gear", selected["env_action"])
         self.assertIn("steer", selected["env_action"])
 
+    def test_sampler_batches_multiple_environments_in_one_trace(self):
+        import numpy as np
+
+        from algorithms.ppo import select_actions_batch
+
+        meta, fn, _select_action = self.build(BREAKOUT_SPEC)
+        selected = select_actions_batch(fn, np.zeros((0,), dtype=np.float32), np.zeros((4, 5), dtype=np.float32), meta)
+        self.assertEqual(len(selected), 4)
+        self.assertTrue(all(isinstance(item["env_action"], int) for item in selected))
+        self.assertTrue(all(item["discrete_actions"].shape == (1,) for item in selected))
+
     def test_concurrent_calls_stay_well_formed(self):
         # The reason this exists: eager sampling produced a 0-D action under 4 threads.
         # A traced function is safe; this asserts every concurrent result is usable.

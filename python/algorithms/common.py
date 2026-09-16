@@ -416,21 +416,23 @@ def select_action(actor, obs, low, high, noise_std, noise_kind="ou", noise_state
 
 
 def select_actions(actor, obs_batch, done_mask, low, high, noise_std, noise_kind="ou", noise_state=None, ou_theta=0.15):
-    actions = np.zeros((obs_batch.shape[0], low.shape[0]), dtype=np.float32)
-    for idx, obs in enumerate(obs_batch):
-        if not done_mask[idx]:
-            agent_noise_state = None if noise_state is None else noise_state[idx]
-            actions[idx] = select_action(
-                actor,
-                obs,
-                low,
-                high,
-                noise_std,
-                noise_kind=noise_kind,
-                noise_state=agent_noise_state,
-                ou_theta=ou_theta,
-            )
-    return actions
+    observations = np.asarray(obs_batch, dtype=np.float32)
+    done_mask = np.asarray(done_mask, dtype=np.bool_)
+    raw_actions = actor(observations, training=False).numpy()
+    actions = scale_action_numpy(raw_actions, low, high)
+    for idx in range(observations.shape[0]):
+        if done_mask[idx]:
+            actions[idx] = 0.0
+            continue
+        if noise_std <= 0:
+            continue
+        agent_noise_state = None if noise_state is None else noise_state[idx]
+        if noise_kind == "ou" and agent_noise_state is not None:
+            agent_noise_state += ou_theta * (0.0 - agent_noise_state) + np.random.normal(0.0, noise_std, size=actions[idx].shape)
+            actions[idx] += agent_noise_state
+        else:
+            actions[idx] += np.random.normal(0.0, noise_std, size=actions[idx].shape)
+    return np.clip(actions, low, high).astype(np.float32)
 
 
 def smooth_actions(actions, previous_actions, low, high, smoothing):
@@ -4794,10 +4796,27 @@ def main(trainer_variant):
                 if all(state["done"] for state in env_states):
                     break
 
+                active_envs = [
+                    (env, state)
+                    for env, state in zip(envs, env_states)
+                    if not state["done"]
+                ]
+                single_agent_actions = None
+                if not args.multi_agent and not use_random_exploration and active_envs:
+                    single_agent_actions = select_actions(
+                        actor,
+                        np.stack([state["obs"] for _env, state in active_envs]),
+                        np.zeros((len(active_envs),), dtype=np.bool_),
+                        action_low,
+                        action_high,
+                        noise_std,
+                        noise_kind=args.exploration_noise_kind,
+                        noise_state=[state["exploration_noise_state"] for _env, state in active_envs],
+                        ou_theta=args.ou_theta,
+                    )
+
                 step_requests = []
-                for env, state in zip(envs, env_states):
-                    if state["done"]:
-                        continue
+                for active_index, (env, state) in enumerate(active_envs):
 
                     if args.multi_agent:
                         if use_random_exploration:
@@ -4845,16 +4864,7 @@ def main(trainer_variant):
                                 exploration_high=random_action_high,
                             )
                         else:
-                            action = select_action(
-                                actor,
-                                state["obs"],
-                                action_low,
-                                action_high,
-                                noise_std,
-                                noise_kind=args.exploration_noise_kind,
-                                noise_state=state["exploration_noise_state"],
-                                ou_theta=args.ou_theta,
-                            )
+                            action = single_agent_actions[active_index]
                             action = smooth_actions(
                                 action,
                                 state["previous_action"],

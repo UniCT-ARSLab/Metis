@@ -401,7 +401,7 @@ def value_of(sample_fn, log_std, obs, action_meta):
     obs_batch = np.expand_dims(np.asarray(obs, dtype=np.float32), axis=0)
     log_std_tensor = tf.convert_to_tensor(log_std, dtype=tf.float32)
     _discrete, _continuous, _log_prob, value_t = sample_fn(obs_batch, log_std_tensor)
-    return float(value_t.numpy())
+    return float(value_t.numpy()[0])
 
 
 def build_sample_action_fn(model, obs_dim, action_meta, device="/CPU:0", rng_gen=None):
@@ -422,7 +422,7 @@ def build_sample_action_fn(model, obs_dim, action_meta, device="/CPU:0", rng_gen
     high = tf.constant(action_meta["continuous_high"], dtype=tf.float32)
 
     @tf.function(input_signature=[
-        tf.TensorSpec([1, obs_dim], tf.float32),
+        tf.TensorSpec([None, obs_dim], tf.float32),
         tf.TensorSpec([continuous_size], tf.float32),
     ])
     def sample(obs_batch, log_std):
@@ -431,35 +431,34 @@ def build_sample_action_fn(model, obs_dim, action_meta, device="/CPU:0", rng_gen
             logits, continuous_mean, value = split_model_outputs(outputs, action_meta)
 
             discrete_actions = []
-            log_prob = tf.zeros((), dtype=tf.float32)
+            log_prob = tf.zeros((tf.shape(obs_batch)[0],), dtype=tf.float32)
             for component_logits in logits:
                 action = tf.random.categorical(component_logits, 1, dtype=tf.int32)
-                action = tf.squeeze(action, axis=[0, 1])  # scalar
+                action = tf.squeeze(action, axis=1)
                 discrete_actions.append(action)
                 component_log_prob = -tf.nn.sparse_softmax_cross_entropy_with_logits(
-                    labels=action[None], logits=component_logits
+                    labels=action, logits=component_logits
                 )
-                log_prob += component_log_prob[0]
+                log_prob += component_log_prob
 
             discrete_out = (
-                tf.stack(discrete_actions, axis=0)
+                tf.stack(discrete_actions, axis=1)
                 if discrete_actions
-                else tf.zeros((0,), dtype=tf.int32)
+                else tf.zeros((tf.shape(obs_batch)[0], 0), dtype=tf.int32)
             )
 
             # This constant branch disappears from discrete-only traces.
             if continuous_size > 0:
-                mean = continuous_mean[0]
                 std = tf.exp(log_std)
-                noise = rng_gen.normal(tf.shape(mean)) if rng_gen is not None else tf.random.normal(tf.shape(mean))
-                raw_action = mean + noise * std
+                noise = rng_gen.normal(tf.shape(continuous_mean)) if rng_gen is not None else tf.random.normal(tf.shape(continuous_mean))
+                raw_action = continuous_mean + noise * std
                 # Score log-probability before the adapter maps the raw sample to the environment.
                 continuous_out = raw_action
-                log_prob += gaussian_log_prob(raw_action[None, :], continuous_mean, log_std)[0]
+                log_prob += gaussian_log_prob(raw_action, continuous_mean, log_std)
             else:
-                continuous_out = tf.zeros((0,), dtype=tf.float32)
+                continuous_out = tf.zeros((tf.shape(obs_batch)[0], 0), dtype=tf.float32)
 
-            return discrete_out, continuous_out, log_prob, value[0]
+            return discrete_out, continuous_out, log_prob, value
 
     return sample
 
@@ -478,8 +477,8 @@ def select_action(sample_fn, log_std, obs, action_meta, adapter=None):
     obs_batch = np.expand_dims(np.asarray(obs, dtype=np.float32), axis=0)
     log_std_tensor = tf.convert_to_tensor(log_std, dtype=tf.float32)
     discrete_t, continuous_t, log_prob_t, value_t = sample_fn(obs_batch, log_std_tensor)
-    discrete_actions = discrete_t.numpy().astype(np.int32)
-    raw_continuous = continuous_t.numpy().astype(np.float32)
+    discrete_actions = discrete_t.numpy().astype(np.int32)[0]
+    raw_continuous = continuous_t.numpy().astype(np.float32)[0]
 
     adapter = adapter or _standard_adapter_for(action_meta)
     env_continuous, stored_continuous, diag = adapter.transform(obs, raw_continuous)
@@ -487,11 +486,36 @@ def select_action(sample_fn, log_std, obs, action_meta, adapter=None):
         "env_action": pack_action(discrete_actions, env_continuous, action_meta),
         "discrete_actions": discrete_actions,
         "continuous_action": stored_continuous.astype(np.float32),
-        "log_prob": float(log_prob_t.numpy()),
-        "value": float(value_t.numpy()),
+        "log_prob": float(log_prob_t.numpy()[0]),
+        "value": float(value_t.numpy()[0]),
         "train_mask": float(adapter.train_mask(obs)),
         "action_diag": diag,
     }
+
+
+def select_actions_batch(sample_fn, log_std, obs_batch, action_meta, adapters=None):
+    observations = np.asarray(obs_batch, dtype=np.float32)
+    log_std_tensor = tf.convert_to_tensor(log_std, dtype=tf.float32)
+    discrete_t, continuous_t, log_prob_t, value_t = sample_fn(observations, log_std_tensor)
+    discrete_actions = discrete_t.numpy().astype(np.int32)
+    raw_continuous = continuous_t.numpy().astype(np.float32)
+    log_probs = log_prob_t.numpy()
+    values = value_t.numpy()
+    if adapters is None:
+        adapters = [_standard_adapter_for(action_meta)] * observations.shape[0]
+    selected = []
+    for index, (obs, adapter) in enumerate(zip(observations, adapters)):
+        env_continuous, stored_continuous, diag = adapter.transform(obs, raw_continuous[index])
+        selected.append({
+            "env_action": pack_action(discrete_actions[index], env_continuous, action_meta),
+            "discrete_actions": discrete_actions[index],
+            "continuous_action": stored_continuous.astype(np.float32),
+            "log_prob": float(log_probs[index]),
+            "value": float(values[index]),
+            "train_mask": float(adapter.train_mask(obs)),
+            "action_diag": diag,
+        })
+    return selected
 
 
 def residual_should_zero_init(is_resuming, policy_path):
@@ -2654,10 +2678,23 @@ def main():
                     })
 
             for _step in episode_step_indices(args.max_steps_per_episode):
+                active_envs = [
+                    (env, state)
+                    for env, state in zip(envs, env_states)
+                    if not state["done"]
+                ]
+                single_agent_selected = None
+                if not args.multi_agent and active_envs:
+                    adapters = [action_adapter] * len(active_envs) if action_adapter is not None else None
+                    single_agent_selected = select_actions_batch(
+                        sample_fn_for(model),
+                        log_std,
+                        np.stack([state["obs"] for _env, state in active_envs]),
+                        action_meta,
+                        adapters=adapters,
+                    )
                 step_requests = []
-                for env, state in zip(envs, env_states):
-                    if state["done"]:
-                        continue
+                for active_index, (env, state) in enumerate(active_envs):
                     if args.multi_agent:
                         action_payload = {}
                         selected_by_agent = {}
@@ -2684,8 +2721,7 @@ def main():
                         state["selected_by_agent"] = selected_by_agent
                         step_requests.append((env, state, action_payload))
                     else:
-                        selected = select_action(sample_fn_for(model), log_std, state["obs"], action_meta,
-                                                 adapter=action_adapter)
+                        selected = single_agent_selected[active_index]
                         state["selected"] = selected
                         state["selected_obs"] = state["obs"].copy()
                         step_requests.append((env, state, selected["env_action"]))

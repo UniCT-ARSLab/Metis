@@ -499,6 +499,23 @@ def validate_restored_transition_epsilon(args, checkpoint_path, checkpoint, stat
             )
 
 
+def restore_target_sync_transition_count(args, checkpoint_path, checkpoint):
+    if not checkpoint_path or int(getattr(args, "target_update_steps", 0) or 0) <= 0:
+        return 0
+    variable_names = {name for name, _shape in tf.train.list_variables(checkpoint_path)}
+    target_fragment = "target_sync_transition_count/.ATTRIBUTES/VARIABLE_VALUE"
+    if target_fragment in variable_names:
+        return int(checkpoint.target_sync_transition_count.numpy())
+    epsilon_fragment = "epsilon_transition_count/.ATTRIBUTES/VARIABLE_VALUE"
+    if uses_transition_epsilon(args) and epsilon_fragment in variable_names:
+        recovered = int(checkpoint.epsilon_transition_count.numpy())
+        checkpoint.target_sync_transition_count.assign(recovered)
+        print(f"Recovered target-sync transition count from epsilon schedule: {recovered}", flush=True)
+        return recovered
+    print("Warning: resumed checkpoint has no target-sync transition count; cadence restarts from zero.", flush=True)
+    return 0
+
+
 def select_action(model, obs, epsilon, num_actions):
     if random.random() < epsilon:
         return random.randint(0, num_actions - 1)
@@ -507,13 +524,50 @@ def select_action(model, obs, epsilon, num_actions):
 
 
 def select_actions(model, obs_batch, done_mask, epsilon, num_actions):
-    actions = np.zeros((obs_batch.shape[0],), dtype=np.int32)
-    for idx, obs in enumerate(obs_batch):
+    observations = np.asarray(obs_batch, dtype=np.float32)
+    done_mask = np.asarray(done_mask, dtype=np.bool_)
+    actions = np.zeros((observations.shape[0],), dtype=np.int32)
+    greedy_indices = []
+    for idx in range(observations.shape[0]):
         if done_mask[idx]:
-            actions[idx] = 0
+            continue
+        if random.random() < epsilon:
+            actions[idx] = random.randint(0, num_actions - 1)
         else:
-            actions[idx] = select_action(model, obs, epsilon, num_actions)
+            greedy_indices.append(idx)
+    if greedy_indices:
+        q_values = model(observations[greedy_indices], training=False).numpy()
+        actions[greedy_indices] = np.argmax(q_values, axis=1).astype(np.int32)
     return actions
+
+
+def process_sync_dqn_updates(
+    *,
+    target_sync,
+    target_model,
+    model,
+    sync_throttle,
+    transitions_added,
+    env_steps,
+    replay_ready,
+    verification_pending,
+    learner_step,
+    buffer,
+    batch_size,
+    target_transition_count=None,
+):
+    if target_transition_count is not None:
+        target_transition_count.assign_add(int(transitions_added))
+    target_updated = target_sync.due_after_transitions(transitions_added)
+    if target_updated:
+        target_model.set_weights(model.get_weights())
+    if not replay_ready or verification_pending:
+        return np.empty((0,), dtype=np.float32), 0, target_updated
+    updates_due = sync_throttle.updates_due(transitions_added, env_steps=env_steps)
+    if updates_due <= 0:
+        return np.empty((0,), dtype=np.float32), 0, target_updated
+    losses = learner_step(buffer, batch_size, updates_due)
+    return np.asarray(losses, dtype=np.float32), updates_due, target_updated
 
 
 def action_counts_summary(action_counts, action_names):
@@ -622,12 +676,14 @@ def run_async_dqn(
     learner_step,
     demo_data=None,
     budget=None,
+    target_sync=None,
+    target_transition_count=None,
     opponent_pool=None,
     opponent_teams=None,
 ):
     validate_async_arguments(args, supports_opponent_pool=True)
     budget = budget or TrainingBudget(getattr(args, "total_timesteps", 0))
-    target_sync = TargetSyncSchedule(args)
+    target_sync = target_sync or TargetSyncSchedule(args)
     obs_dim = envs[0].obs_dim
     num_actions = envs[0].num_actions
     with tf.device("/CPU:0"):
@@ -929,6 +985,8 @@ def run_async_dqn(
                     collected_transitions,
                 )
                 budget.consume(collected_transitions)
+                if target_transition_count is not None:
+                    target_transition_count.assign_add(int(collected_transitions))
                 if target_sync.due_after_transitions(collected_transitions):
                     target_model.set_weights(model.get_weights())
                 updates_due = scheduler.ingest(step_events)
@@ -1211,6 +1269,7 @@ class DQNPolicyState:
     buffer: ReplayBuffer
     epsilon: object
     epsilon_transition_count: object
+    target_sync_transition_count: object
     learner_step: object
     artifact: PolicyArtifactSaver
     trainable: bool
@@ -1261,6 +1320,7 @@ def _save_multi_policy_dqn_checkpoint(
             policy_id: {
                 "epsilon": float(state.epsilon.numpy()),
                 "epsilon_transitions": int(state.epsilon_transition_count.numpy()),
+                "target_sync_transitions": int(state.target_sync_transition_count.numpy()),
                 "replay_size": len(state.buffer),
             }
             for policy_id, state in policy_states.items()
@@ -1349,6 +1409,10 @@ def run_async_multi_policy_dqn(
     trainable_states = [
         state for state in policy_states.values() if state.trainable
     ]
+    target_syncs = {
+        state.policy_id: TargetSyncSchedule(args, initial_transition_count=int(state.target_sync_transition_count.numpy()))
+        for state in trainable_states
+    }
     if not trainable_states:
         raise ValueError("Multi-policy DQN requires at least one trainable policy")
     replay_ready_event = Event()
@@ -1421,6 +1485,7 @@ def run_async_multi_policy_dqn(
     ):
         rng = rngs[worker_id]
         actions = np.zeros((len(env.agent_ids),), dtype=np.int32)
+        greedy_indices = {policy_id: [] for policy_id in policy_states}
         for agent_idx, agent_id in enumerate(env.agent_ids):
             if state["done_mask"][agent_idx]:
                 continue
@@ -1429,15 +1494,13 @@ def run_async_multi_policy_dqn(
             if rng.random() < epsilon:
                 actions[agent_idx] = int(rng.integers(num_actions))
             else:
-                observation = np.expand_dims(
-                    state["obs"][agent_idx],
-                    axis=0,
-                ).astype(np.float32)
-                actions[agent_idx] = int(
-                    greedy_actions[worker_id][policy_id](
-                        observation
-                    ).numpy()[0]
-                )
+                greedy_indices[policy_id].append(agent_idx)
+        for policy_id, indices in greedy_indices.items():
+            if not indices:
+                continue
+            observations = np.asarray([state["obs"][agent_idx] for agent_idx in indices], dtype=np.float32)
+            selected = greedy_actions[worker_id][policy_id](observations).numpy()
+            actions[indices] = selected.astype(np.int32)
         return actions
 
     def process_step(
@@ -1598,6 +1661,9 @@ def run_async_multi_policy_dqn(
                         state.epsilon_transition_count,
                         count,
                     )
+                    state.target_sync_transition_count.assign_add(int(count))
+                    if target_syncs[policy_id].due_after_transitions(count):
+                        state.target_model.set_weights(state.model.get_weights())
                 budget.consume(collected)
                 updates_due = scheduler.ingest_by_policy(
                     step_events,
@@ -1638,12 +1704,10 @@ def run_async_multi_policy_dqn(
             if not isinstance(event, AsyncEpisodeEvent):
                 continue
             completed += 1
-            if completed % args.target_update_every == 0:
-                for state in policy_states.values():
-                    if state.trainable:
-                        state.target_model.set_weights(
-                            state.model.get_weights()
-                        )
+            for policy_id, target_sync in target_syncs.items():
+                if target_sync.due_after_episode(completed):
+                    state = policy_states[policy_id]
+                    state.target_model.set_weights(state.model.get_weights())
             for policy_id, state in policy_states.items():
                 if state.trainable and not uses_transition_epsilon(args):
                     state.epsilon.assign(epsilon_for(policy_id, completed))
@@ -1822,6 +1886,12 @@ def run_sync_multi_policy_dqn(
             trainable=False,
             name=f"epsilon_transitions_{assignment.key_for(policy_id)}",
         )
+        target_sync_transition_count = tf.Variable(
+            0,
+            dtype=tf.int64,
+            trainable=False,
+            name=f"target_sync_transitions_{assignment.key_for(policy_id)}",
+        )
         learner_step = build_dqn_learner_step(
             model,
             target_model,
@@ -1861,6 +1931,7 @@ def run_sync_multi_policy_dqn(
             buffer=buffer,
             epsilon=epsilon,
             epsilon_transition_count=epsilon_transition_count,
+            target_sync_transition_count=target_sync_transition_count,
             learner_step=learner_step,
             artifact=PolicyArtifactSaver(model, artifact_dir, metadata),
             trainable=assignment.is_trainable(policy_id),
@@ -1872,6 +1943,7 @@ def run_sync_multi_policy_dqn(
             optimizer=optimizer,
             epsilon=epsilon,
             epsilon_transition_count=epsilon_transition_count,
+            target_sync_transition_count=target_sync_transition_count,
         )
 
     checkpoint = tf.train.Checkpoint(
@@ -1907,6 +1979,21 @@ def run_sync_multi_policy_dqn(
                 if state.trainable
             ],
         )
+        variable_names = {name for name, _shape in tf.train.list_variables(resume_checkpoint)}
+        for policy_id, state in policy_states.items():
+            if not state.trainable or int(getattr(args, "target_update_steps", 0) or 0) <= 0:
+                continue
+            key = assignment.key_for(policy_id)
+            target_fragment = f"policies/{key}/target_sync_transition_count/.ATTRIBUTES/VARIABLE_VALUE"
+            if target_fragment in variable_names:
+                continue
+            epsilon_fragment = f"policies/{key}/epsilon_transition_count/.ATTRIBUTES/VARIABLE_VALUE"
+            if uses_transition_epsilon(args) and epsilon_fragment in variable_names:
+                recovered = int(state.epsilon_transition_count.numpy())
+                state.target_sync_transition_count.assign(recovered)
+                print(f"Recovered target-sync transition count for policy {policy_id!r} from epsilon schedule: {recovered}", flush=True)
+            else:
+                print(f"Warning: resumed policy {policy_id!r} has no target-sync transition count; cadence restarts from zero.", flush=True)
         start_episode = int(checkpoint.episode.numpy())
         restore_policy_replays(
             args,
@@ -1990,6 +2077,11 @@ def run_sync_multi_policy_dqn(
         for policy_id, state in policy_states.items()
         if state.trainable
     }
+    target_syncs = {
+        policy_id: TargetSyncSchedule(args, initial_transition_count=int(state.target_sync_transition_count.numpy()))
+        for policy_id, state in policy_states.items()
+        if state.trainable
+    }
     try:
         for episode in range(start_episode, args.num_episodes):
             env_states = []
@@ -2035,6 +2127,7 @@ def run_sync_multi_policy_dqn(
                     break
 
                 requests = []
+                pending_actions = {policy_id: [] for policy_id in policy_states}
                 for env, env_state in zip(envs, env_states):
                     if env_state["done"]:
                         continue
@@ -2043,36 +2136,27 @@ def run_sync_multi_policy_dqn(
                         if env_state["done_mask"][agent_idx]:
                             continue
                         policy_id = assignment.policy_for_agent(agent_id)
-                        policy = policy_states[policy_id]
-                        epsilon = (
-                            1.0
-                            if (
-                                policy.trainable
-                                and len(policy.buffer)
-                                < replay_warmup_threshold(args)
-                            )
-                            else float(policy.epsilon.numpy())
-                            if policy.trainable
-                            else 0.0
-                        )
-                        actions[agent_idx] = select_action(
-                            policy.model,
-                            env_state["obs"][agent_idx],
-                            epsilon,
-                            num_actions,
-                        )
-                        env_state["action_counts"][
-                            agent_idx, actions[agent_idx]
-                        ] += 1
-                        env_state["last_action"][agent_idx] = actions[agent_idx]
+                        pending_actions[policy_id].append((env_state, actions, agent_idx, env_state["obs"][agent_idx]))
                     requests.append((env, env_state, actions))
 
-                for env, env_state, actions, step_result in stepper.step(requests):
+                for policy_id, pending in pending_actions.items():
+                    if not pending:
+                        continue
+                    policy = policy_states[policy_id]
+                    epsilon = 1.0 if policy.trainable and len(policy.buffer) < replay_warmup_threshold(args) else float(policy.epsilon.numpy()) if policy.trainable else 0.0
+                    selected = select_actions(policy.model, np.stack([item[3] for item in pending]), np.zeros((len(pending),), dtype=np.bool_), epsilon, num_actions)
+                    for (env_state, actions, agent_idx, _obs), action in zip(pending, selected):
+                        actions[agent_idx] = int(action)
+                        env_state["action_counts"][agent_idx, int(action)] += 1
+                        env_state["last_action"][agent_idx] = int(action)
+
+                transitions_by_policy = {policy_id: 0 for policy_id in sync_throttles}
+                env_steps_by_policy = {policy_id: 0 for policy_id in sync_throttles}
+                step_results = stepper.step(requests)
+                for env, env_state, actions, step_result in step_results:
                     next_obs, _reward, terminated, truncated, info = step_result
                     done = bool(terminated or truncated)
-                    transitions_by_policy = {
-                        policy_id: 0 for policy_id in sync_throttles
-                    }
+                    env_transitions_by_policy = {policy_id: 0 for policy_id in sync_throttles}
                     per_agent_rewards = np.asarray(
                         info.get("per_agent_rewards"),
                         dtype=np.float32,
@@ -2129,6 +2213,7 @@ def run_sync_multi_policy_dqn(
                             )
                             budget.consume(1)
                             transitions_by_policy[policy_id] += 1
+                            env_transitions_by_policy[policy_id] += 1
                         env_state["ep_reward"][agent_idx] += (
                             per_agent_rewards[agent_idx]
                         )
@@ -2137,54 +2222,28 @@ def run_sync_multi_policy_dqn(
                     env_state["done_mask"] = per_agent_done
                     env_state["done"] = done or bool(np.all(per_agent_done))
 
-                    for policy_id, transition_count in transitions_by_policy.items():
-                        policy = policy_states[policy_id]
-                        advance_transition_epsilon(
-                            args,
-                            policy.epsilon,
-                            policy.epsilon_transition_count,
-                            transition_count,
-                        )
+                    for policy_id, transition_count in env_transitions_by_policy.items():
+                        if transition_count > 0:
+                            env_steps_by_policy[policy_id] += 1
 
-                    if not best_tracker.health_monitor.verification_pending:
-                        for policy_id, policy in policy_states.items():
-                            if not policy.trainable:
-                                continue
-                            if len(policy.buffer) < max(
-                                args.replay_warmup,
-                                args.batch_size,
-                            ):
-                                continue
-                            updates_due = sync_throttles[
-                                policy_id
-                            ].updates_due(
-                                transitions_by_policy.get(policy_id, 0),
-                                env_steps=(
-                                    1
-                                    if transitions_by_policy.get(
-                                        policy_id, 0
-                                    ) > 0
-                                    else 0
-                                ),
-                            )
-                            if updates_due <= 0:
-                                continue
-                            losses[policy_id].extend(
-                                policy.learner_step(
-                                    policy.buffer,
-                                    args.batch_size,
-                                    updates_due,
-                                ).tolist()
-                            )
+                for policy_id, transition_count in transitions_by_policy.items():
+                    policy = policy_states[policy_id]
+                    advance_transition_epsilon(args, policy.epsilon, policy.epsilon_transition_count, transition_count)
+                    policy.target_sync_transition_count.assign_add(int(transition_count))
+                    if target_syncs[policy_id].due_after_transitions(transition_count):
+                        policy.target_model.set_weights(policy.model.get_weights())
+                    if best_tracker.health_monitor.verification_pending or len(policy.buffer) < max(args.replay_warmup, args.batch_size):
+                        continue
+                    updates_due = sync_throttles[policy_id].updates_due(transition_count, env_steps=env_steps_by_policy[policy_id])
+                    if updates_due > 0:
+                        losses[policy_id].extend(policy.learner_step(policy.buffer, args.batch_size, updates_due).tolist())
                 if budget.exhausted:
                     break
 
-            if (episode + 1) % args.target_update_every == 0:
-                for policy in policy_states.values():
-                    if policy.trainable:
-                        policy.target_model.set_weights(
-                            policy.model.get_weights()
-                        )
+            for policy_id, target_sync in target_syncs.items():
+                if target_sync.due_after_episode(episode + 1):
+                    policy = policy_states[policy_id]
+                    policy.target_model.set_weights(policy.model.get_weights())
 
             for policy in policy_states.values():
                 if (
@@ -2332,13 +2391,6 @@ def main():
     transition_snapshots_enabled = validate_transition_snapshot_arguments(args)
     budget = TrainingBudget(args.total_timesteps)
     validate_async_arguments(args, supports_opponent_pool=True)
-    if int(getattr(args, "target_update_steps", 0) or 0) > 0 and getattr(args, "multi_policy", False):
-        # Refused rather than ignored: the multi-policy loops still sync per episode, and silently
-        # dropping the flag would report a schedule the run is not using.
-        raise RuntimeError(
-            "--target-update-steps is not implemented for --multi-policy; "
-            "use --target-update-every there."
-        )
     best_tracker = BestCheckpointTracker(args, "dqn")
     describe_tensorflow_backend(args)
     dashboard = maybe_start_dashboard(args, algorithm="dqn")
@@ -2452,6 +2504,9 @@ def main():
             episode=tf.Variable(0, dtype=tf.int64),
             epsilon=tf.Variable(args.epsilon_start, dtype=tf.float32),
             epsilon_transition_count=tf.Variable(
+                0, dtype=tf.int64, trainable=False
+            ),
+            target_sync_transition_count=tf.Variable(
                 0, dtype=tf.int64, trainable=False
             ),
             **epsilon_checkpoint_metadata(args),
@@ -2582,7 +2637,12 @@ def main():
                 flush=True,
             )
 
-        target_sync = TargetSyncSchedule(args)
+        target_sync_count = restore_target_sync_transition_count(
+            args,
+            resume_checkpoint,
+            checkpoint,
+        )
+        target_sync = TargetSyncSchedule(args, initial_transition_count=target_sync_count)
         learner_step = build_dqn_learner_step(
             model,
             target_model,
@@ -2620,6 +2680,8 @@ def main():
                 learner_step,
                 demo_data,
                 budget,
+                target_sync=target_sync,
+                target_transition_count=checkpoint.target_sync_transition_count,
                 opponent_pool=opponent_pool,
                 opponent_teams=opponent_teams,
             )
@@ -2719,10 +2781,23 @@ def main():
                     epsilon = float(checkpoint.epsilon.numpy())
                     action_epsilon = 1.0 if warmup_exploration else epsilon
 
+                active_envs = [
+                    (env, state)
+                    for env, state in zip(envs, env_states)
+                    if not state["done"]
+                ]
+                single_agent_actions = None
+                if not args.multi_agent and active_envs:
+                    single_agent_actions = select_actions(
+                        model,
+                        np.stack([state["obs"] for _env, state in active_envs]),
+                        np.zeros((len(active_envs),), dtype=np.bool_),
+                        action_epsilon,
+                        num_actions,
+                    )
+
                 step_requests = []
-                for env, state in zip(envs, env_states):
-                    if state["done"]:
-                        continue
+                for active_index, (env, state) in enumerate(active_envs):
 
                     if args.multi_agent:
                         action = select_actions(
@@ -2749,18 +2824,15 @@ def main():
                             state["action_counts"][agent_idx, int(action_id)] += 1
                             state["last_action"][agent_idx] = int(action_id)
                     else:
-                        action = select_action(
-                            model,
-                            state["obs"],
-                            action_epsilon,
-                            num_actions,
-                        )
+                        action = int(single_agent_actions[active_index])
                         state["action_counts"][int(action)] += 1
                         state["last_action"] = int(action)
 
                     step_requests.append((env, state, action))
 
-                for env, state, action, step_result in stepper.step(step_requests):
+                step_results = stepper.step(step_requests)
+                batch_transitions_added = 0
+                for env, state, action, step_result in step_results:
                     next_obs, reward, terminated, truncated, info = step_result
                     done = bool(terminated or truncated)
                     transitions_added = 0
@@ -2844,23 +2916,23 @@ def main():
                                 transition_policy_metadata,
                             ).save(episode),
                         )
+                    batch_transitions_added += transitions_added
 
-                    if (
-                        len(buffer) >= max(args.replay_warmup, args.batch_size)
-                        and not best_tracker.health_monitor.verification_pending
-                    ):
-                        updates_due = sync_throttle.updates_due(
-                            transitions_added,
-                            env_steps=1,
-                        )
-                        if updates_due > 0:
-                            losses.extend(
-                                learner_step(
-                                    buffer,
-                                    args.batch_size,
-                                    updates_due,
-                                ).tolist()
-                            )
+                batch_losses, _updates_due, _target_updated = process_sync_dqn_updates(
+                    target_sync=target_sync,
+                    target_model=target_model,
+                    model=model,
+                    sync_throttle=sync_throttle,
+                    transitions_added=batch_transitions_added,
+                    env_steps=len(step_results),
+                    replay_ready=len(buffer) >= max(args.replay_warmup, args.batch_size),
+                    verification_pending=best_tracker.health_monitor.verification_pending,
+                    learner_step=learner_step,
+                    buffer=buffer,
+                    batch_size=args.batch_size,
+                    target_transition_count=checkpoint.target_sync_transition_count,
+                )
+                losses.extend(batch_losses.tolist())
                 if budget.exhausted:
                     break
 

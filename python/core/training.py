@@ -134,12 +134,13 @@ class TargetSyncSchedule:
     ``--target-update-steps`` to switch.
     """
 
-    def __init__(self, args):
+    def __init__(self, args, initial_transition_count=0):
         self.every_steps = int(getattr(args, "target_update_steps", 0) or 0)
         self.every_episodes = int(getattr(args, "target_update_every", 0) or 0)
         if self.every_steps < 0:
             raise ValueError("--target-update-steps cannot be negative")
-        self._credit = 0
+        initial_transition_count = max(0, int(initial_transition_count))
+        self._credit = initial_transition_count % self.every_steps if self.every_steps > 0 else 0
 
     @property
     def uses_steps(self):
