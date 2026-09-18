@@ -680,6 +680,8 @@ def run_async_dqn(
     target_transition_count=None,
     opponent_pool=None,
     opponent_teams=None,
+    transition_publisher=None,
+    transition_policy_metadata=None,
 ):
     validate_async_arguments(args, supports_opponent_pool=True)
     budget = budget or TrainingBudget(getattr(args, "total_timesteps", 0))
@@ -985,6 +987,12 @@ def run_async_dqn(
                     collected_transitions,
                 )
                 budget.consume(collected_transitions)
+                if transition_publisher is not None:
+                    transition_publisher.publish_due(
+                        budget.collected,
+                        completed,
+                        lambda directory, _threshold: PolicyArtifactSaver(model, directory, transition_policy_metadata).save(completed),
+                    )
                 if target_transition_count is not None:
                     target_transition_count.assign_add(int(collected_transitions))
                 if target_sync.due_after_transitions(collected_transitions):
@@ -1109,6 +1117,8 @@ def run_async_dqn(
         if uses_transition_epsilon(args)
         else epsilon_for_episode(completed)
     )
+    if not interrupted and budget.exhausted and transition_publisher is not None and not transition_publisher.complete:
+        raise RuntimeError("Transition budget ended before every policy snapshot was published")
     snapshot.publish(model.get_weights())
     if last_saved_episode != completed:
         save_training_checkpoint(
@@ -2388,7 +2398,7 @@ def run_sync_multi_policy_dqn(
 def main():
     args = parse_args()
     validate_epsilon_schedule_args(args)
-    transition_snapshots_enabled = validate_transition_snapshot_arguments(args)
+    transition_snapshots_enabled = validate_transition_snapshot_arguments(args, allow_async=True)
     budget = TrainingBudget(args.total_timesteps)
     validate_async_arguments(args, supports_opponent_pool=True)
     best_tracker = BestCheckpointTracker(args, "dqn")
@@ -2684,6 +2694,8 @@ def main():
                 target_transition_count=checkpoint.target_sync_transition_count,
                 opponent_pool=opponent_pool,
                 opponent_teams=opponent_teams,
+                transition_publisher=transition_publisher,
+                transition_policy_metadata=transition_policy_metadata,
             )
             model.save_weights(args.weights_path)
             print(f"Saved weights: {args.weights_path}", flush=True)

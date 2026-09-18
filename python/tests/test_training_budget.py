@@ -53,14 +53,21 @@ class TransitionSnapshotArgumentTests(unittest.TestCase):
                 self.args(checkpoint_every_transitions=0)
             )
 
-    def test_rejects_resume_async_and_multi_agent(self):
+    def test_rejects_resume_and_multi_agent(self):
         for changes in (
             {"resume": True},
-            {"collector_mode": "async"},
             {"multi_agent": True},
         ):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 validate_transition_snapshot_arguments(self.args(**changes))
+
+    def test_async_requires_explicit_trainer_support(self):
+        args = self.args(collector_mode="async")
+
+        with self.assertRaisesRegex(ValueError, "sync collection"):
+            validate_transition_snapshot_arguments(args)
+
+        self.assertTrue(validate_transition_snapshot_arguments(args, allow_async=True))
 
 
 if __name__ == "__main__":

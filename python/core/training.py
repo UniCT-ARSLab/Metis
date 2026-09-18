@@ -363,7 +363,7 @@ def add_transition_snapshot_arguments(parser):
     )
 
 
-def validate_transition_snapshot_arguments(args):
+def validate_transition_snapshot_arguments(args, *, allow_async=False):
     interval = int(getattr(args, "checkpoint_every_transitions", 0) or 0)
     if interval < 0:
         raise ValueError("--checkpoint-every-transitions cannot be negative")
@@ -381,7 +381,7 @@ def validate_transition_snapshot_arguments(args):
         raise ValueError(
             "--checkpoint-every-transitions requires --transition-snapshot-dir"
         )
-    if getattr(args, "collector_mode", "sync") != "sync":
+    if getattr(args, "collector_mode", "sync") != "sync" and not allow_async:
         raise ValueError("Transition-indexed benchmark snapshots currently require sync collection")
     if bool(getattr(args, "multi_agent", False)) or bool(
         getattr(args, "multi_policy", False)
