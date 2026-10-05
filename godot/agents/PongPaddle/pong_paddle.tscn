@@ -9,7 +9,6 @@
 [ext_resource type="Script" uid="uid://clefx53jebtj3" path="res://addons/metis/runtime/agent/observations/ObservationSystem.gd" id="6_mn31i"]
 [ext_resource type="Script" uid="uid://d1xuba84xevcv" path="res://addons/metis/runtime/agent/RewardSystem.gd" id="7_8iwt4"]
 [ext_resource type="Script" uid="uid://cys7i0vchrdlo" path="res://addons/metis/runtime/agent/observations/MethodObservationSource.gd" id="8_g32oq"]
-[ext_resource type="Script" uid="uid://dyq1fjgcu1wqu" path="res://addons/metis/runtime/agent/reward_components/StepPenaltyReward.gd" id="10_g32oq"]
 [ext_resource type="Script" uid="uid://bgx7jh6lg35yv" path="res://addons/metis/runtime/agent/reward_components/FunctionRewardComponent.gd" id="11_align"]
 
 [sub_resource type="CapsuleShape2D" id="CapsuleShape2D_5w80y"]
@@ -89,12 +88,6 @@ metadata/_custom_type_script = "uid://cys7i0vchrdlo"
 [node name="RewardSystem" type="Node" parent="Agent" unique_id=1708416849]
 script = ExtResource("7_8iwt4")
 metadata/_custom_type_script = "uid://d1xuba84xevcv"
-
-[node name="TimePenalty" type="Node" parent="Agent/RewardSystem" unique_id=1171997254]
-script = ExtResource("10_g32oq")
-term_name = "time"
-penalty = -5e-05
-metadata/_custom_type_script = "uid://dyq1fjgcu1wqu"
 
 [node name="AlignmentReward" type="Node" parent="Agent/RewardSystem" node_paths=PackedStringArray("node_caller")]
 script = ExtResource("11_align")

@@ -15,7 +15,7 @@ compatibility/default_parent_skeleton_in_mesh_instance_3d=true
 [application]
 
 config/name="Metis"
-run/main_scene="uid://ccslss6gb4l1i"
+run/main_scene="res://scenarios/robotarms/local/xarm_digital_twin.tscn"
 config/features=PackedStringArray("4.7")
 boot_splash/stretch_mode=2
 boot_splash/image="uid://cil834xrsy02r"
@@ -25,7 +25,7 @@ config/icon="uid://bber4kdxb5e1m"
 
 window/size/viewport_width=1280
 window/size/viewport_height=720
-window/stretch/mode="viewport"
+window/stretch/mode="canvas_items"
 
 [editor_plugins]
 

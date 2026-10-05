@@ -26,7 +26,7 @@ from core.models import build_hybrid_actor_critic  # noqa: E402
 from core.policy_action_adapter import ResidualActionAdapter  # noqa: E402
 from core.training import BestCheckpointTracker, PolicyEvaluationResult  # noqa: E402
 from algorithms.ppo import split_model_outputs  # noqa: E402
-from tests.test_best_checkpoint_tracker import evaluation, tracker_args  # noqa: E402
+from test_best_checkpoint_tracker import evaluation, tracker_args  # noqa: E402
 
 OBS, ACT = 27, 7
 GATE = dict(delta_max=0.005, gate_outer=0.11, gate_inner=0.04, err_start=14, err_size=3)

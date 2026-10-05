@@ -66,6 +66,15 @@ extends Node3D
 @export var spawn_surface: Node3D
 ## Keeps the object clear of the area edge by its own half width, so it never spawns half off.
 @export var spawn_edge_margin := 0.005
+## Cells per side of the stratified spawn grid. 0 goes back to plain uniform sampling.
+##
+## Uniform sampling covers the area in expectation and not in practice: with eight environments a
+## corner cell comes up a few times in a thousand episodes, and the certifications show it. Every
+## run so far loses the same column, x = +40 mm, while the middle is solid.
+##
+## Stratified sampling shuffles a full grid and walks it, so a cell cannot be skipped twice in a
+## row, and the position inside each cell is still random. Same area, same average, no gaps.
+@export var spawn_grid_cells := 5
 
 @export_category("Azimuth")
 ## Rotate the demanded orientation so its forward axis points along the object's direction from the
@@ -91,6 +100,15 @@ extends Node3D
 @export_range(0.0, 1.0, 0.01) var tool_frozen_closure := 0.0
 ## An object still moving has been knocked, not grasped.
 @export var grasp_capture_max_object_speed := 0.05
+## How fast the tool may still be travelling when the claws close on the object, in m/s.
+##
+## Simulation forgives closing on the move, because capture is a test rather than a contact: the
+## instant the claws are around the cube it is attached, however fast the hand is going. The table
+## does not. Watched on the real arm on 2026-09-15 the claws reached the cube before they were shut
+## and pushed it out of the way, and the arm ended up behind it holding nothing.
+##
+## 0 disables the test, which is what every run up to v63 did.
+@export var grasp_capture_max_tool_speed := 0.0
 ## How far the claws must reopen past the capture threshold before a held object is let go.
 @export_range(0.0, 1.0, 0.01) var grasp_release_clearance := 0.15
 ## Note on `gripper_stops_on_contact`, which is now ON in the agent scene, having been off for most
@@ -188,6 +206,52 @@ extends Node3D
 ## solo il 4% degli episodi scende sotto -12 mm, quindi la saturazione a 17 mm resta fuori da quello
 ## che una presa buona fa davvero.
 @export var claw_floor_penalty_scale := 0.02
+## Metres of rise in one step that earn the full lift reward.
+@export var lift_first_scale := 0.004
+## Height the lift reward keeps paying up to, in metres above the surface.
+##
+## Deliberately ABOVE `carry_lift_height`, which stays the success threshold. Paying only up to the
+## threshold teaches the minimum: v67 carried at a median of 140 mm against a threshold of 130 and
+## stopped there, because above it nothing was earned. The IK expert carries at 215-221 mm over 299
+## episodes, so 200 is inside what the demonstrations show.
+##
+## Raising `carry_lift_height` instead would be the obvious move and it has already broken this task
+## once: at 0.165 deliveries fell to 16%, because the threshold demanded more than the route aimed
+## for. A reward ceiling cannot do that -- failing to reach it costs nothing.
+@export var lift_first_ceiling := 0.24
+## Metres the cube may travel sideways before it is clear of the surface, before the episode ends.
+##
+## The gate the carry_drag slope was missing. A cost makes dragging expensive; this makes it
+## impossible, which is what the arm needs: below the carry height the cube is a couple of
+## millimetres off the table and anything in the way is hit.
+##
+## 0.06 is three times the worst the IK expert does. Measured over 19 recorded episodes it travels
+## 13 to 19 mm sideways before it is clear, median 16.
+@export var carry_drag_max_travel := 0.0
+## Metres per second of sideways travel that costs the full penalty while the cube is still low.
+##
+## The policy starts turning towards the drop zone with the tool 20-30 mm up, which leaves the cube
+## a few millimetres off the table and drags it round the whole arc. `carry_lift_height` does not
+## catch this: it gates the DELIVERY, not the moment the turn begins.
+@export var carry_drag_speed_scale := 0.15
+## Height above the surface the tool may drop to while it is still far from the cube, in metres.
+@export var approach_clearance_height := 0.05
+## Horizontal distance from the cube inside which the tool is allowed to come down, in metres.
+@export var approach_clearance_radius := 0.06
+## Metres below the clearance height that cost the full penalty.
+@export var approach_clearance_scale := 0.05
+## How near the cube the tool has to be before its speed starts costing, in metres.
+@export var approach_speed_radius := 0.06
+## Metres per second ABOVE the capture threshold that cost the full penalty.
+##
+## The capture rule refuses a moving hand, and on its own that rule has no gradient: the policy is
+## simply denied the capture it used to get, carries on down, and digs the claws into the floor.
+## Measured over v64's first 1100 episodes, 30% of episodes ended in floor_breach_claws against 6%
+## for v63 at the same point, and the rate was flat rather than falling.
+##
+## This is the slope the gate lacks, and it starts at the same speed the gate refuses, so slowing
+## down pays continuously right up to the point where the grasp becomes possible.
+@export var approach_speed_scale := 0.20
 ## Millimetres below the surface the claws may use for free.
 ##
 ## Not zero: the cube's underside IS the floor, so closing around it puts the tips at y=0 and a
@@ -233,9 +297,13 @@ extends Node3D
 ## stesse azioni dell'esperto rigiocate in anello aperto arrivano a 12-23. L'esperto ci riesce perche'
 ## e' un IK ad anello chiuso che itera fino al successo, non perche' sappia qualcosa in piu'.
 ##
-## Il rientro resta nel compito -- il registratore lo dimostra e sul banco si esegue -- ma come
-## comando di posizione, non come qualcosa da scoprire per tentativi.
-@export var home_return_required := true
+## Il rientro NON fa piu' parte del compito, deciso con l'utente il 2026-09-16: sul braccio vero lo
+## comanda `home.py` nello spazio dei giunti, e ci arriva sempre.
+##
+## Costava caro tenerlo. Ri-giudicando le 25 certificazioni di v67 sulla sola consegna, checkpoint
+## scartati tornano buoni: ckpt-3350 consegnava il 92,5% e tornava a casa lo 0%. Il compito veniva
+## bocciato sull'unica parte che non serve imparare.
+@export var home_return_required := false
 ## Errore di posa, in radianti, oltre il quale il ritorno vale zero progresso.
 ##
 ## 2.0 rad copre l'arco che la base percorre davvero: da sopra la zona sta a 103 gradi (1,8 rad) da
@@ -377,7 +445,11 @@ extends Node3D
 ## The region the cube has to end up in. Its collision shape gives the footprint.
 @export var drop_zone: Area3D
 ## How high above the zone the arm is asked to bring the cube before opening the claws.
-@export var drop_release_height := 0.045
+##
+## Raised from 0.045 to 0.080 on 2026-09-16: the arm passed too close to the roller beside the zone
+## on its way in. The cost is precision, because a cube let go higher lands further from where it
+## was aimed, and it is measured on the expert before every change to this number.
+@export var drop_release_height := 0.080
 ## Height the cube's centre must reach while held before a delivery counts, in metres.
 ##
 ## Watching a render, the arm was DRAGGING the cube along the floor to the zone. Nothing asked for a
@@ -747,6 +819,7 @@ var _reject_depth := 0
 var _reject_side := 0
 var _reject_gap := 0
 var _reject_speed := 0
+var _reject_tool_speed := 0
 var _best_across := INF
 var _best_between := INF
 var _best_reach := INF
@@ -754,6 +827,21 @@ var _best_depth := INF
 var _best_side := INF
 var _best_gap := INF
 var _best_speed := INF
+var _best_tool_speed := INF
+## Tool and object speeds, from their own position deltas rather than from `linear_velocity`: with
+## `grasp_attach_kinematic` the held cube reports no velocity at all.
+var _tool_speed := 0.0
+var _object_flat_speed := 0.0
+## Metres the cube rose in the last step. Negative when it came down.
+var _object_rise := 0.0
+## Cells of the spawn grid still to be used in this pass.
+var _spawn_order: Array[int] = []
+var _tool_previous := Vector3.ZERO
+var _object_previous := Vector3.ZERO
+var _speeds_seeded := false
+## Sideways distance the cube has covered while still below the carry height, this episode.
+var _low_travel := 0.0
+var _dragged := false
 ## How much of each claw counts as its tip, measured back from its deepest point.
 const TIP_BAND := 0.005
 
@@ -888,11 +976,21 @@ func _physics_process(_delta: float) -> void:
 				(arm.target as Node3D).global_position)
 			_gate_success_target = String((arm.target as Node3D).name)
 	_sync_tool_pose_to_tips()
+	_track_speeds(_delta)
 	_update_grasp()
 	_track_loose_cube()
 	_track_gripper()
 	if grasp_target != null and arm.is_grasp_attached():
 		_carry_highest = maxf(_carry_highest, grasp_target.global_position.y)
+		if grasp_target.global_position.y < _surface_top_y + maxf(carry_lift_height, 0.0):
+			_low_travel += _object_flat_speed * _delta
+			# Ends the episode rather than charging for it. The slope is carry_drag; this is the
+			# wall behind it, so "lift before you turn" is a rule and not a preference.
+			if carry_drag_max_travel > 0.0 and _low_travel > carry_drag_max_travel and not _dragged:
+				_dragged = true
+				print("[trasporto] TRASCINAMENTO: %.1f mm di lato sotto quota (concessi %.1f)" % [
+					_low_travel * 1000.0, carry_drag_max_travel * 1000.0])
+				arm.report_obstacle_collision("carry_drag")
 	if _finger_tips.size() >= 2:
 		_tip_lowest = minf(_tip_lowest, minf(_tip_world(0).y, _tip_world(1).y))
 	_check_floor_breach()
@@ -2132,6 +2230,13 @@ func _grasp_capture_condition() -> bool:
 		_reject_speed += 1
 		_best_speed = minf(_best_speed, grasp_target.linear_velocity.length())
 		return false
+	# 4. And the HAND at rest, which is a different thing. The test above asks whether the cube has
+	# been knocked; this one asks whether the claws are still travelling as they shut, which is what
+	# knocks it on the real arm.
+	if grasp_capture_max_tool_speed > 0.0 and _tool_speed > grasp_capture_max_tool_speed:
+		_reject_tool_speed += 1
+		_best_tool_speed = minf(_best_tool_speed, _tool_speed)
+		return false
 	if log_capture_rejections:
 		# The same instant seen from the two frames that matter. `depth` is measured from the FROZEN
 		# tool point, which sits where the tips are when the claws are OPEN; the tips themselves
@@ -2154,6 +2259,8 @@ func _proximity_capture_condition() -> bool:
 	if _gripper_closure() < clampf(grasp_capture_closure, 0.0, 1.0):
 		return false
 	if grasp_target.linear_velocity.length() > maxf(grasp_capture_max_object_speed, 0.0):
+		return false
+	if grasp_capture_max_tool_speed > 0.0 and _tool_speed > grasp_capture_max_tool_speed:
 		return false
 	return true
 
@@ -2626,6 +2733,108 @@ func get_home_still_reward() -> float:
 	return nearness * stillness
 
 
+## Speeds of the tool and of the cube, measured from their positions.
+##
+## Not from `linear_velocity`: with `grasp_attach_kinematic` a held cube is a kinematic body and
+## reports nothing, and the tool is a Marker3D with no velocity of its own at all.
+func _track_speeds(delta: float) -> void:
+	var step := maxf(delta, 0.0001)
+	var tool: Node3D = arm.tool_pose
+	var tool_here := tool.global_position if tool != null else Vector3.ZERO
+	var object_here := grasp_target.global_position if grasp_target != null else Vector3.ZERO
+	if not _speeds_seeded:
+		# The first frame after a reset has no previous position, and the jump from wherever the
+		# bodies were would read as a metre a second and reject every capture for one step.
+		_tool_previous = tool_here
+		_object_previous = object_here
+		_speeds_seeded = true
+		_tool_speed = 0.0
+		_object_flat_speed = 0.0
+		_object_rise = 0.0
+		return
+	_tool_speed = (tool_here - _tool_previous).length() / step
+	var moved := object_here - _object_previous
+	_object_rise = moved.y
+	var flat := moved
+	flat.y = 0.0
+	_object_flat_speed = flat.length() / step
+	_tool_previous = tool_here
+	_object_previous = object_here
+
+
+## Per-step cost in [-1, 0] for carrying the cube sideways before it is clear of the surface.
+##
+## Charged on HORIZONTAL speed only, so rising is always free and the way out of the penalty is up.
+## Zero once the cube is above the carry height, which is where the turn belongs.
+func get_carry_drag_penalty() -> float:
+	if grasp_target == null or not arm.is_grasp_attached() or _delivered:
+		return 0.0
+	var clear := _surface_top_y + maxf(carry_lift_height, 0.0)
+	if grasp_target.global_position.y >= clear:
+		return 0.0
+	return -clampf(_object_flat_speed / maxf(carry_drag_speed_scale, 0.0001), 0.0, 1.0)
+
+
+## Per-step reward in [0, 1] for gaining height with the cube in hand, until it is clear.
+##
+## Paid on the height GAINED this step, not on the height held, so standing still at any height earns
+## nothing and the only way to collect is to keep rising. It stops at the carry height because above
+## that the lift is done and the delivery takes over.
+func get_lift_first_reward() -> float:
+	if grasp_target == null or not arm.is_grasp_attached() or _delivered:
+		return 0.0
+	var clear := _surface_top_y + maxf(lift_first_ceiling, carry_lift_height)
+	if grasp_target.global_position.y >= clear:
+		return 0.0
+	if _object_rise <= 0.0:
+		return 0.0
+	return clampf(_object_rise / maxf(lift_first_scale, 0.0001), 0.0, 1.0)
+
+
+## Per-step cost in [-1, 0] for arriving at the cube fast.
+##
+## Charged only inside `approach_speed_radius` and only while empty-handed, so crossing the table at
+## speed is free and only the last few centimetres are asked to be gentle.
+func get_approach_speed_penalty() -> float:
+	if grasp_target == null or arm.is_grasp_attached() or _delivered:
+		return 0.0
+	var tool: Node3D = arm.tool_pose
+	if tool == null:
+		return 0.0
+	if tool.global_position.distance_to(grasp_target.global_position) > maxf(
+			approach_speed_radius, 0.0):
+		return 0.0
+	var excess := _tool_speed - maxf(grasp_capture_max_tool_speed, 0.0)
+	if excess <= 0.0:
+		return 0.0
+	return -clampf(excess / maxf(approach_speed_scale, 0.0001), 0.0, 1.0)
+
+
+## Per-step cost in [-1, 0] for coming down to the surface while still far from the cube.
+##
+## The floor penalty below charges for digging in, and nothing charges for skimming: in simulation
+## the arm can travel at 3 mm above the table for as long as it likes. The real arm cannot, because
+## it lags its own commands by a few millimetres and lands on the table instead. Measured at the
+## bench: commanded 6.2 mm of height 70 mm before the cube, reached 3.6.
+##
+## Zero inside the radius, where coming down is the whole point, and zero once holding.
+func get_approach_clearance_penalty() -> float:
+	if grasp_target == null or arm.is_grasp_attached() or _delivered:
+		return 0.0
+	var tool: Node3D = arm.tool_pose
+	if tool == null:
+		return 0.0
+	var here := tool.global_position
+	var flat := Vector2(here.x - grasp_target.global_position.x,
+			here.z - grasp_target.global_position.z).length()
+	if flat <= maxf(approach_clearance_radius, 0.0):
+		return 0.0
+	var below := (_surface_top_y + maxf(approach_clearance_height, 0.0)) - here.y
+	if below <= 0.0:
+		return 0.0
+	return -clampf(below / maxf(approach_clearance_scale, 0.0001), 0.0, 1.0)
+
+
 func get_claw_floor_penalty() -> float:
 	if _finger_tips.size() < 2:
 		return 0.0
@@ -2719,6 +2928,17 @@ func _calibrate() -> void:
 			bounds[0].x, bounds[1].x, bounds[0].z, bounds[1].z])
 
 
+## Half extents of a box along the WORLD axes, given the basis it sits in.
+##
+## Each world axis takes a contribution from every local one, which is what a rotation does; the
+## absolute values are because an extent has no sign.
+func _world_extents(basis: Basis, half: Vector3) -> Vector3:
+	return Vector3(
+		absf(basis.x.x) * half.x + absf(basis.y.x) * half.y + absf(basis.z.x) * half.z,
+		absf(basis.x.y) * half.x + absf(basis.y.y) * half.y + absf(basis.z.y) * half.z,
+		absf(basis.x.z) * half.x + absf(basis.y.z) * half.y + absf(basis.z.z) * half.z)
+
+
 func _shape_half_extents(root: Node3D) -> Vector3:
 	if root == null:
 		return Vector3.ZERO
@@ -2728,7 +2948,12 @@ func _shape_half_extents(root: Node3D) -> Vector3:
 			continue
 		var scale := collider.global_basis.get_scale().abs()
 		if collider.shape is BoxShape3D:
-			return (collider.shape as BoxShape3D).size * 0.5 * scale
+			# Rotated into the world, not just scaled. The spawn area is turned a quarter turn, so
+			# taking the box's own half extents gave a rectangle with its sides swapped: same
+			# centre, 7.5 mm narrower in x and 7.5 mm deeper in z than the one drawn on the floor.
+			# The middle matched and the corners did not, which is exactly what the arm did.
+			return _world_extents(collider.global_basis,
+					(collider.shape as BoxShape3D).size * 0.5)
 		if collider.shape is SphereShape3D:
 			var r := (collider.shape as SphereShape3D).radius
 			return Vector3(r, r, r) * scale
@@ -2821,11 +3046,11 @@ func _on_episode_reset_started(seed_value: int) -> void:
 	arm.orientation_progress_weight = arm.orientation_progress_weight if orientation_matters else 0.0
 	target_yaw_follows_azimuth = target_yaw_follows_azimuth and orientation_matters
 	if log_capture_rejections and _capture_attempts > 0:
-		print(("[cattura] tentativi %d | rifiuti: fra-le-punte %d, lato %d, profondita %d, laterale %d, varco %d, moto %d"
-			+ " | migliori: lato %+.4f profondita %.4f laterale %.4f varco %+.4f moto %.3f") % [
+		print(("[cattura] tentativi %d | rifiuti: fra-le-punte %d, lato %d, profondita %d, laterale %d, varco %d, moto %d, mano-in-moto %d"
+			+ " | migliori: lato %+.4f profondita %.4f laterale %.4f varco %+.4f moto %.3f mano %.3f") % [
 			_capture_attempts, _reject_between, _reject_across, _reject_depth, _reject_side,
-			_reject_gap, _reject_speed,
-			_best_across, _best_depth, _best_side, _best_gap, _best_speed])
+			_reject_gap, _reject_speed, _reject_tool_speed,
+			_best_across, _best_depth, _best_side, _best_gap, _best_speed, _best_tool_speed])
 		# The rung the hand is being seeded on. Zero means the seed puts it ON the cube, which is
 		# where it stays until a capture pays for a retreat -- silent otherwise, and easy to mistake
 		# for a scene that simply never starts from home.
@@ -2839,6 +3064,8 @@ func _on_episode_reset_started(seed_value: int) -> void:
 		if _carry_highest > -INF:
 			print("[trasporto] cubo alzato al massimo a %.1f mm (a riposo %.1f)" % [
 				_carry_highest * 1000.0, (_surface_top_y + _object_half_extents.y) * 1000.0])
+		if _carry_highest > -INF:
+			print("[trasporto] viaggio orizzontale sotto quota: %.1f mm" % [_low_travel * 1000.0])
 		if _tip_lowest < INF:
 			print("[chele] punta piu' bassa %.1f mm (pavimento a %.1f, cubo a riposo %.1f)" % [
 				_tip_lowest * 1000.0, _surface_top_y * 1000.0,
@@ -2854,6 +3081,8 @@ func _on_episode_reset_started(seed_value: int) -> void:
 	_cube_lowest = INF
 	_tip_lowest = INF
 	_carry_highest = -INF
+	_low_travel = 0.0
+	_dragged = false
 	_floor_breached = false
 	_breach_depth_max = 0.0
 	_breach_source = ""
@@ -2872,6 +3101,7 @@ func _on_episode_reset_started(seed_value: int) -> void:
 	_reject_side = 0
 	_reject_gap = 0
 	_reject_speed = 0
+	_reject_tool_speed = 0
 	_best_across = INF
 	_best_between = INF
 	_best_reach = INF
@@ -2879,6 +3109,8 @@ func _on_episode_reset_started(seed_value: int) -> void:
 	_best_side = INF
 	_best_gap = INF
 	_best_speed = INF
+	_best_tool_speed = INF
+	_speeds_seeded = false
 	_carrying = false
 	_delivered = false
 	_zone_crossed = false
@@ -2936,10 +3168,35 @@ func _sample_spawn_position(rng: RandomNumberGenerator) -> Vector3:
 	var bounds := _spawn_bounds()
 	var lower: Vector3 = bounds[0]
 	var upper: Vector3 = bounds[1]
+	if spawn_grid_cells <= 1:
+		return Vector3(
+			rng.randf_range(lower.x, upper.x),
+			_surface_top_y + _object_half_extents.y,
+			rng.randf_range(lower.z, upper.z))
+	if _spawn_order.is_empty():
+		_reshuffle_spawn_order(rng)
+	var cell: int = _spawn_order.pop_back()
+	var across := cell % spawn_grid_cells
+	var along := cell / spawn_grid_cells
+	var step_x := (upper.x - lower.x) / float(spawn_grid_cells)
+	var step_z := (upper.z - lower.z) / float(spawn_grid_cells)
 	return Vector3(
-		rng.randf_range(lower.x, upper.x),
+		lower.x + (float(across) + rng.randf()) * step_x,
 		_surface_top_y + _object_half_extents.y,
-		rng.randf_range(lower.z, upper.z))
+		lower.z + (float(along) + rng.randf()) * step_z)
+
+
+## A fresh shuffled pass over every cell, so a whole sweep happens before any cell repeats.
+func _reshuffle_spawn_order(rng: RandomNumberGenerator) -> void:
+	var total := spawn_grid_cells * spawn_grid_cells
+	_spawn_order.clear()
+	for i in range(total):
+		_spawn_order.append(i)
+	for i in range(total - 1, 0, -1):
+		var j := rng.randi_range(0, i)
+		var keep: int = _spawn_order[i]
+		_spawn_order[i] = _spawn_order[j]
+		_spawn_order[j] = keep
 
 
 ## Forces the next spawns to a chosen spot, or hands sampling back to the episode RNG.
