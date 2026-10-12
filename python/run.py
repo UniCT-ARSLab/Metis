@@ -412,6 +412,12 @@ def select_multi_hybrid_actions(model, obs_batch, agent_ids, action_meta):
     }
 
 
+def uses_actor_critic_heads(action_type, algorithm):
+    """PPO exposes logits plus a value head even when its action space is a single discrete
+    component, so it must be decoded through the actor-critic path rather than as Q-values."""
+    return action_type == "hybrid" or (algorithm == "ppo" and action_type == "discrete")
+
+
 def build_inference_model(algorithm, env, action_meta=None):
     if algorithm == "dqn":
         return build_shared_q_network(
@@ -561,7 +567,7 @@ def select_multi_policy_actions(
         policy_id = assignment.policy_for_agent(agent_id)
         model = models[policy_id]
         obs = obs_batch[agent_idx]
-        if env.action_type == "hybrid":
+        if uses_actor_critic_heads(env.action_type, algorithm):
             actions[agent_id] = select_hybrid_action(
                 model,
                 obs,
@@ -1051,7 +1057,7 @@ def main():
                         action_meta,
                         args.epsilon,
                     )
-                elif env.action_type == "hybrid":
+                elif uses_actor_critic_heads(env.action_type, algorithm):
                     if args.multi_agent:
                         action = select_multi_hybrid_actions(model, obs, env.agent_ids, action_meta)
                     else:
