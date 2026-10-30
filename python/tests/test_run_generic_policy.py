@@ -17,10 +17,13 @@ from run import (
     normalize_checkpoint_path,
     parse_args,
     resolve_algorithm,
+    select_multi_hybrid_actions,
     should_preserve_state,
     summarize_episode_outcome,
+    uses_actor_critic_heads,
     wait_for_realtime_tick,
 )
+from algorithms.ppo import build_action_metadata, build_hybrid_actor_critic
 
 
 class RunGenericPolicyTests(unittest.TestCase):
@@ -125,6 +128,30 @@ class RunGenericPolicyTests(unittest.TestCase):
         env = type("Env", (), {"action_type": "discrete"})()
         with self.assertRaisesRegex(RuntimeError, "does not match policy manifest"):
             resolve_algorithm("dqn", env, "legacy.weights.h5", {"algorithm": "ppo"})
+
+    def test_ppo_on_a_plain_discrete_scenario_is_decoded_from_logits(self):
+        # Pong exposes one discrete component. PPO's model returns logits plus a value, which
+        # the Q-value path (argmax over the model output) cannot read.
+        self.assertTrue(uses_actor_critic_heads("hybrid", "ppo"))
+        self.assertTrue(uses_actor_critic_heads("discrete", "ppo"))
+        self.assertFalse(uses_actor_critic_heads("discrete", "dqn"))
+        self.assertFalse(uses_actor_critic_heads("continuous", "ppo"))
+
+        meta = build_action_metadata({
+            "action": {"action_type": "discrete", "names": ["idle", "up", "down"], "size": 3}
+        })
+        model = build_hybrid_actor_critic(
+            obs_dim=6,
+            discrete_sizes=meta["discrete_sizes"],
+            continuous_size=meta["continuous_size"],
+        )
+        obs = np.random.default_rng(3).normal(size=(2, 6)).astype(np.float32)
+        actions = select_multi_hybrid_actions(model, obs, ["LeftPaddle", "RightPaddle"], meta)
+
+        self.assertEqual(set(actions), {"LeftPaddle", "RightPaddle"})
+        for value in actions.values():
+            self.assertIsInstance(value, int)
+            self.assertIn(value, (0, 1, 2))
 
     def test_multi_policy_checkpoint_restores_each_model_by_policy_key(self):
         assignment = PolicyAssignment(
