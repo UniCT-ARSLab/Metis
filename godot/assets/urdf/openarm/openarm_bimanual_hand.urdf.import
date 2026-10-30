@@ -1,0 +1,16 @@
+[remap]
+
+importer="godot_urdf"
+type="PackedScene"
+uid="uid://c8n3305kxjbn"
+path="res://.godot/imported/openarm_bimanual_hand.urdf-5ce54bfd45ba82b7a107bb87bfe3e4b2.tscn"
+
+[deps]
+
+source_file="res://assets/urdf/openarm/openarm_bimanual_hand.urdf"
+dest_files=["res://.godot/imported/openarm_bimanual_hand.urdf-5ce54bfd45ba82b7a107bb87bfe3e4b2.tscn"]
+
+[params]
+
+package_folder="res://assets/urdf"
+scale=0.001

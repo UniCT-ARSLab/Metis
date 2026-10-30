@@ -927,6 +927,7 @@ class TensorFlowCheckpointRecovery:
         keep_diagnostics=3,
         policy_publisher=None,
         post_restore=None,
+        learning_rate_control=None,
     ):
         self.checkpoint = checkpoint
         self.directory = Path(checkpoint_dir) / "recovery"
@@ -938,6 +939,7 @@ class TensorFlowCheckpointRecovery:
         self.keep_diagnostics = max(1, int(keep_diagnostics))
         self.policy_publisher = policy_publisher
         self.post_restore = post_restore
+        self.learning_rate_control = learning_rate_control
 
     def set_policy_publisher(self, callback):
         self.policy_publisher = callback
@@ -959,14 +961,22 @@ class TensorFlowCheckpointRecovery:
         self.checkpoint.write(str(diagnostic_prefix))
         self._prune_diagnostics()
 
+        previous_rates = {name: self._read_learning_rate(optimizer) for name, optimizer, _rate in self.optimizers}
         self.checkpoint.restore(checkpoint_path).expect_partial()
+        actor_ema = getattr(self.checkpoint, "actor_ema", None)
+        if actor_ema is not None:
+            actor_ema.after_restore(checkpoint_path)
         learning_rates = {}
         for name, optimizer, original_rate in self.optimizers:
             factor = self._learning_rate_factor(name, request)
             scale = max(request.minimum_learning_rate_scale, factor)
             target = original_rate * scale
+            if self.learning_rate_control is not None:
+                target = self.learning_rate_control.recovery_rate(name, previous_rates[name], factor, request.minimum_learning_rate_scale, original_rate)
             optimizer.learning_rate.assign(target)
             learning_rates[name] = target
+        if self.learning_rate_control is not None:
+            self.learning_rate_control.remember_rates()
 
         if self.policy_publisher is not None:
             self.policy_publisher()

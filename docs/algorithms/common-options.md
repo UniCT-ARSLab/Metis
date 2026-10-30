@@ -1,11 +1,8 @@
 # Shared training options
 
-The native trainers share environment processes, collectors, checkpointing,
-evaluation, curriculum, health monitoring, and observability. Their complete command
-line is therefore the union of this page and the algorithm-specific page.
+The native trainers share environment processes, collectors, checkpointing, evaluation, curriculum, health monitoring, and observability. Their complete command line is therefore the union of this page and the algorithm-specific page.
 
-Boolean flags use Python's paired form: `--headless` enables a setting and
-`--no-headless` disables it. The table shows both only where the distinction helps.
+Boolean flags use Python's paired form: `--headless` enables a setting and `--no-headless` disables it. The table shows both only where the distinction helps.
 
 ## Reading the option list from the CLI
 
@@ -15,13 +12,9 @@ Name an algorithm and `train.py` prints that trainer's own help, grouped by topi
 python python/train.py --algorithm sac --help
 ```
 
-Without an algorithm — or with `--algorithm auto` — only the dispatcher's own options are
-listed. `auto` cannot be resolved for a help request, because deciding which learner it
-means requires launching Godot to inspect the scenario's action space.
+Without an algorithm — or with `--algorithm auto` — only the dispatcher's own options are listed. `auto` cannot be resolved for a help request, because deciding which learner it means requires launching Godot to inspect the scenario's action space.
 
-The Godot add-on reads the same specification, which is how its Train wizard keeps the
-"All options" list in step with the CLI. It caches the result in `.metis/argspec.json` and
-regenerates it whenever the Python sources are newer.
+The Godot add-on reads the same specification, which is how its Train wizard keeps the "All options" list in step with the CLI. It caches the result in `.metis/argspec.json` and regenerates it whenever the Python sources are newer.
 
 ## Entrypoint and task
 
@@ -48,8 +41,7 @@ regenerates it whenever the Python sources are newer.
 
 ### Network architecture
 
-`--network-layers` is optional. Left out, each algorithm builds the architecture from its
-reference paper:
+`--network-layers` is optional. Left out, each algorithm builds the architecture from its reference paper:
 
 | Algorithm | Default hidden layers | Source |
 |---|---|---|
@@ -65,23 +57,17 @@ Pass a space-separated list of widths to override it:
 python python/train.py --algorithm sac --network-layers 512 512 256 ...
 ```
 
-The list applies to every network the algorithm builds — the actor, both critics, and the
-DQN Q network. The SB3 backend ignores it and keeps its own `--network`.
+The list applies to every network the algorithm builds — the actor, both critics, and the DQN Q network. The SB3 backend ignores it and keeps its own `--network`.
 
-**Checkpoints built before this change used `256 256 128` for every algorithm.** A TF
-checkpoint only restores into the architecture it was saved with, so resuming, evaluating
-or exporting one of those needs the old widths spelled out:
+**Checkpoints built before this change used `256 256 128` for every algorithm.** A TF checkpoint only restores into the architecture it was saved with, so resuming, evaluating or exporting one of those needs the old widths spelled out:
 
 ```bash
 python python/run.py --load-from checkpoints/OLD_RUN --network-layers 256 256 128 ...
 ```
 
-`policy.keras` bundles are unaffected: they carry their own architecture and load either
-way. The same rule applies to any run of your own — record the widths you trained with, or
-keep the default and it stays implicit.
+`policy.keras` bundles are unaffected: they carry their own architecture and load either way. The same rule applies to any run of your own — record the widths you trained with, or keep the default and it stays implicit.
 
-Frozen best-policy evaluations inherit the flag automatically: the trainer forwards it to
-the `run.py` subprocess it spawns, so evaluations rebuild the same architecture.
+Frozen best-policy evaluations inherit the flag automatically: the trainer forwards it to the `run.py` subprocess it spawns, so evaluations rebuild the same architecture.
 
 ## Godot execution and rendering
 
@@ -101,6 +87,7 @@ the `run.py` subprocess it spawns, so evaluations rebuild the same architecture.
 | Flag | Meaning |
 |---|---|
 | `--collector-mode {sync,async}` | Batched lockstep collection or independent collector workers. Native default: `async`. |
+| `--sync-batch-steps N` | Sync reporting/collection window; default `0`. Positive values also enable DQN independent resets in its supported single-agent shared-policy configuration; see the algorithm page. |
 | `--async-queue-capacity N` | Maximum pending collector events before backpressure. Default: `256`. |
 | `--async-policy-sync-steps N` | Collector steps between checks for new learner weights. Default: `100`. |
 | `--async-policy-publish-updates N` | Learner updates between published policy snapshots. Default: `100`. |
@@ -111,10 +98,7 @@ the `run.py` subprocess it spawns, so evaluations rebuild the same architecture.
 | `--async-drain-max-events N` | Events moved from the async queue before scheduled learning. Default: `64`. |
 | `--async-replay-save / --no-async-replay-save` | Save replay snapshots in a background thread. Enabled by default. |
 
-Async collectors deliberately act on slightly stale published policies. Transitions
-retain their worker and policy context; they are not mixed between unrelated
-independent policies. PPO uses versioned on-policy batches and has additional rollout
-constraints described on its own page.
+Async collectors are threads in one Python process, not separate Python learner processes. They deliberately act on slightly stale published policies. Transitions retain their worker and policy context; they are not mixed between unrelated independent policies. SAC and PPO use independent seeded sampling streams per async worker and policy, without guaranteeing bitwise reproducibility of whole training runs. PPO uses versioned on-policy batches and has additional rollout constraints described on its own page.
 
 ## Multi-agent, multi-policy, and opponents
 
@@ -132,9 +116,7 @@ constraints described on its own page.
 | `--opponent-sampling {uniform,latest}` | Sample all retained opponents uniformly or prefer the latest. |
 | `--learner-team ID` | Team controlled by the learner when the other team is sampled from history. |
 
-Independent native multi-policy training supports sync and async collection. Historical
-opponent pools have narrower compatibility: DQN supports async sampling, while the
-continuous and PPO opponent-pool paths require synchronous collection.
+Independent native multi-policy training supports sync and async collection. Historical opponent pools have narrower compatibility: DQN supports async sampling, while the continuous and PPO opponent-pool paths require synchronous collection.
 
 ## Checkpoints, policies, and replay
 
@@ -149,43 +131,58 @@ continuous and PPO opponent-pool paths require synchronous collection.
 | `--save-replay-buffer / --no-save-replay-buffer` | Persist off-policy replay alongside checkpoints. |
 | `--require-replay-buffer` | Fail a resume when the matching replay snapshot is absent instead of starting with empty replay. |
 
-`--resume` and `--policy-path` are not interchangeable. Resume is for continuing the
-same experiment contract; policy warm-start is for transferring only the policy into
-a fresh optimization state.
+`--resume` and `--policy-path` are not interchangeable. Resume is for continuing the same experiment contract; policy warm-start is for transferring only the policy into a fresh optimization state.
 
-## Demonstrations
+## Training stability
 
-These flags appear on replay-based trainers. PPO currently learns from on-policy
-rollouts rather than replay demonstrations.
+See [Training stability controls](../training-stability.md) for the independent certification procedure, statistical assumptions, resume state, actor EMA and Godot margin reward. These features are optional native-trainer controls and do not change default training behavior.
+
+Solved stopping, evaluation-driven LR scheduling and cumulative recovery require best-checkpoint evaluation. Solved certification currently requires single-agent, single-policy training; actor EMA is limited to the single-policy SAC/DDPG/TD3 family. Evaluation-driven solved/LR controls use a fixed evaluation difficulty rather than following the live episode count; pin it explicitly with `--best-evaluation-training-episode` when extending an existing run. Keep `training_control.json` and its checkpoint directory together on resume.
 
 | Flag | Meaning |
 |---|---|
-| `--demo-path PATH` | Add a complete transition dataset. Repeatable. It can feed BC and replay. |
-| `--demo-prefill / --no-demo-prefill` | Insert complete demonstration transitions into replay. Enabled by default. |
-| `--demo-max-transitions N` | Per-source transition cap; `0` loads all transitions. |
+| `--stop-when-solved P` | Qualify and independently certify a solved candidate; unset disables stopping. Requires `0 < P < 1`. |
+| `--solved-patience N` | Consecutive qualifying frozen evaluations; default `3`. |
+| `--solved-certification-episodes N` | Fresh single-agent episodes per attempt; default `300`. |
+| `--solved-certification-seed N` | First held-out deck seed; default `1000000000`. Later attempts reserve fresh blocks. |
+| `--solved-certification-confidence P` | Run-scoped confidence budget; default `0.95`, divided across attempts and region checks. |
+| `--lr-decay-on-plateau X` | Multiply registered optimizer rates after a plateau; unset disables it. |
+| `--lr-plateau-patience N` | Evaluations without improvement before reduction; default `6`. |
+| `--lr-decay-on-best X` | Alternative opt-in reduction on each new best; mutually exclusive with plateau mode. |
+| `--lr-min-scale X` | Scheduler floor relative to the first controlled rates; default `0.01`. |
+| `--recovery-lr-cumulative / --no-recovery-lr-cumulative` | Compound recovery reductions without undoing earlier cuts; off by default. |
+| `--actor-ema-decay X` | Single-policy SAC/DDPG/TD3-family evaluation/export actor averaging; `0` disables it. Not a PPO/DQN flag. |
+
+## Demonstrations
+
+Replay-based trainers can prefill demonstrations into replay. PPO instead supports separate supervised expert pretraining and an optional auxiliary imitation loss; it never inserts expert data into on-policy rollouts. See [PPO demonstrations](ppo.md#demonstrations) for its supported flags, dataset contracts, and resume behavior.
+
+| Flag | Meaning |
+|---|---|
+| `--demo-path PATH` | Repeatable expert dataset. Off-policy trainers require complete transitions for replay; PPO reads only observation/action labels. |
+| `--demo-prefill / --no-demo-prefill` | Replay-based trainers: insert complete demonstration transitions into replay. Enabled by default; not a PPO option. |
+| `--demo-protect / --no-demo-protect` | SAC only: reserve complete prefilled demonstrations against replay overwrite. Off by default; saved replay protection survives resume and hard recovery. |
+| `--demo-max-transitions N` | Off-policy per-source transition cap; PPO caps training labels across sources. `0` loads all. |
 | `--demo-bc-epochs N` | Behavior-cloning epochs before RL; `0` disables BC. |
 | `--demo-bc-batch-size N` | BC minibatch size. Default: `128`. |
 | `--demo-bc-learning-rate LR` | Optional BC optimizer rate; omitted uses the trainer's policy/actor rate. |
 | `--demo-bc-on-resume` | Repeat BC after restoring a checkpoint. Off by default. |
-| `--demo-validation-path PATH` | Held-out demonstrations used to restore the BC epoch with the lowest action MSE. Repeatable where supported. |
+| `--demo-validation-path PATH` | Held-out demonstrations for BC epoch selection: action MSE for continuous off-policy cloning, mixed categorical/MSE imitation loss for PPO. Repeatable where supported. |
 | `--demo-bc-path PATH` | Imitation-only `(obs, action)` labels; never inserted into replay. |
 | `--demo-replay-only-path PATH` | Complete transitions inserted only into replay and excluded from BC. Deterministic family only. |
 | `--bc-actor-weights-path PATH` | Save the actor immediately after BC, before critic warmup or RL updates. |
-| `--stop-after-bc` | Save and frozen-evaluate the cloned actor, then exit before RL. |
+| `--stop-after-bc` | Save and stop before RL. Supported off-policy paths frozen-evaluate the clone; PPO requires a separate `run.py` evaluation. |
 | `--stop-after-critic-warmup` | Deterministic family: audit the warmed critics and stop before actor updates. |
 | `--gradient-telemetry-every N` | Deterministic family: periodically measure Q/BC gradient norms, cosine, and actor drift; `0` disables it. |
 | `--critic-audit-win-rate P` | Minimum per-sample good-versus-bad Q ranking used by the warmup audit. Default: `0.9`. |
 | `--critic-audit-cell-margin-tol X` | Allowed negative per-cell mean Q margin in the warmup audit. Default: `0`. |
 | `--demo-q-filter-start-policy-updates N` | Delay Q-filter activation until this many post-warmup policy updates. |
 
-Only use a transition in replay when its `next_obs`, reward, and termination were
-produced by executing the recorded action. Corrective labels for learner-generated
-next states belong in `--demo-bc-path`, not replay.
+Only use a transition in replay when its `next_obs`, reward, and termination were produced by executing the recorded action. Corrective labels for learner-generated next states belong in `--demo-bc-path`, not replay.
 
 ## Deterministic continuous family
 
-DDPG, DDPG+BC, DDPGfD, TD3, and TD3+BC share these options. The variant pages list
-the flags layered on top.
+DDPG, DDPG+BC, DDPGfD, TD3, and TD3+BC share these options. The variant pages list the flags layered on top.
 
 | Flag | Meaning |
 |---|---|
@@ -213,9 +210,7 @@ the flags layered on top.
 | `--actor-weights-path PATH` | Final/legacy actor weights output. |
 | `--critic-weights-path PATH` | First critic weights output. |
 
-The drive prior flags predate task-neutral action metadata. They are useful only when
-the first channels really mean drive and steering; for arbitrary robot joints, disable
-`--actor-drive-regularization` instead of imposing that semantic prior.
+The drive prior flags predate task-neutral action metadata. They are useful only when the first channels really mean drive and steering; for arbitrary robot joints, disable `--actor-drive-regularization` instead of imposing that semantic prior.
 
 ## Best-policy evaluation and curriculum
 
@@ -228,7 +223,7 @@ the first channels really mean drive and steering; for arbitrary robot joints, d
 | `--best-evaluation-episodes N` | Episodes in each evaluation. Default: `20`. |
 | `--best-evaluation-seed N` | First deterministic evaluation seed. Default: `10000`. |
 | `--best-evaluation-training-episode N` | Fixed episode/curriculum value passed to Godot during every evaluation. |
-| `--best-evaluation-follow-curriculum` | Evaluate at the live training difficulty. Enabled by default. |
+| `--best-evaluation-follow-curriculum` | Evaluate at live training difficulty by default; solved/LR scheduling fixes the evaluation episode instead. |
 | `--best-evaluation-max-steps N` | Evaluation time limit; `0` means unlimited. |
 | `--best-evaluation-port PORT` | Port for the isolated evaluator. |
 | `--best-evaluation-timeout SECONDS` | Wall-time timeout for one evaluation. Default: `1800`. |
@@ -275,8 +270,7 @@ the first channels really mean drive and steering; for arbitrary robot joints, d
 | `--recovery-cooldown-evaluations N` | Evaluations before another recovery. Default: `2`. |
 | `--recovery-keep-diagnostics N` | Pre-recovery diagnostic checkpoints retained. Default: `3`. |
 
-Recovery is a guardrail, not an optimizer. A wrong reward, unreachable target, invalid
-collision geometry, or incompatible checkpoint should be fixed at the task contract.
+Recovery is a guardrail, not an optimizer. A wrong reward, unreachable target, invalid collision geometry, or incompatible checkpoint should be fixed at the task contract.
 
 ## Logs, dashboard, and TensorFlow
 
@@ -293,8 +287,7 @@ collision geometry, or incompatible checkpoint should be fixed at the task contr
 
 ## Checking the installed version
 
-Flags can evolve. Ask the exact checkout or installed package before launching a long
-run:
+Flags can evolve. Ask the exact checkout or installed package before launching a long run:
 
 ```bash
 PYTHONPATH=python python/.venv/bin/python -m algorithms.td3_bc --help

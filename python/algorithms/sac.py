@@ -53,6 +53,7 @@ from core.multi_policy import (
     write_multi_policy_manifest,
 )
 from core.policy_artifact import PolicyArtifactSaver, build_policy_metadata, load_policy_into_model
+from core.actor_ema import ActorEMA, add_actor_ema_arguments, configure_actor_ema, validate_actor_ema_options, validate_actor_ema_checkpoint
 from core.transition_snapshots import TransitionSnapshotPublisher
 from core.opponent_pool import OpponentPool, add_opponent_pool_arguments, validate_team_layout
 from core.replay_buffer import ReplayBuffer
@@ -227,6 +228,7 @@ def parse_args():
             "The deterministic action mean always has weight 1."
         ),
     )
+    add_actor_ema_arguments(group)
     group.add_argument("--log-std-min", type=float, default=-20.0)
     group.add_argument("--log-std-max", type=float, default=2.0)
 
@@ -322,6 +324,7 @@ def parse_args():
     group = argument_group(parser, GROUP_DEMOS)
     group.add_argument("--demo-path", action="append", default=[])
     group.add_argument("--demo-prefill", action=argparse.BooleanOptionalAction, default=True)
+    group.add_argument("--demo-protect", action=argparse.BooleanOptionalAction, default=False, help="Protect prefilled expert transitions from replay overwrite. Requires complete demonstrations and demo prefill; restored protected replays retain their protection.")
     group.add_argument("--demo-max-transitions", type=int, default=0)
     group.add_argument("--demo-bc-epochs", type=int, default=0)
     group.add_argument("--demo-bc-batch-size", type=int, default=128)
@@ -407,6 +410,43 @@ def parse_args():
     return parser.parse_args()
 
 
+def validate_demo_protection(args, buffer=None):
+    if not getattr(args, "demo_protect", False):
+        return
+    if not args.demo_prefill:
+        raise ValueError("--demo-protect requires --demo-prefill")
+    if getattr(args, "multi_policy", False):
+        raise ValueError("--demo-protect currently supports single-policy SAC only")
+    if buffer is None:
+        if not args.demo_path and not (args.resume or args.resume_checkpoint):
+            raise ValueError("--demo-protect requires --demo-path or a restored protected replay")
+        if args.replay_capacity < 2:
+            raise ValueError("--demo-protect requires room for demonstrations and online transitions")
+    elif len(buffer) and not buffer.protected_demo_count:
+        raise ValueError("Cannot enable --demo-protect on an existing unprotected replay; use a fresh replay or restore a checkpoint with protected demonstrations")
+
+
+def prefill_demonstrations(args, buffer, demo_data):
+    validate_demo_protection(args, buffer)
+    if buffer.protected_demo_count:
+        return 0
+    protect = bool(getattr(args, "demo_protect", False))
+    if demo_data is None or not args.demo_prefill:
+        if protect:
+            raise ValueError("--demo-protect requires nonempty complete demonstration transitions")
+        return 0
+    count = len(demo_data["actions"])
+    if protect and (count <= 0 or count >= buffer.capacity):
+        raise ValueError("Protected demonstrations must be nonempty and fit replay capacity with room for online transitions; increase --replay-capacity or limit --demo-max-transitions")
+    return buffer.add_many(demo_data["obs"], demo_data["actions"], demo_data["rewards"], demo_data["next_obs"], demo_data["dones"], is_demo=True, protect=protect)
+
+
+def demonstration_metrics(buffer):
+    if not buffer.protected_demo_count:
+        return []
+    return list(buffer.demo_sampling_stats.items())
+
+
 def scale_action_tensor(raw_action, action_low, action_high):
     return action_low + 0.5 * (raw_action + 1.0) * (action_high - action_low)
 
@@ -477,15 +517,8 @@ def select_action(actor, obs, action_low, action_high, log_std_min, log_std_max)
 
 
 def build_sac_sample_fn(actor, obs_dim, action_low, action_high, log_std_min, log_std_max,
-                        device="/CPU:0", deterministic=False):
-    """Trace the squashed-Gaussian sample into one graph per collector.
-
-    The collector calls the actor and tf.random.normal in eager mode. Run concurrently
-    from several collector threads that is the exact hazard that crashed PPO -- shape
-    corruption at best, silently wrong actions at worst. A traced concrete function is
-    safe to call across threads; pinning to `device` keeps the ops with the CPU weights.
-    Mirrors build_greedy_action_fn (DQN) and build_sample_action_fn (PPO).
-    """
+                        device="/CPU:0", deterministic=False, rng_gen=None):
+    """Trace CPU collector sampling; an explicit generator isolates its Gaussian stream."""
     low = tf.constant(np.asarray(action_low, dtype=np.float32).reshape(1, -1))
     high = tf.constant(np.asarray(action_high, dtype=np.float32).reshape(1, -1))
 
@@ -498,11 +531,31 @@ def build_sac_sample_fn(actor, obs_dim, action_low, action_high, log_std_min, lo
                 pre_tanh = mean
             else:
                 std = tf.exp(log_std)
-                pre_tanh = mean + std * tf.random.normal(tf.shape(mean))
+                noise = rng_gen.normal(tf.shape(mean)) if rng_gen is not None else tf.random.normal(tf.shape(mean))
+                pre_tanh = mean + std * noise
             raw_action = tf.tanh(pre_tanh)
             return low + 0.5 * (raw_action + 1.0) * (high - low)
 
+    sample.rng_gen = rng_gen
     return sample
+
+
+def build_sac_collector_sample_fns(local_models, obs_dim, action_low, action_high,
+                                   log_std_min, log_std_max, seed):
+    """Split seeded CPU streams by collector and, where present, independent policy."""
+    with tf.device("/CPU:0"):
+        collector_rngs = tf.random.Generator.from_seed(int(seed), alg="philox").split(len(local_models))
+        sample_fns = []
+        for worker_models, worker_rng in zip(local_models, collector_rngs):
+            if isinstance(worker_models, dict):
+                policy_rngs = worker_rng.split(len(worker_models))
+                sample_fns.append({
+                    policy_id: build_sac_sample_fn(model, obs_dim, action_low, action_high, log_std_min, log_std_max, rng_gen=policy_rng)
+                    for (policy_id, model), policy_rng in zip(worker_models.items(), policy_rngs)
+                })
+            else:
+                sample_fns.append(build_sac_sample_fn(worker_models, obs_dim, action_low, action_high, log_std_min, log_std_max, rng_gen=worker_rng))
+        return sample_fns
 
 
 def build_sac_log_prob_fn(actor, obs_dim, log_std_min, log_std_max, device="/CPU:0"):
@@ -580,17 +633,17 @@ def build_sac_learner_step(
     caps_sigma=0.05,
     actor_anchor_coef=0.0,
     actor_anchor_log_std_coef=0.1,
+    tau=None,
+    target_update_every=None,
+    actor_ema=None,
 ):
-    """Build the SAC gradient step, optionally compiled into a tf.function.
-
-    Eager updates dispatch each op individually and force a host sync via .numpy() every
-    call, which makes the learner the async pipeline's bottleneck (queue saturates). A
-    traced graph fuses the forward/backward/apply into one launch (typically 5-10x). Mirrors
-    build_dqn_learner_step. The `update_policy` flag is a Python bool, so it selects between
-    two concrete functions (critics-only vs full) to keep each graph's output structure
-    fixed instead of returning None from inside a graph. Sampling stays in Python (the
-    replay buffer is not a tensor); only the tensor math is graphed.
-    """
+    """Build SAC updates with optional fused target averaging and one host metric read."""
+    if tau is not None and (not np.isfinite(tau) or not 0.0 <= tau <= 1.0):
+        raise ValueError("SAC target averaging tau must be finite and within [0, 1]")
+    if target_update_every is not None:
+        if tau is None or int(target_update_every) < 1:
+            raise ValueError("SAC target cadence requires tau and a positive interval")
+        target_update_every = int(target_update_every)
     gamma_c = tf.constant(float(gamma), dtype=tf.float32)
     action_low_tensor = tf.constant(np.asarray(action_low, dtype=np.float32).reshape(1, -1))
     action_high_tensor = tf.constant(np.asarray(action_high, dtype=np.float32).reshape(1, -1))
@@ -661,6 +714,22 @@ def build_sac_learner_step(
     clip_critic2 = _make_clipper("critic2")
     clip_actor = _make_clipper("actor")
 
+    def _finish_update(losses, update_targets):
+        target_completion = tf.constant(0)
+        if tau is not None:
+            if update_targets is None and target_update_every is not None:
+                update_targets = tf.equal(critic1_optimizer.iterations % target_update_every, 0)
+            if update_targets is not None:
+                def average_targets():
+                    soft_update(target_critic1, critic1, tau)
+                    soft_update(target_critic2, critic2, tau)
+                    return tf.constant(0)
+
+                target_completion = tf.cond(update_targets, average_targets, lambda: tf.constant(0))
+        # Returning the packed metrics also waits for this decision's target updates.
+        with tf.control_dependencies([target_completion]):
+            return tf.stack(losses)
+
     def _update_critics_impl(obs, actions, rewards, next_obs, dones):
         alpha = tf.exp(log_alpha)
         next_actions, next_log_prob, _ = sample_actor(
@@ -686,7 +755,7 @@ def build_sac_learner_step(
         critic2_optimizer.apply_gradients(zip(critic2_grads, critic2.trainable_variables))
         return critic1_loss, critic2_loss
 
-    def _update_all_impl(obs, actions, rewards, next_obs, dones):
+    def _update_all_impl(obs, actions, rewards, next_obs, dones, update_targets):
         critic1_loss, critic2_loss = _update_critics_impl(obs, actions, rewards, next_obs, dones)
         alpha = tf.exp(log_alpha)
 
@@ -740,6 +809,8 @@ def build_sac_learner_step(
         actor_grads = tape.gradient(actor_loss, actor.trainable_variables)
         actor_grads = clip_actor(actor_grads)
         actor_optimizer.apply_gradients(zip(actor_grads, actor.trainable_variables))
+        if actor_ema is not None:
+            actor_ema.update()
 
         if tune_alpha:
             with tf.GradientTape() as tape:
@@ -754,39 +825,37 @@ def build_sac_learner_step(
         else:
             # Fixed alpha bypasses the entropy-coefficient optimizer.
             alpha_loss = tf.constant(0.0, dtype=tf.float32)
-        return actor_loss, critic1_loss, critic2_loss, alpha_loss, tf.exp(log_alpha)
+        return _finish_update((actor_loss, critic1_loss, critic2_loss, alpha_loss, tf.exp(log_alpha)), update_targets)
+
+    def _update_critics_only_impl(obs, actions, rewards, next_obs, dones, update_targets):
+        critic1_loss, critic2_loss = _update_critics_impl(obs, actions, rewards, next_obs, dones)
+        return _finish_update((tf.constant(0.0), critic1_loss, critic2_loss, tf.constant(0.0), tf.exp(log_alpha)), update_targets)
 
     if compiled:
-        update_critics = tf.function(_update_critics_impl, reduce_retracing=True, jit_compile=xla)
+        update_critics = tf.function(_update_critics_only_impl, reduce_retracing=True, jit_compile=xla)
         update_all = tf.function(_update_all_impl, reduce_retracing=True, jit_compile=xla)
     else:
-        update_critics = _update_critics_impl
+        update_critics = _update_critics_only_impl
         update_all = _update_all_impl
 
-    def learner_step(obs, actions, rewards, next_obs, dones, update_policy=True):
+    def learner_step(obs, actions, rewards, next_obs, dones, update_policy=True, *, update_targets=None):
+        if update_targets is not None:
+            if tau is None and update_targets:
+                raise ValueError("SAC target updates require tau")
+            update_targets = tf.convert_to_tensor(update_targets, dtype=tf.bool)
         obs = tf.convert_to_tensor(obs, dtype=tf.float32)
         actions = tf.convert_to_tensor(actions, dtype=tf.float32)
         rewards = tf.convert_to_tensor(np.asarray(rewards).reshape(-1, 1), dtype=tf.float32)
         next_obs = tf.convert_to_tensor(next_obs, dtype=tf.float32)
         dones = tf.convert_to_tensor(np.asarray(dones).reshape(-1, 1), dtype=tf.float32)
-        if update_policy:
-            actor_loss, critic1_loss, critic2_loss, alpha_loss, alpha_value = update_all(
-                obs, actions, rewards, next_obs, dones
-            )
-            return (
-                float(actor_loss.numpy()),
-                float(critic1_loss.numpy()),
-                float(critic2_loss.numpy()),
-                float(alpha_loss.numpy()),
-                float(alpha_value.numpy()),
-            )
-        critic1_loss, critic2_loss = update_critics(obs, actions, rewards, next_obs, dones)
+        update = update_all if update_policy else update_critics
+        values = update(obs, actions, rewards, next_obs, dones, update_targets).numpy()
         return (
-            None,
-            float(critic1_loss.numpy()),
-            float(critic2_loss.numpy()),
-            None,
-            float(tf.exp(log_alpha).numpy()),
+            float(values[0]) if update_policy else None,
+            float(values[1]),
+            float(values[2]),
+            float(values[3]) if update_policy else None,
+            float(values[4]),
         )
 
     return learner_step
@@ -1157,6 +1226,9 @@ def run_async_sac(
         caps_sigma=args.caps_sigma,
         actor_anchor_coef=args.actor_anchor_coef,
         actor_anchor_log_std_coef=args.actor_anchor_log_std_coef,
+        tau=args.tau,
+        target_update_every=args.target_update_every,
+        actor_ema=getattr(args, "_actor_ema", None),
     )
     print(
         f"SAC learner: {'compiled graph' if args.tf_compile_learner else 'eager'}"
@@ -1170,12 +1242,10 @@ def run_async_sac(
             build_sac_actor(obs_dim=obs_dim, action_size=action_size)
             for _env in envs
         ]
-    # One traced sampler per collector: they run concurrently and eager sampling is not
-    # thread-safe. set_weights on the closed-over actor keeps each trace current.
-    sample_fns = [
-        build_sac_sample_fn(m, obs_dim, action_low, action_high, args.log_std_min, args.log_std_max)
-        for m in local_models
-    ]
+    sample_fns = build_sac_collector_sample_fns(
+        local_models, obs_dim, action_low, action_high,
+        args.log_std_min, args.log_std_max, args.env_seed_base,
+    )
     snapshot = PolicySnapshot(actor.get_weights())
     health_monitor = getattr(best_tracker, "health_monitor", None)
     recovery_handler = getattr(health_monitor, "recovery_handler", None)
@@ -1246,17 +1316,7 @@ def run_async_sac(
         buffer,
         initial_critic_warmup=critic_warmup_target,
         normal_policy_update_every=args.policy_update_every,
-        replay_refill=(
-            lambda: buffer.add_many(
-                demo_data["obs"],
-                demo_data["actions"],
-                demo_data["rewards"],
-                demo_data["next_obs"],
-                demo_data["dones"],
-            )
-            if demo_data is not None and args.demo_prefill
-            else 0
-        ),
+        replay_refill=lambda: prefill_demonstrations(args, buffer, demo_data),
         target_sync=lambda: (
             target_critic1.set_weights(critic1.get_weights()),
             target_critic2.set_weights(critic2.get_weights()),
@@ -1287,6 +1347,8 @@ def run_async_sac(
     try:
         while done_workers < len(envs):
             apply_ready_best_checkpoint(best_tracker)
+            if getattr(best_tracker, "stop_requested", False):
+                break
             try:
                 event = scheduler.next_event(pool, timeout=0.2)
             except Empty:
@@ -1317,8 +1379,12 @@ def run_async_sac(
                 if len(buffer) >= max(args.replay_warmup, args.batch_size):
                     for _update in range(updates_due):
                         update_policy = recovery_runtime.should_update_policy()
-                        batch = buffer.sample(args.batch_size, action_dtype=np.float32)
-                        losses = sac_learner(*batch, update_policy=update_policy)
+                        batch = buffer.sample(args.batch_size, action_dtype=np.float32, track_demo_samples=True)
+                        losses = sac_learner(
+                            *batch,
+                            update_policy=update_policy,
+                            update_targets=(learner_updates + 1) % args.target_update_every == 0,
+                        )
                         critic1_losses.append(losses[1])
                         critic2_losses.append(losses[2])
                         recovery_runtime.record_critic_update()
@@ -1328,9 +1394,6 @@ def run_async_sac(
                             actor_losses.append(losses[0])
                             alpha_losses.append(losses[3])
                             policy_updates_total += 1
-                        if learner_updates % args.target_update_every == 0:
-                            soft_update(target_critic1, critic1, args.tau)
-                            soft_update(target_critic2, critic2, args.tau)
                         if (
                             update_policy
                             and policy_updates_total % args.async_policy_publish_updates == 0
@@ -1391,6 +1454,7 @@ def run_async_sac(
                     ("total_timesteps", budget.collected),
                     ("queue", f"{throughput['queue_size']}/{throughput['queue_capacity']} ({throughput['queue_saturation']:.0%})"),
                     ("replay", f"{len(buffer)}/{args.replay_capacity}"),
+                    *demonstration_metrics(buffer),
                     ("critic_updates", len(critic1_losses)),
                     ("policy_updates", len(actor_losses)),
                     ("replay_warmup_left", replay_warmup_left),
@@ -1558,20 +1622,10 @@ def run_async_multi_policy_sac(
             }
             for _env in envs
         ]
-    sample_fns = [
-        {
-            policy_id: build_sac_sample_fn(
-                model,
-                obs_dim,
-                action_low,
-                action_high,
-                args.log_std_min,
-                args.log_std_max,
-            )
-            for policy_id, model in worker_models.items()
-        }
-        for worker_models in local_models
-    ]
+    sample_fns = build_sac_collector_sample_fns(
+        local_models, obs_dim, action_low, action_high,
+        args.log_std_min, args.log_std_max, args.env_seed_base,
+    )
 
     def live_weights():
         return {
@@ -1720,6 +1774,8 @@ def run_async_multi_policy_sac(
     try:
         while done_workers < len(envs):
             apply_ready_best_checkpoint(best_tracker)
+            if getattr(best_tracker, "stop_requested", False):
+                break
             try:
                 event = scheduler.next_event(pool, timeout=0.2)
             except Empty:
@@ -1793,25 +1849,6 @@ def run_async_multi_policy_sac(
                                 metrics[policy_id]["actor"].append(result[0])
                                 metrics[policy_id]["alpha_loss"].append(
                                     result[3]
-                                )
-                            update_number = int(
-                                state.critic1_optimizer.iterations.numpy()
-                            )
-                            if (
-                                update_number > 0
-                                and update_number
-                                % args.target_update_every
-                                == 0
-                            ):
-                                soft_update(
-                                    state.target_critic1,
-                                    state.critic1,
-                                    args.tau,
-                                )
-                                soft_update(
-                                    state.target_critic2,
-                                    state.critic2,
-                                    args.tau,
                                 )
                             performed += 1
                             publish_update_count += 1
@@ -2081,6 +2118,9 @@ def run_sync_multi_policy_sac(
             caps_sigma=args.caps_sigma,
             actor_anchor_coef=args.actor_anchor_coef,
             actor_anchor_log_std_coef=args.actor_anchor_log_std_coef,
+            tau=args.tau,
+            target_update_every=args.target_update_every,
+            actor_ema=getattr(args, "_actor_ema", None),
         )
         recovery = OffPolicyRecoveryRuntime(
             args,
@@ -2219,6 +2259,9 @@ def run_sync_multi_policy_sac(
                     caps_sigma=args.caps_sigma,
                     actor_anchor_coef=args.actor_anchor_coef,
                     actor_anchor_log_std_coef=args.actor_anchor_log_std_coef,
+                    tau=args.tau,
+                    target_update_every=args.target_update_every,
+                    actor_ema=getattr(args, "_actor_ema", None),
                 )
 
     critic_warmup = (
@@ -2336,6 +2379,8 @@ def run_sync_multi_policy_sac(
     }
     try:
         for episode in range(start_episode, args.num_episodes):
+            if getattr(best_tracker, "stop_requested", False):
+                break
             trainable_replay_size = min(
                 (
                     len(policy.buffer)
@@ -2600,6 +2645,7 @@ def run_sync_multi_policy_sac(
                                         action_dtype=np.float32,
                                     ),
                                     update_policy=update_policy,
+                                    update_targets=(sync_learner_updates[policy_id] + 1) % args.target_update_every == 0,
                                 )
                                 metrics[policy_id]["critic1"].append(result[1])
                                 metrics[policy_id]["critic2"].append(result[2])
@@ -2615,21 +2661,6 @@ def run_sync_multi_policy_sac(
                                         result[4]
                                     )
                                 sync_learner_updates[policy_id] += 1
-                                if (
-                                    sync_learner_updates[policy_id]
-                                    % args.target_update_every
-                                    == 0
-                                ):
-                                    soft_update(
-                                        policy.target_critic1,
-                                        policy.critic1,
-                                        args.tau,
-                                    )
-                                    soft_update(
-                                        policy.target_critic2,
-                                        policy.critic2,
-                                        args.tau,
-                                    )
                 if budget.exhausted:
                     break
 
@@ -2769,6 +2800,8 @@ def run_sync_multi_policy_sac(
 
 def main():
     args = parse_args()
+    validate_actor_ema_options(args)
+    validate_demo_protection(args)
     transition_snapshots_enabled = validate_transition_snapshot_arguments(args)
     budget = TrainingBudget(args.total_timesteps)
     validate_async_arguments(args)
@@ -2920,6 +2953,9 @@ def main():
             log_alpha=log_alpha,
             episode=tf.Variable(0, dtype=tf.int64),
         )
+        if args.actor_ema_decay:
+            actor_optimizer.build(actor.trainable_variables)
+            checkpoint.actor_ema = ActorEMA(actor, args.actor_ema_decay)
         checkpoint_manager = tf.train.CheckpointManager(
             checkpoint,
             directory=args.checkpoint_dir,
@@ -2927,6 +2963,7 @@ def main():
         )
         resume_checkpoint = resolve_resume_checkpoint(args, checkpoint_manager)
         restored_replay_count = 0
+        validate_actor_ema_checkpoint(args, resume_checkpoint)
         if resume_checkpoint and args.policy_path:
             raise RuntimeError("--policy-path cannot be combined with --resume or --resume-checkpoint")
         if resume_checkpoint:
@@ -2938,6 +2975,7 @@ def main():
                 flush=True,
             )
             restored_replay_count = restore_replay_buffer(args, resume_checkpoint, buffer)
+            validate_demo_protection(args, buffer)
         elif args.policy_path:
             loaded_policy = load_policy_into_model(actor, args.policy_path, expected_algorithm="sac")
             args._replay_warmup_uses_restored_policy = True
@@ -3005,20 +3043,18 @@ def main():
                     flush=True,
                 )
 
-        if demo_data is not None and args.demo_prefill and restored_replay_count == 0:
-            added = buffer.add_many(
-                demo_data["obs"],
-                demo_data["actions"],
-                demo_data["rewards"],
-                demo_data["next_obs"],
-                demo_data["dones"],
-            )
-            print(f"Prefilled replay buffer with demonstration transitions={added}", flush=True)
+        if restored_replay_count == 0:
+            added = prefill_demonstrations(args, buffer, demo_data)
+            if added:
+                print(f"Prefilled replay buffer with demonstration transitions={added}", flush=True)
         elif demo_data is not None and args.demo_prefill:
             print(
                 "Skipped demonstration prefill because the checkpoint replay buffer was restored.",
                 flush=True,
             )
+
+        if buffer.protected_demo_count:
+            print(f"Protected demonstration replay transitions={buffer.protected_demo_count} online_capacity={buffer.capacity - buffer.protected_demo_count}", flush=True)
 
         bc_train, bc_groups = _combine_bc_sources(demo_data, bc_pairs)
         run_behavior_cloning = (
@@ -3077,6 +3113,7 @@ def main():
             print(f"Saved BC actor weights (pre-SAC): {bc_actor_path}", flush=True)
 
         # The BC-only gate evaluates once and exits before SAC.
+        configure_actor_ema(args, checkpoint, best_tracker, build_policy_metadata("sac", env0), reset=run_behavior_cloning)
         if args.stop_after_bc:
             if not run_behavior_cloning:
                 raise SystemExit(
@@ -3167,6 +3204,9 @@ def main():
             caps_sigma=args.caps_sigma,
             actor_anchor_coef=args.actor_anchor_coef,
             actor_anchor_log_std_coef=args.actor_anchor_log_std_coef,
+            tau=args.tau,
+            target_update_every=args.target_update_every,
+            actor_ema=getattr(args, "_actor_ema", None),
         )
         print(
             f"SAC learner: {'compiled graph' if args.tf_compile_learner else 'eager'}"
@@ -3181,17 +3221,7 @@ def main():
             buffer,
             initial_critic_warmup=critic_warmup_target,
             normal_policy_update_every=args.policy_update_every,
-            replay_refill=(
-                lambda: buffer.add_many(
-                    demo_data["obs"],
-                    demo_data["actions"],
-                    demo_data["rewards"],
-                    demo_data["next_obs"],
-                    demo_data["dones"],
-                )
-                if demo_data is not None and args.demo_prefill
-                else 0
-            ),
+            replay_refill=lambda: prefill_demonstrations(args, buffer, demo_data),
             target_sync=lambda: (
                 target_critic1.set_weights(critic1.get_weights()),
                 target_critic2.set_weights(critic2.get_weights()),
@@ -3250,6 +3280,8 @@ def main():
         batch_started = time.monotonic()
         batch_transitions_start = budget.collected
         for episode in range(start_episode, args.num_episodes):
+            if getattr(best_tracker, "stop_requested", False):
+                break
             opponent_match = opponent_pool.start_episode(actor, sync_completed_episodes)
             use_random_exploration = sync_completed_episodes < max(
                 0, args.random_exploration_episodes)
@@ -3507,8 +3539,12 @@ def main():
                     )
                     for _update in range(updates_due):
                         update_policy = recovery_runtime.should_update_policy()
-                        batch = buffer.sample(args.batch_size, action_dtype=np.float32)
-                        losses = sac_learner(*batch, update_policy=update_policy)
+                        batch = buffer.sample(args.batch_size, action_dtype=np.float32, track_demo_samples=True)
+                        losses = sac_learner(
+                            *batch,
+                            update_policy=update_policy,
+                            update_targets=(sync_learner_updates + 1) % args.target_update_every == 0,
+                        )
                         critic1_losses.append(losses[1])
                         critic2_losses.append(losses[2])
                         warmup_completed = recovery_runtime.record_critic_update()
@@ -3523,9 +3559,6 @@ def main():
                                 "actor and alpha will be unfrozen on the next update.",
                                 flush=True,
                             )
-                        if sync_learner_updates % args.target_update_every == 0:
-                            soft_update(target_critic1, critic1, args.tau)
-                            soft_update(target_critic2, critic2, args.tau)
 
                 for env_idx in pending_resets:
                     env_states[env_idx] = start_env_episode(
@@ -3539,6 +3572,9 @@ def main():
             batch_transitions = budget.collected - batch_transitions_start
             batch_env_steps = max(step_idx + 1, 1)
             if not finished_states:
+                if budget.exhausted:
+                    print(f"Transition budget reached: {budget.collected}/{budget.limit}", flush=True)
+                    break
                 # Keep metrics until at least one complete episode can be reported.
                 continue
             entropy_gap = None
@@ -3598,6 +3634,7 @@ def main():
                 ("training", [
                     ("total_timesteps", budget.collected),
                     ("replay", f"{len(buffer)}/{args.replay_capacity}"),
+                    *demonstration_metrics(buffer),
                     ("critic_updates", len(critic1_losses)),
                     ("policy_updates", len(actor_losses)),
                     ("warmup_left", critic_warmup_remaining),

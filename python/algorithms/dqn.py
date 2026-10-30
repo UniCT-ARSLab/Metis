@@ -589,6 +589,187 @@ def action_last_summary(last_actions, action_names):
     return result
 
 
+def uses_sync_autoreset(args):
+    return (
+        args.collector_mode == "sync"
+        and int(getattr(args, "sync_batch_steps", 0)) > 0
+        and not args.multi_agent
+        and not args.multi_policy
+        and not args.opponent_pool
+        and not getattr(args, "auto_recovery", False)
+    )
+
+
+def validate_sync_collection_resume(args, checkpoint_path):
+    variables = dict(tf.train.list_variables(checkpoint_path))
+    mode_key = "sync_autoreset/.ATTRIBUTES/VARIABLE_VALUE"
+    stored = bool(tf.train.load_variable(checkpoint_path, mode_key)) if mode_key in variables else False
+    if stored != uses_sync_autoreset(args):
+        raise RuntimeError("DQN resume cannot change synchronous episode scheduling; use --policy-path to warm-start a different collector mode")
+    if stored:
+        reset_key = "sync_env_resets/.ATTRIBUTES/VARIABLE_VALUE"
+        next_key = "sync_next_episode/.ATTRIBUTES/VARIABLE_VALUE"
+        if variables.get(reset_key) != [args.num_envs] or next_key not in variables:
+            raise RuntimeError("DQN independent-reset checkpoint requires its saved environment count and episode counters")
+
+
+class SyncDqnEpisodePool:
+    """Keep single-agent environments active without an episode-group barrier."""
+
+    def __init__(self, args, envs, checkpoint):
+        self.args = args
+        self.envs = envs
+        self.checkpoint = checkpoint
+        self.completed = int(checkpoint.episode.numpy())
+        self.next_episode = int(checkpoint.sync_next_episode.numpy())
+        self.reset_counts = np.asarray(checkpoint.sync_env_resets.numpy(), dtype=np.int64)
+        self.states = [None] * len(envs)
+        for env_idx in range(len(envs)):
+            self.start(env_idx)
+
+    def start(self, env_idx):
+        if self.states[env_idx] is not None:
+            raise RuntimeError("Cannot reset an active DQN episode")
+        if self.completed + sum(state is not None for state in self.states) >= self.args.num_episodes:
+            return
+        env = self.envs[env_idx]
+        env.configure(
+            training_episode=self.next_episode,
+            max_steps=self.args.max_steps_per_episode,
+            physics_frames_per_step=self.args.physics_frames_per_step,
+            training_mode=True,
+            **scenario_curriculum_config(self.args),
+        )
+        seed = self.args.episode_seed_multiplier * int(self.reset_counts[env_idx]) + env_idx
+        obs, _info = env.reset(seed=seed)
+        self.next_episode += 1
+        self.reset_counts[env_idx] += 1
+        self.checkpoint.sync_next_episode.assign(self.next_episode)
+        self.checkpoint.sync_env_resets.assign(self.reset_counts)
+        self.states[env_idx] = {
+            "env_idx": env_idx,
+            "obs": obs,
+            "done": False,
+            "ep_reward": 0.0,
+            "episode_steps": 0,
+            "target_reached": False,
+            "target_seen": False,
+            "success": False,
+            "event_counts": {},
+            "terminal_counts": {},
+            "action_counts": np.zeros((env.num_actions,), dtype=np.int32),
+            "last_action": 0,
+        }
+
+    def finish(self, state):
+        env_idx = state["env_idx"]
+        if self.states[env_idx] is not state:
+            raise RuntimeError("Cannot finish an inactive DQN episode")
+        state["done"] = True
+        self.states[env_idx] = None
+        self.completed += 1
+        self.checkpoint.episode.assign(self.completed)
+
+
+def run_sync_autoreset_dqn(args, envs, stepper, model, target_model, buffer, checkpoint, checkpoint_manager, best_tracker, target_sync, learner_step, budget, transition_publisher, transition_policy_metadata):
+    pool = SyncDqnEpisodePool(args, envs, checkpoint)
+    throttle = SyncUpdateThrottle(args)
+    epsilon = float(checkpoint.epsilon.numpy())
+    last_saved_episode = None
+    print(f"DQN sync collection: independent episode resets batch_steps={args.sync_batch_steps}", flush=True)
+    while any(state is not None for state in pool.states) and not budget.exhausted and not getattr(best_tracker, "stop_requested", False):
+        finished = []
+        losses = []
+        for _step_idx in range(args.sync_batch_steps):
+            active = [(env, state) for env, state in zip(envs, pool.states) if state is not None]
+            if budget.enabled:
+                active = active[:max(0, budget.limit - budget.collected)]
+            if not active:
+                break
+            action_epsilon = 1.0 if len(buffer) < replay_warmup_threshold(args) else epsilon
+            actions = select_actions(model, np.stack([state["obs"] for _env, state in active]), np.zeros(len(active), dtype=np.bool_), action_epsilon, envs[0].num_actions)
+            requests = [(env, state, int(action)) for (env, state), action in zip(active, actions)]
+            results = stepper.step(requests)
+            previously_completed = pool.completed
+            pending_resets = []
+            for _env, state, action, result in results:
+                next_obs, reward, terminated, truncated, info = result
+                state["episode_steps"] += 1
+                capped = args.max_steps_per_episode > 0 and state["episode_steps"] >= args.max_steps_per_episode
+                done = bool(terminated or truncated or capped)
+                agent_info = info.get("agent_info", {})
+                update_episode_diagnostics(state, agent_info, newly_done=done)
+                state["target_reached"] |= bool(agent_info.get("target_reached", False))
+                state["target_seen"] |= bool(agent_info.get("target_first_seen", False))
+                state["action_counts"][action] += 1
+                state["last_action"] = action
+                buffer.add(state["obs"], action, float(reward), next_obs, bool(terminated))
+                budget.consume(1)
+                state["ep_reward"] += float(reward)
+                state["obs"] = next_obs
+                epsilon = advance_transition_epsilon(args, checkpoint.epsilon, checkpoint.epsilon_transition_count, 1)
+                if done:
+                    pool.finish(state)
+                    finished.append(state)
+                    pending_resets.append(state["env_idx"])
+                if transition_publisher is not None:
+                    transition_publisher.publish_due(budget.collected, pool.completed, lambda directory, _threshold: PolicyArtifactSaver(model, directory, transition_policy_metadata).save(pool.completed))
+
+            batch_losses, _updates, _target_updated = process_sync_dqn_updates(
+                target_sync=target_sync,
+                target_model=target_model,
+                model=model,
+                sync_throttle=throttle,
+                transitions_added=len(results),
+                env_steps=len(results),
+                replay_ready=len(buffer) >= replay_warmup_threshold(args),
+                verification_pending=best_tracker.health_monitor.verification_pending,
+                learner_step=learner_step,
+                buffer=buffer,
+                batch_size=args.batch_size,
+                target_transition_count=checkpoint.target_sync_transition_count,
+            )
+            losses.extend(batch_losses.tolist())
+            for completed in range(previously_completed + 1, pool.completed + 1):
+                if target_sync.due_after_episode(completed):
+                    target_model.set_weights(model.get_weights())
+                if not uses_transition_epsilon(args) and len(buffer) >= replay_warmup_threshold(args):
+                    epsilon = max(args.epsilon_min, epsilon * args.epsilon_decay)
+                    checkpoint.epsilon.assign(epsilon)
+            save_due = args.checkpoint_every > 0 and previously_completed // args.checkpoint_every < pool.completed // args.checkpoint_every
+            evaluate_due = any(best_tracker.should_evaluate(completed) for completed in range(previously_completed + 1, pool.completed + 1))
+            if save_due or evaluate_due:
+                saved = save_training_checkpoint(checkpoint, checkpoint_manager, buffer, pool.completed, epsilon, args)
+                last_saved_episode = pool.completed
+                if evaluate_due:
+                    request_best_checkpoint_evaluation(best_tracker, saved, pool.completed)
+            # All in-flight step replies and their terminal observations are consumed before resets.
+            if not budget.exhausted:
+                for env_idx in pending_resets:
+                    pool.start(env_idx)
+            if budget.exhausted:
+                break
+
+        steps = [state["episode_steps"] for state in finished]
+        print_episode_metrics(max(0, pool.completed - 1), [
+            ("mode", [("collector", "sync"), ("episode_resets", "independent"), ("epsilon", f"{epsilon:.3f}")]),
+            ("outcome", [("reward", [state["ep_reward"] for state in finished]), ("success", f"{sum(state['success'] for state in finished)}/{len(finished)}"), ("steps", f"mean:{float(np.mean(steps)):.1f} range:[{min(steps)},{max(steps)}]" if steps else "pending"), ("events", merge_count_dicts(finished, "event_counts")), ("terminal", merge_count_dicts(finished, "terminal_counts", integer=True))]),
+            ("training", [("completed_episodes", pool.completed), ("active_episodes", sum(state is not None for state in pool.states)), ("total_timesteps", budget.collected), ("epsilon_transitions", int(checkpoint.epsilon_transition_count.numpy())), ("replay", f"{len(buffer)}/{args.replay_capacity}"), ("updates", len(losses)), ("loss", f"{float(np.mean(losses)) if losses else 0.0:.5f}")]),
+        ], args.log_format)
+        if finished and args.log_action_every > 0 and pool.completed // args.log_action_every > (pool.completed - len(finished)) // args.log_action_every:
+            print(f"  actions   counts={[action_counts_summary(state['action_counts'], envs[0].action_names) for state in finished]}  last={[action_last_summary([state['last_action']], envs[0].action_names)[0] for state in finished]}", flush=True)
+        apply_ready_best_checkpoint(best_tracker)
+
+    if budget.exhausted:
+        print(f"Transition budget reached: {budget.collected}/{budget.limit}", flush=True)
+    if transition_publisher is not None and budget.exhausted and not transition_publisher.complete:
+        raise RuntimeError("Transition budget ended before every policy snapshot was published")
+    if last_saved_episode != pool.completed or budget.exhausted:
+        save_training_checkpoint(checkpoint, checkpoint_manager, buffer, pool.completed, epsilon, args, final=True)
+    apply_ready_best_checkpoint(best_tracker, wait_timeout=args.best_final_drain_timeout)
+    return pool.completed, epsilon
+
+
 def build_dqn_learner_step(
     model,
     target_model,
@@ -952,6 +1133,8 @@ def run_async_dqn(
     try:
         while done_workers < len(envs):
             apply_ready_best_checkpoint(best_tracker)
+            if getattr(best_tracker, "stop_requested", False):
+                break
             try:
                 event = scheduler.next_event(pool, timeout=0.2)
             except Empty:
@@ -1620,6 +1803,8 @@ def run_async_multi_policy_dqn(
     try:
         while done_workers < len(envs):
             apply_ready_best_checkpoint(best_tracker)
+            if getattr(best_tracker, "stop_requested", False):
+                break
             try:
                 event = scheduler.next_event(pool, timeout=0.2)
             except Empty:
@@ -2094,6 +2279,8 @@ def run_sync_multi_policy_dqn(
     }
     try:
         for episode in range(start_episode, args.num_episodes):
+            if getattr(best_tracker, "stop_requested", False):
+                break
             env_states = []
             for env_idx, env in enumerate(envs):
                 env.configure(
@@ -2519,8 +2706,12 @@ def main():
             target_sync_transition_count=tf.Variable(
                 0, dtype=tf.int64, trainable=False
             ),
+            sync_autoreset=tf.Variable(uses_sync_autoreset(args), dtype=tf.bool, trainable=False),
             **epsilon_checkpoint_metadata(args),
         )
+        if uses_sync_autoreset(args):
+            checkpoint.sync_next_episode = tf.Variable(0, dtype=tf.int64, trainable=False)
+            checkpoint.sync_env_resets = tf.Variable(np.zeros(len(envs), dtype=np.int64), trainable=False)
         checkpoint_manager = tf.train.CheckpointManager(
             checkpoint,
             directory=args.checkpoint_dir,
@@ -2534,6 +2725,7 @@ def main():
         if resume_checkpoint and initial_policy_path:
             raise RuntimeError("--policy-path cannot be combined with --resume or --resume-checkpoint")
         if resume_checkpoint:
+            validate_sync_collection_resume(args, resume_checkpoint)
             checkpoint.restore(resume_checkpoint).expect_partial()
             validate_restored_transition_epsilon(
                 args,
@@ -2721,9 +2913,17 @@ def main():
         if recovery_handler is not None:
             recovery_handler.set_post_restore(recovery_runtime.post_restore)
 
+        if uses_sync_autoreset(args):
+            last_completed_episode, epsilon = run_sync_autoreset_dqn(args, envs, stepper, model, target_model, buffer, checkpoint, checkpoint_manager, best_tracker, target_sync, learner_step, budget, transition_publisher, transition_policy_metadata)
+            model.save_weights(args.weights_path)
+            print(f"Saved weights: {args.weights_path}", flush=True)
+            return
+
         sync_throttle = SyncUpdateThrottle(args)
         last_saved_episode = None
         for episode in range(start_episode, args.num_episodes):
+            if getattr(best_tracker, "stop_requested", False):
+                break
             opponent_match = opponent_pool.start_episode(model, episode)
             warmup_exploration = len(buffer) < replay_warmup_threshold(args)
             action_epsilon = (
@@ -3100,7 +3300,11 @@ def main():
     except KeyboardInterrupt:
         print("\nInterrupt received: saving the last consistent DQN state...", flush=True)
         if checkpoint is not None and checkpoint_manager is not None and buffer is not None and model is not None:
-            interrupted_episode = last_completed_episode if last_completed_episode is not None else start_episode
+            if uses_sync_autoreset(args):
+                interrupted_episode = int(checkpoint.episode.numpy())
+                epsilon = float(checkpoint.epsilon.numpy())
+            else:
+                interrupted_episode = last_completed_episode if last_completed_episode is not None else start_episode
             save_training_checkpoint(
                 checkpoint, checkpoint_manager, buffer, interrupted_episode, epsilon, args
             )

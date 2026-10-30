@@ -1,5 +1,6 @@
 import argparse
 import copy
+import hashlib
 import json
 import os
 import re
@@ -19,6 +20,7 @@ from queue import Empty, Full, Queue
 
 import numpy as np
 
+from core.training_control import TrainingControl, add_control_arguments
 from core.curriculum import (
     add_adaptive_curriculum_arguments,
     ensure_adaptive_curriculum,
@@ -478,6 +480,7 @@ def add_best_checkpoint_arguments(parser):
     # Curriculum options use their own top-level argparse group.
     root = parser
     parser = argument_group(parser, GROUP_EVALUATION)
+    add_control_arguments(parser)
     parser.add_argument(
         "--best-checkpoint",
         action=argparse.BooleanOptionalAction,
@@ -738,6 +741,7 @@ class BestCheckpointTracker:
         self.curriculum = ensure_adaptive_curriculum(args)
         self.health_monitor = ensure_training_health_monitor(args, algorithm)
         self.enabled = bool(getattr(args, "best_checkpoint", False))
+        self.control = TrainingControl(args, self.algorithm)
         if self.curriculum.enabled and not self.enabled:
             raise ValueError(
                 "--adaptive-curriculum requires --best-checkpoint because promotion "
@@ -760,6 +764,8 @@ class BestCheckpointTracker:
         self._pending_replay_path = None
         # Policies whose runnable form differs from their checkpoint may stage a Keras artifact.
         self._policy_exporter = None
+        self._retain_export_checkpoint = False
+        self._staged_training = {}
         self._ready = None  # (result, staged_prefix, replay_path) awaiting promote or discard
         self._retained = []  # [(episode, prefix)] oldest first
         self._closing = threading.Event()
@@ -773,11 +779,16 @@ class BestCheckpointTracker:
             self._load_retained()
             self._load_metadata()
 
-    def set_policy_artifact_exporter(self, exporter):
+    @property
+    def stop_requested(self):
+        return self.control.stop_requested
+
+    def set_policy_artifact_exporter(self, exporter, *, retain_training_checkpoint=False):
         """Evaluate a self-contained policy.keras (written by `exporter(dest_path)`) instead of the raw
         checkpoint. `exporter` must serialize the CURRENT effective policy at call time (it runs on the
         training thread, before the async evaluation is scheduled, so the bytes are pinned to the episode)."""
         self._policy_exporter = exporter
+        self._retain_export_checkpoint = bool(retain_training_checkpoint)
 
     @staticmethod
     def _is_artifact_prefix(prefix):
@@ -786,6 +797,9 @@ class BestCheckpointTracker:
     def _remove_staged(self, prefix):
         """Delete a staged/promoted artifact, whether it is a policy bundle (policy.keras + sibling .json)
         or a tf-checkpoint shard set."""
+        training_prefix = self._staged_training.pop(str(prefix), None)
+        if training_prefix is not None:
+            remove_checkpoint_files(training_prefix)
         if self._is_artifact_prefix(prefix):
             for path in (Path(prefix), Path(prefix).with_suffix(".json")):
                 try:
@@ -796,6 +810,7 @@ class BestCheckpointTracker:
             remove_checkpoint_files(prefix)
 
     def configure_recovery(self, checkpoint, optimizers, *, policy_publisher=None, post_restore=None):
+        self.control.bind_optimizers(optimizers)
         handler = TensorFlowCheckpointRecovery(
             checkpoint,
             self.args.checkpoint_dir,
@@ -803,6 +818,7 @@ class BestCheckpointTracker:
             keep_diagnostics=getattr(self.args, "recovery_keep_diagnostics", 3),
             policy_publisher=policy_publisher,
             post_restore=post_restore,
+            learning_rate_control=self.control if self.control.enabled else None,
         )
         self.health_monitor.set_recovery_handler(handler)
         self.args._training_recovery_handler = handler
@@ -857,6 +873,10 @@ class BestCheckpointTracker:
                 flush=True,
             )
             return
+        expected_weights = "ema" if getattr(self.args, "actor_ema_decay", 0.0) else "raw"
+        if metadata.get("policy_weights", "raw") != expected_weights:
+            print("Evaluation actor weights changed between raw and EMA; starting a new best comparison baseline", flush=True)
+            return
         comparison_key = metadata.get("comparison_key")
         if isinstance(comparison_key, list) and len(comparison_key) >= 2:
             self.best_key = tuple(float(value) for value in comparison_key)
@@ -864,7 +884,7 @@ class BestCheckpointTracker:
 
     def should_evaluate(self, episode):
         every = int(getattr(self.args, "best_evaluation_every", 0))
-        if not self.enabled or int(episode) <= 0:
+        if not self.enabled or self.stop_requested or int(episode) <= 0:
             return False
         if self.health_monitor.verification_pending:
             return self._pending is None and self._ready is None
@@ -947,7 +967,7 @@ class BestCheckpointTracker:
             return False
         return self.best_key is None or candidate_key > self.best_key
 
-    def _evaluation_command(self, checkpoint_path, summary_path, episode=None):
+    def _evaluation_command(self, checkpoint_path, summary_path, episode=None, *, certification=None):
         evaluation_port = self.args.best_evaluation_port
         if evaluation_port is None:
             evaluation_port = int(self.args.base_port) + max(int(self.args.num_envs), 1)
@@ -956,7 +976,8 @@ class BestCheckpointTracker:
             training_episode = int(self.args.num_episodes)
         # Without an override, evaluate at the learner's current curriculum stage.
         if (
-            self.args.best_evaluation_training_episode is None
+            not (self.control.threshold is not None or self.control.scheduled)
+            and self.args.best_evaluation_training_episode is None
             and getattr(self.args, "best_evaluation_follow_curriculum", True)
             and episode is not None
         ):
@@ -978,11 +999,11 @@ class BestCheckpointTracker:
             str(runner),
             "--algorithm", self.algorithm,
             *load_args,
-            "--episodes", str(self.args.best_evaluation_episodes),
+            "--episodes", str(certification["episodes"] if certification else self.args.best_evaluation_episodes),
             "--epsilon", "0.0",
             "--evaluation-mode",
             "--training-episode", str(training_episode),
-            "--seed", str(self.args.best_evaluation_seed),
+            "--seed", str(certification["seed"] if certification else self.args.best_evaluation_seed),
             "--max-steps", str(max_steps),
             "--physics-frames-per-step", str(
                 getattr(self.args, "physics_frames_per_step", 1)
@@ -993,6 +1014,8 @@ class BestCheckpointTracker:
             "--headless",
             "--multi-agent" if self.args.multi_agent else "--no-multi-agent",
         ]
+        if self.control.threshold is not None:
+            command.append("--no-reverse-curriculum")
         # Frozen evaluation must rebuild the same network architecture as training.
         network_layers = getattr(self.args, "network_layers", None)
         if network_layers:
@@ -1020,10 +1043,10 @@ class BestCheckpointTracker:
                 command.extend((option, str(value)))
         return command
 
-    def evaluate(self, checkpoint_path, episode):
+    def evaluate(self, checkpoint_path, episode, *, certification=None):
         with tempfile.TemporaryDirectory(prefix="godot-policy-eval-") as temp_dir:
             summary_path = Path(temp_dir) / "summary.json"
-            command = self._evaluation_command(checkpoint_path, summary_path, episode)
+            command = self._evaluation_command(checkpoint_path, summary_path, episode) if certification is None else self._evaluation_command(checkpoint_path, summary_path, episode, certification=certification)
             child_env = os.environ.copy()
             if self.args.best_evaluation_device == "cpu":
                 child_env["CUDA_VISIBLE_DEVICES"] = ""
@@ -1039,7 +1062,7 @@ class BestCheckpointTracker:
                     child_env[variable] = cpu_threads
             print(
                 f"Evaluating frozen checkpoint episode={episode} "
-                f"episodes={self.args.best_evaluation_episodes} metric={self.args.best_metric} "
+                f"episodes={certification['episodes'] if certification else self.args.best_evaluation_episodes} metric={self.args.best_metric} "
                 f"device={self.args.best_evaluation_device}"
                 + (
                     f" cpu_threads={getattr(self.args, 'best_evaluation_cpu_threads', 1)}"
@@ -1072,6 +1095,11 @@ class BestCheckpointTracker:
                 )
                 return None
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            if certification:
+                summary["evaluation_phase"] = "certification"
+                summary["evaluation_seed"] = certification["seed"]
+                summary["certification_attempt"] = certification["attempt"]
+                summary["evaluation_command"] = command
             curriculum_config = self.curriculum.scenario_config()
             if "curriculum_level" in curriculum_config:
                 summary["curriculum_level"] = float(
@@ -1080,7 +1108,7 @@ class BestCheckpointTracker:
             summary["evaluation_episode"] = int(episode)
             evaluation_directory = Path(self.args.checkpoint_dir) / "evaluations"
             evaluation_directory.mkdir(parents=True, exist_ok=True)
-            evaluation_artifact = evaluation_directory / f"eval-{int(episode)}.json"
+            evaluation_artifact = evaluation_directory / (f"certification-{certification['attempt']}-eval-{int(episode)}.json" if certification else f"eval-{int(episode)}.json")
             summary["evaluation_artifact"] = str(evaluation_artifact)
             temporary_artifact = evaluation_artifact.with_suffix(".json.tmp")
             temporary_artifact.write_text(
@@ -1173,6 +1201,10 @@ class BestCheckpointTracker:
             self._terminate_evaluation()
             process.communicate()
             raise
+        except BaseException:
+            self._terminate_evaluation()
+            process.communicate()
+            raise
         finally:
             with self._process_lock:
                 self._process = None
@@ -1215,7 +1247,7 @@ class BestCheckpointTracker:
         (in which case this evaluation request is skipped) or best-checkpoint tracking
         is disabled.
         """
-        if not self.enabled or self._closing.is_set():
+        if not self.enabled or self.stop_requested or self._closing.is_set():
             return False
         if self._pending is not None:
             print(
@@ -1231,11 +1263,15 @@ class BestCheckpointTracker:
             staged_prefix = self.staging_directory / f"policy-{episode}.keras"
             try:
                 self._policy_exporter(staged_prefix)
+                if self._retain_export_checkpoint:
+                    training_prefix = copy_checkpoint_files(checkpoint_path, self.staging_directory / f"training-{episode}")
+                    self._staged_training[str(staged_prefix)] = training_prefix
             except Exception as exc:  # exporter failure must not take down training
+                self._remove_staged(staged_prefix)
                 print(f"WARNING: could not export policy artifact for evaluation at episode={episode}: {exc}",
                       flush=True)
                 return False
-            training_updates = None
+            training_updates = self._checkpoint_training_updates(checkpoint_path) if self.curriculum.enabled else None
         else:
             try:
                 staged_prefix = copy_checkpoint_files(
@@ -1341,6 +1377,7 @@ class BestCheckpointTracker:
             print(f"WARNING: best-policy evaluation raised an exception: {exc}", flush=True)
             result = None
         if result is None:
+            self.control.evaluation_failed()
             self._remove_staged(staged_prefix)
             return None
         if training_updates is not None:
@@ -1357,6 +1394,67 @@ class BestCheckpointTracker:
         _result, staged_prefix, _replay_path = self._ready
         self._ready = None
         self._remove_staged(staged_prefix)
+
+    def process_control(self, result, improved, *, eligible=True):
+        request = self.control.observe(result, improved, eligible)
+        if request is None:
+            return None
+        if self._ready is None or self._ready[0] is not result:
+            raise RuntimeError("Certification requires the exact staged evaluation candidate")
+        source = Path(self._ready[1])
+        destination = Path(self.args.checkpoint_dir) / "certification" / f"attempt-{request['attempt']}"
+        candidate = destination / ("policy.keras" if self._is_artifact_prefix(source) else f"ckpt-{result.episode}")
+        try:
+            destination.mkdir(parents=True, exist_ok=False)
+            if self._is_artifact_prefix(source):
+                shutil.copyfile(source, candidate)
+                manifest = source.with_suffix(".json")
+                if manifest.is_file():
+                    shutil.copyfile(manifest, candidate.with_suffix(".json"))
+            else:
+                copy_checkpoint_files(source, candidate)
+                (destination / "checkpoint").write_text(f'model_checkpoint_path: "{candidate.name}"\n')
+            fingerprint = self._policy_fingerprint(candidate)
+            print(f"Certifying frozen candidate episode={result.episode} attempt={request['attempt']} episodes={request['episodes']} seed={request['seed']}...", flush=True)
+            evaluation = self.evaluate(candidate, result.episode, certification=request)
+            report = self.control.assess(None if evaluation is None else evaluation.summary, request)
+            report["candidate_fingerprint"] = fingerprint
+            if self._policy_fingerprint(candidate) != fingerprint:
+                report.update(passed=False, reason="candidate files changed during certification")
+            if evaluation is not None:
+                report["evaluation"] = evaluation.summary
+        except Exception as error:
+            report = self.control.assess(None, request)
+            report["reason"] = f"certification failed: {error}"
+        report["candidate"] = str(candidate)
+        report["algorithm"] = self.algorithm
+        report["evaluation_configuration"] = self.control.state["contract"]
+        destination.mkdir(parents=True, exist_ok=True)
+        report_path = destination / "report.json"
+        temporary = report_path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+        temporary.replace(report_path)
+        self.control.record_certification(report, candidate if report["passed"] else None)
+        if report["passed"]:
+            print(f"Training solved: certified policy={candidate} report={report_path}", flush=True)
+            return candidate
+        return None
+
+    @staticmethod
+    def _policy_fingerprint(prefix):
+        prefix = Path(prefix)
+        paths = [prefix] if prefix.suffix == ".keras" else checkpoint_shard_paths(prefix)
+        if prefix.suffix == ".keras" and prefix.with_suffix(".json").is_file():
+            paths.append(prefix.with_suffix(".json"))
+        if not paths:
+            raise FileNotFoundError("certification candidate is missing")
+        digest = hashlib.sha256()
+        for path in paths:
+            digest.update(path.name.encode("utf-8"))
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        return digest.hexdigest()
 
     def promote_ready(self, result):
         """Publish the exact weights that produced `result`.
@@ -1382,9 +1480,21 @@ class BestCheckpointTracker:
             temporary = best_artifact.with_name(best_artifact.name + ".tmp")
             shutil.copyfile(staged_prefix, temporary)
             os.replace(temporary, best_artifact)
+            training_prefix = self._staged_training.get(str(staged_prefix))
+            if training_prefix is not None:
+                best_prefix = copy_checkpoint_files(training_prefix, self.directory / f"ckpt-{episode}")
+                self._retained = [entry for entry in self._retained if entry[0] != episode]
+                self._retained.append((episode, best_prefix))
+                self._retained.sort()
+                self._promote_replay_snapshot(source_replay_path, best_prefix)
+                self._prune_retained()
+                self._write_checkpoint_state()
+                result.summary["policy_artifact"] = str(best_artifact)
+            else:
+                best_prefix = best_artifact
             self._remove_staged(staged_prefix)
-            self.record_best(result, best_artifact)
-            return best_artifact
+            self.record_best(result, best_prefix)
+            return best_prefix
         best_prefix = self.directory / f"ckpt-{episode}"
         remove_checkpoint_files(best_prefix)
         for shard in checkpoint_shard_paths(staged_prefix):
@@ -1452,6 +1562,7 @@ class BestCheckpointTracker:
             self.metadata_path.unlink()
         self.best_key = None
         self.best_summary = None
+        self.control.reset_quality()
         if hasattr(self.health_monitor, "reset_evaluation_baseline"):
             self.health_monitor.reset_evaluation_baseline(reason)
 
@@ -1503,6 +1614,8 @@ class BestCheckpointTracker:
     def _clear_staging(self):
         for index_path in self.staging_directory.glob("ckpt-*.index"):
             remove_checkpoint_files(index_path.with_suffix(""))
+        for index_path in self.staging_directory.glob("training-*.index"):
+            remove_checkpoint_files(index_path.with_suffix(""))
         # Remove staged policy bundles left by interrupted evaluations.
         for artifact in self.staging_directory.glob("policy-*.keras"):
             for path in (artifact, artifact.with_suffix(".json")):
@@ -1542,6 +1655,7 @@ class BestCheckpointTracker:
             "checkpoint": str(checkpoint_path),
             "comparison_key": list(self.best_key),
             **result.summary,
+            "policy_weights": "ema" if self._retain_export_checkpoint or getattr(self.args, "actor_ema_decay", 0.0) else "raw",
         }
         temporary_path = self.metadata_path.with_suffix(".json.tmp")
         temporary_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -2552,6 +2666,18 @@ def apply_ready_best_checkpoint(tracker, wait_timeout=0.0):
         tracker.discard_ready()
         return None
     improved = tracker.is_improvement(result) or curriculum_promoted
+    control = getattr(tracker, "control", None)
+    if control is not None and control.enabled:
+        eligible = not curriculum_promoted and not tracker.health_monitor.verification_pending
+        if control.threshold is not None and tracker.curriculum.enabled:
+            eligible = eligible and float(result.summary.get("curriculum_level", -1.0)) >= 1.0
+        certified = tracker.process_control(result, improved, eligible=eligible)
+        if certified is not None:
+            if improved:
+                tracker.promote_ready(result)
+            else:
+                tracker.discard_ready()
+            return certified
     if not improved:
         best_summary = tracker.best_summary
         best_checkpoint = (

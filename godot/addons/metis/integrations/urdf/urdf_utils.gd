@@ -80,6 +80,8 @@ static func parse_rpy(rpy: String) -> Vector3:
 			-float(rpy_split[1]))
 
 static func xyz_rpy_to_transform3d(xyz: Vector3, rpy: Vector3) -> Transform3D:
-	# Convert XYZ RPY vector to 3D transform
-	var basis = Basis.from_euler(rpy, EULER_ORDER_XYZ)
+	# URDF rpy is R = Rz(yaw) * Ry(pitch) * Rx(roll). parse_rpy stores it on Godot axes as
+	# (roll, yaw, -pitch), so the same product is Ry(y) * Rz(z) * Rx(x): EULER_ORDER_YZX.
+	# Single-axis rotations are identical in every order; combined ones need this order.
+	var basis = Basis.from_euler(rpy, EULER_ORDER_YZX)
 	return Transform3D(basis, xyz)

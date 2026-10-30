@@ -6,6 +6,8 @@
 <p align="center">Made by Prof. Federico Fausto Santoro of ARSLab of University of Catania</p>
 <p align="center">Powered by Godot Engine, Gymnasium, Keras/TensorFlow, and optional Stable-Baselines3</p>
 
+Source version: **0.9.0**. The Godot add-on and Python runtime share the same release version.
+
 Metis connects Godot simulations to reinforcement-learning code written with Gymnasium and TensorFlow/Keras. Agents, sensors, rewards, episode rules, and world physics live in Godot. Python reads that contract and handles data collection, optimization, checkpoints, evaluation, and inference.
 
 **The aim is straightforward: changing the task should usually mean building a new Godot scene, not writing another Python training program.**
@@ -19,7 +21,7 @@ Metis connects Godot simulations to reinforcement-learning code written with Gym
   <img src="docs/media/demo_arm.gif" height="200"/>
 </div>
 
-Metis is under active development, but it already supports discrete, continuous, and hybrid control; multi-agent environments; asynchronous collection; demonstrations; self-play; and portable policy exports.
+Metis is under active development, but it already supports discrete, continuous, and hybrid control; multi-agent environments; asynchronous collection; demonstrations; self-play; and portable policy exports. The Godot Train wizard exposes native training options, including PPO expert imitation, SAC demonstration protection, and optional evaluation-driven stability controls, without requiring a task-specific Python trainer.
 
 Start with the [documentation index](docs/README.md). If you are building a task for the first time, read [Build a new agent and scenario](docs/tutorials/new-agent-and-scenario.md).
 
@@ -37,10 +39,11 @@ Start with the [documentation index](docs/README.md). If you are building a task
 | Collection | One or more Godot processes, synchronous or asynchronous |
 | Multi-agent | Separate transitions with parameter sharing |
 | Competition | Simultaneous self-play and historical opponent pools |
-| Demonstrations | Manual recording, replay prefill, and behavior cloning |
+| Demonstrations | Manual recording, replay prefill, SAC protected replay, and PPO supervised imitation |
 | Persistence | Full checkpoints, replay snapshots, best-policy tracking, Keras bundles |
 | Monitoring | Persistent health state, alerts, and an optional live dashboard |
 | Recovery | Opt-in rollback to a validated best policy with guarded learning-rate reduction |
+| Stability | Opt-in plateau learning rates, independently certified stopping, and continuous off-policy actor EMA |
 | Inference | Reproducible lockstep or real-time execution |
 | Export | Keras, TensorFlow Lite, and optional ONNX |
 | Platforms | Linux CPU/CUDA and Apple Silicon with TensorFlow Metal |
@@ -251,6 +254,8 @@ Each agent receives its own reward. A multi-agent scene does not silently sum ev
 
 `ProgressProvider` is simply an ordered task metric. It may represent distance along a track, bricks destroyed, an object's lift height, remaining health, or a phase of a larger task. It does not have to use a `Path3D`.
 
+`ObservationMarginReward` adds a continuous linear or quadratic cost around a scalar observation's target value. Unlike a flat threshold reward, it retains a centering slope inside the reference band. Its units, scale and optional observation gate are scene-owned; it does not change success or termination rules.
+
 See the [Godot reference](docs/reference/godot.md) for the complete node contract.
 
 ## Algorithms
@@ -330,7 +335,7 @@ See [Benchmarking training backends](docs/guides/benchmarking-backends.md) befor
 --num-envs 4 --collector-mode async
 ```
 
-DQN and the continuous off-policy algorithms use replay buffers and lightweight CPU policy copies in collector workers. PPO collects asynchronously but only updates from a rollout produced by one frozen policy generation.
+DQN and the continuous off-policy algorithms use replay buffers and lightweight CPU policy copies in collector workers. PPO collects asynchronously but only updates from a rollout produced by one frozen policy generation. Collectors currently run as threads in one Python training process, alongside separate Godot processes; a multiprocessing collector is not the default or an exposed production mode. SAC and PPO async workers use separate seeded random streams for each collector and independent policy, without promising identical whole-training trajectories.
 
 This paragraph describes the native Metis backend. The SB3 adapter always uses synchronized vector rollouts. Passing `--backend sb3 --collector-mode async` is rejected rather than silently ignored.
 
@@ -341,6 +346,8 @@ Use synchronous collection when reproducibility matters more than throughput:
 ```text
 --collector-mode sync --parallel-env-steps
 ```
+
+For single-agent shared-policy DQN, a positive `--sync-batch-steps` enables independent episode resets instead of waiting for an entire episode group. This opt-in path excludes independent policies, historical opponents and automatic recovery; its resume contract keeps the same scheduling mode and environment count. See [DQN](docs/algorithms/dqn.md) for transition-budget and checkpoint details.
 
 Rendering is independent of collection mode:
 
@@ -404,9 +411,15 @@ After a confirmed collapse, Metis:
 4. republishes the restored policy and rejects stale async experience;
 5. freezes policy learning while an immediate isolated evaluation verifies the restore.
 
-The first attempt is soft and keeps off-policy replay. If verification continues to fail, a hard attempt clears online replay, keeps protected DDPGfD demonstrations, synchronizes target networks, resets async update credit, and warms the critics before the actor resumes. DQN synchronizes its target network; PPO rejects old policy generations and pauses its next update instead of using replay.
+The first attempt is soft and keeps off-policy replay. If verification continues to fail, a hard attempt clears online replay, keeps protected demonstrations from DDPGfD or SAC with protected replay, synchronizes target networks, resets async update credit, and warms the critics before the actor resumes. DQN synchronizes its target network; PPO rejects old policy generations and pauses its next update instead of using replay.
 
 The default three-attempt limit belongs to one collapse cycle, not the lifetime of the run. A new best result or two healthy frozen evaluations closes the cycle and restores a fresh budget. Early, immature policies are not rolled back until enough evaluations and a meaningful baseline exist. Recovery still cannot repair an incorrect reward, observation, terminal condition, physics setup, or curriculum. The SB3 comparison backend publishes telemetry health, but automatic rollback remains a native Metis feature.
+
+### Optional stability controls
+
+Native trainers can reduce learning rates after a frozen-evaluation plateau with `--lr-decay-on-plateau`, or accumulate recovery reductions with `--recovery-lr-cumulative`. `--stop-when-solved` requires consecutive qualifying evaluations followed by an independent test of the exact frozen candidate; a failed or incomplete certification continues training. Certification currently requires a single agent and policy and is a statistical simulator check, not a physical safety guarantee.
+
+Single-policy SAC and the DDPG/TD3 family additionally support `--actor-ema-decay` for an averaged evaluation/export actor, while raw weights continue learning and collecting data. These controls are disabled by default. See [Training stability controls](docs/training-stability.md) for supported combinations, confidence bounds, resume behavior and selecting the actual certified or EMA artifact.
 
 ## Multi-agent and self-play
 
@@ -421,7 +434,7 @@ Use `--multi-policy` when different agents or teams must own different learners.
 --collector-mode async
 ```
 
-The checkpoint remains atomic: all policies and the episode cursor are restored together. Policy bundles are written under `CHECKPOINT_DIR/policies/`, while `multi_policy.json` records the `agent_id -> policy_id` mapping. Repeat `--train-policy POLICY_ID` on a resumed run to update only selected policies. All native trainers support synchronous and asynchronous collection in this mode. Demonstration variants route recorder samples by `agent_ids`, so each trainable policy must have its own recorded transitions. Parameter sharing remains the simpler and usually more sample-efficient baseline for identical, symmetric agents.
+The checkpoint remains atomic: all policies and the episode cursor are restored together. Policy bundles are written under `CHECKPOINT_DIR/policies/`, while `multi_policy.json` records the `agent_id -> policy_id` mapping. Repeat `--train-policy POLICY_ID` on a resumed run to update only selected policies. All native trainers support synchronous and asynchronous collection in this mode. The deterministic demonstration variants route recorder samples by `agent_ids`, so each trainable policy must have its own recorded transitions; PPO imitation and SAC protected-demonstration training are currently single-policy workflows. Parameter sharing remains the simpler and usually more sample-efficient baseline for identical, symmetric agents.
 
 On the SB3 adapter, shared agents are vector lanes grouped by Godot process. The default `--sb3-multi-agent-partial-done error` is the safe setting for Pong, Tanks, or other scenarios where all competitors finish together. `reset-all` is an explicit change to episode semantics and should not be used in a Metis/SB3 benchmark unless the native scenario follows the same rule.
 
@@ -458,7 +471,9 @@ python/.venv/bin/python python/recorder.py \
   --no-headless
 ```
 
-The dataset contains observations, applied actions, rewards, next observations, terminal flags, agent IDs, episodes, and steps. See [Manual demonstrations](docs/guides/manual-demonstrations.md) for prefill, pretraining, and behavior-cloning workflows.
+The dataset contains observations, applied actions, rewards, next observations, combined `dones` episode-boundary flags, agent IDs, episodes, and steps. See [Manual demonstrations](docs/guides/manual-demonstrations.md) for recording limitations, prefill, pretraining, and behavior-cloning workflows.
+
+SAC's opt-in `--demo-protect` retains complete prefilled expert transitions against online replay overwrite, including replay resume and hard recovery. It does not impose an expert sampling quota or add a persistent imitation loss. Standard single-policy PPO instead supports BC pretraining and an optional `--ppo-demo-coef` auxiliary objective from separate expert labels; expert data never enters its on-policy rollouts or GAE. Both workflows are configurable in the Godot Train wizard.
 
 ## Checkpoints and policies
 
@@ -472,6 +487,8 @@ Metis writes two kinds of artifacts:
 `python/run.py --checkpoint-path ... --export-policy-dir ... --export-policy-only` extracts the policy from an exact checkpoint. This is the safe route for transferring a best actor to a changed task without carrying over stale critic or optimizer state.
 
 Trainers can evaluate frozen checkpoints and keep the best candidate under `CHECKPOINT_DIR/best/`. Automatic scoring prefers success rate and uses mean reward as a tie-breaker or as the primary metric when a scene exposes no success signal.
+
+When stability controls are active, retain `training_control.json` with the checkpoint directory so learning-rate ceilings and previously spent certification seed decks survive resume. Certified candidates and their reports live under `certification/attempt-K/`; the root training checkpoint is not automatically the certified deployment artifact. With actor EMA enabled, deploy `policy.keras` to use the averaged actor rather than extracting raw training weights.
 
 On `Ctrl+C`, the trainer saves the latest consistent state and closes its Godot processes and sockets. Wait for the confirmation message before closing the terminal.
 
@@ -511,8 +528,10 @@ TFLite uses TensorFlow. ONNX requires `python/requirements-export.txt`. The mani
 ## Current boundaries
 
 - Agents sharing one policy must expose the same observation and action contract.
-- Independent multi-policy training requires homogeneous observation and action contracts and the native Metis backend. It supports synchronous or asynchronous collection across all native trainers. Demonstration variants additionally require recorder files containing `agent_ids` for every trainable policy.
+- Independent multi-policy training requires homogeneous observation and action contracts and the native Metis backend. It supports synchronous or asynchronous collection across all native trainers. Deterministic demonstration variants additionally require recorder files containing `agent_ids` for every trainable policy.
 - Asynchronous historical opponent sampling is currently limited to DQN.
+- PPO expert imitation requires standard single-policy mode; it is not combined with residual or independent multi-policy learning. SAC demonstration protection is also single-policy only.
+- Solved-task certification is single-agent/single-policy only. Actor EMA is single-policy SAC/DDPG/TD3-family only, not PPO or DQN.
 - The optional SB3 adapter is a comparison tool, not a second full Metis runtime. It has synchronized collection only, no historical opponent pool, no demonstration/BC pipeline, and no independent multi-policy trainer.
 - SB3 hybrid PPO uses a latent continuous encoding, and SB3 parameter sharing requires coordinated group resets unless `reset-all` is requested explicitly.
 - A Keras model stores the mapping from numeric observations to actions. It does not contain the Godot scene, sensors, or scene-side preprocessing.

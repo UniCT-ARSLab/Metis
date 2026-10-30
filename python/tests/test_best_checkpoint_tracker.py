@@ -531,11 +531,11 @@ class EveryTrainerDrainsBeforeExitTests(unittest.TestCase):
         for trainer in self.TRAINERS:
             source = self.trainer_source(trainer)
             drains = source.count("wait_timeout=args.best_final_drain_timeout")
-            # One each for shared-policy async/sync and independent
-            # multi-policy async/sync tails.
+            # DQN adds an independent-reset shared-policy sync tail to the four existing paths.
+            expected = 5 if trainer == "dqn" else 4
             self.assertEqual(
-                drains, 4,
-                msg=f"algorithms/{trainer}.py has {drains} drain call(s), expected 4",
+                drains, expected,
+                msg=f"algorithms/{trainer}.py has {drains} drain call(s), expected {expected}",
             )
 
     def test_no_trainer_kept_a_private_copy_of_the_helper(self):

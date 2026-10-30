@@ -49,6 +49,7 @@ import numpy as np
 import tensorflow as tf
 
 from core.curriculum import scenario_curriculum_config
+from core import ppo_demonstrations
 from core.models import (
     build_hybrid_actor_critic,
     default_network_layers,
@@ -100,6 +101,7 @@ from core.training import (
     GROUP_LOOP,
     GROUP_PPO,
     GROUP_RESIDUAL,
+    GROUP_DEMOS,
 )
 from envs.process_manager import GodotProcessManager
 from envs.scenario import ScenarioGymEnv
@@ -180,6 +182,21 @@ def parse_args():
         default=-20.0,
         help="Lower bound on the policy log-std (prevents a premature collapse to a deterministic policy).",
     )
+    group = argument_group(parser, GROUP_DEMOS)
+    group.add_argument("--demo-path", action="append", default=[], help="Expert NPZ datasets; PPO uses only observations and action labels, never replay transitions. Repeatable.")
+    group.add_argument("--demo-bc-path", action="append", default=[], help="Additional imitation-only NPZ datasets. Repeatable; kept separate from on-policy rollouts.")
+    group.add_argument("--demo-max-transitions", type=int, default=0, help="Maximum expert samples across all training sources; 0 loads all.")
+    group.add_argument("--demo-bc-epochs", type=int, default=0, help="Supervised policy pretraining epochs before PPO; 0 disables pretraining.")
+    group.add_argument("--demo-bc-batch-size", type=int, default=128, help="Expert minibatch size for pretraining and auxiliary PPO imitation.")
+    group.add_argument("--demo-bc-learning-rate", type=float, default=None, help="Pretraining optimizer rate; defaults to --learning-rate.")
+    group.add_argument("--demo-bc-on-resume", action=argparse.BooleanOptionalAction, default=False, help="Explicitly repeat supervised pretraining after restoring a checkpoint.")
+    group.add_argument("--demo-validation-path", action="append", default=[], help="Held-out expert NPZ dataset used to select the best BC epoch. Repeatable.")
+    group.add_argument("--bc-actor-weights-path", default=None, help="Save the BC-pretrained PPO model before RL; defaults to a _bc.weights.h5 sibling of --weights-path.")
+    group.add_argument("--stop-after-bc", action=argparse.BooleanOptionalAction, default=False, help="Save the cloned PPO policy and exit before collecting on-policy experience.")
+    group.add_argument("--ppo-demo-coef", type=float, default=0.0, help="Auxiliary expert imitation loss weight during PPO; 0 disables it.")
+    group.add_argument("--ppo-demo-final-coef", type=float, default=0.0, help="Final imitation weight when --ppo-demo-decay-updates is enabled.")
+    group.add_argument("--ppo-demo-decay-updates", type=int, default=0, help="Linearly decay imitation weight over this many PPO optimizer minibatch updates; 0 keeps the initial weight constant. Resume uses the restored optimizer counter.")
+
     # Residual mode learns a bounded correction around a frozen base policy.
 
     group = argument_group(parser, GROUP_RESIDUAL)
@@ -265,6 +282,9 @@ def parse_args():
 def save_training_checkpoint(checkpoint, checkpoint_manager, episode, args, final=False):
     checkpoint.episode.assign(episode)
     saved_path = checkpoint_manager.save(checkpoint_number=episode)
+    contract = getattr(args, "ppo_demo_contract", None)
+    if contract is not None:
+        _atomic_write_json(saved_path + ".ppo_demos.json", contract)
     print(f"Saved {'final checkpoint' if final else 'checkpoint'}: {saved_path}", flush=True)
     policy_artifact = getattr(args, "policy_artifact", None)
     if policy_artifact is not None:
@@ -404,7 +424,7 @@ def value_of(sample_fn, log_std, obs, action_meta):
     return float(value_t.numpy()[0])
 
 
-def build_sample_action_fn(model, obs_dim, action_meta, device="/CPU:0", rng_gen=None):
+def build_sample_action_fn(model, obs_dim, action_meta, device="/CPU:0", rng_gen=None, categorical_rng_gen=None):
     """Trace the stochastic action sample into one graph per collector.
 
     The eager op-by-op version corrupts tensor shapes when several collector threads
@@ -413,9 +433,7 @@ def build_sample_action_fn(model, obs_dim, action_meta, device="/CPU:0", rng_gen
     multiple threads where eager execution is not, the same fix build_greedy_action_fn
     applies to DQN. Pinning to `device` keeps the ops with the collector's CPU weights.
 
-    rng_gen: an explicit tf.random.Generator (CHECKPOINTABLE) for the continuous Gaussian draw. Used in
-    residual mode so a resumed run reproduces the exact action sampling; None keeps the global
-    tf.random.normal (standard, unchanged).
+    rng_gen controls continuous Gaussian draws; categorical_rng_gen supplies seeds for categorical draws. Async collectors set both to their private stream. Existing sync and residual callers retain their previous defaults.
     """
     continuous_size = int(action_meta["continuous_size"])
     low = tf.constant(action_meta["continuous_low"], dtype=tf.float32)
@@ -433,7 +451,10 @@ def build_sample_action_fn(model, obs_dim, action_meta, device="/CPU:0", rng_gen
             discrete_actions = []
             log_prob = tf.zeros((tf.shape(obs_batch)[0],), dtype=tf.float32)
             for component_logits in logits:
-                action = tf.random.categorical(component_logits, 1, dtype=tf.int32)
+                if categorical_rng_gen is None:
+                    action = tf.random.categorical(component_logits, 1, dtype=tf.int32)
+                else:
+                    action = tf.random.stateless_categorical(component_logits, 1, seed=categorical_rng_gen.make_seeds(1)[:, 0], dtype=tf.int32)
                 action = tf.squeeze(action, axis=1)
                 discrete_actions.append(action)
                 component_log_prob = -tf.nn.sparse_softmax_cross_entropy_with_logits(
@@ -460,7 +481,23 @@ def build_sample_action_fn(model, obs_dim, action_meta, device="/CPU:0", rng_gen
 
             return discrete_out, continuous_out, log_prob, value
 
+    sample.rng_gen = rng_gen
+    sample.categorical_rng_gen = categorical_rng_gen
     return sample
+
+
+def build_ppo_collector_sample_fns(local_models, obs_dim, action_meta, seed):
+    """Give each asynchronous worker and policy its own CPU random stream."""
+    with tf.device("/CPU:0"):
+        streams = tf.random.Generator.from_seed(int(seed), alg="philox").split(len(local_models))
+        functions = []
+        for models, stream in zip(local_models, streams):
+            if isinstance(models, dict):
+                policy_streams = stream.split(len(models))
+                functions.append({policy_id: build_sample_action_fn(model, obs_dim, action_meta, rng_gen=generator, categorical_rng_gen=generator) for (policy_id, model), generator in zip(models.items(), policy_streams)})
+            else:
+                functions.append(build_sample_action_fn(models, obs_dim, action_meta, rng_gen=stream, categorical_rng_gen=stream))
+    return functions
 
 
 def _standard_adapter_for(action_meta):
@@ -899,7 +936,9 @@ def build_ppo_minibatch_step(model, log_std, optimizer, action_meta, args, *, va
     def _clip(grads):
         return tf.clip_by_global_norm(grads, grad_clip)[0] if grad_clip > 0.0 else grads
 
-    def minibatch_step(obs, discrete_actions, continuous_actions, old_log_probs, advantages, returns, train_masks):
+    use_demonstrations = float(getattr(args, "ppo_demo_coef", 0.0)) > 0.0
+
+    def minibatch_step(obs, discrete_actions, continuous_actions, old_log_probs, advantages, returns, train_masks, demo_obs=None, demo_discrete=None, demo_continuous=None):
         with tf.GradientTape(persistent=split) as tape:
             new_log_probs, entropy, values = evaluate_actions(
                 model, log_std, obs, discrete_actions, continuous_actions, action_meta
@@ -912,6 +951,10 @@ def build_ppo_minibatch_step(model, log_std, optimizer, action_meta, args, *, va
             value_loss = tf.reduce_mean(tf.square(returns - values))
             entropy_bonus = tf.reduce_sum(train_masks * entropy) / mask_sum
             actor_loss = policy_loss - entropy_coef * entropy_bonus
+            if use_demonstrations:
+                demo_loss = ppo_demonstrations.imitation_loss(model, demo_obs, demo_discrete, demo_continuous, action_meta)
+                demo_coefficient = ppo_demonstrations.coefficient(args, optimizer.iterations)
+                actor_loss += demo_coefficient * demo_loss
             value_term = value_loss_coef * value_loss
             loss = actor_loss + value_term
         if split:                                            # residual: separate actor/value optimizers
@@ -922,6 +965,8 @@ def build_ppo_minibatch_step(model, log_std, optimizer, action_meta, args, *, va
             optimizer.apply_gradients(zip(_clip(tape.gradient(loss, train_vars)), train_vars))
         if continuous_size > 0:
             log_std.assign(tf.clip_by_value(log_std, log_std_min, log_std_max))
+        if use_demonstrations:
+            return loss, policy_loss, value_loss, entropy_bonus, demo_loss, demo_coefficient
         return loss, policy_loss, value_loss, entropy_bonus
 
     if compiled:
@@ -934,7 +979,8 @@ def _get_ppo_minibatch_step(model, log_std, optimizer, action_meta, args, value_
     # re-trace the graph every update. One learner model per run, so this holds a single entry.
     compiled = bool(getattr(args, "tf_compile_learner", True))
     xla = bool(getattr(args, "tf_xla", False))
-    key = (id(model), id(log_std), id(optimizer), id(value_optimizer), compiled, xla)
+    demo_settings = tuple(getattr(args, key, 0) for key in ("ppo_demo_coef", "ppo_demo_final_coef", "ppo_demo_decay_updates"))
+    key = (id(model), id(log_std), id(optimizer), id(value_optimizer), compiled, xla, demo_settings)
     step = _PPO_MINIBATCH_STEPS.get(key)
     if step is None:
         step = build_ppo_minibatch_step(
@@ -968,6 +1014,11 @@ def ppo_update(model, log_std, optimizer, batch, action_meta, args, value_optimi
     policy_losses = []
     value_losses = []
     entropies = []
+    demo_losses, demo_coefficients = [], []
+    demo_data = getattr(args, "ppo_demonstrations", None)
+    use_demonstrations = float(getattr(args, "ppo_demo_coef", 0.0)) > 0.0
+    if use_demonstrations and demo_data is None:
+        raise ValueError("PPO auxiliary imitation requires a loaded demonstration dataset")
 
     minibatch_step = _get_ppo_minibatch_step(model, log_std, optimizer, action_meta, args, value_optimizer)
     target_kl = float(getattr(args, "ppo_target_kl", 0.0))
@@ -977,7 +1028,8 @@ def ppo_update(model, log_std, optimizer, batch, action_meta, args, value_optimi
         _shuffle(indices)
         for start in range(0, count, args.batch_size):
             idx = indices[start:start + args.batch_size]
-            loss, policy_loss, value_loss, entropy_bonus = minibatch_step(
+            demo_batch = ppo_demonstrations.sample_batch(demo_data, args.demo_bc_batch_size, int(optimizer.iterations.numpy()), args.env_seed_base) if use_demonstrations else ()
+            result = minibatch_step(
                 tf.gather(obs, idx),
                 tf.gather(discrete_actions, idx),
                 tf.gather(continuous_actions, idx),
@@ -985,7 +1037,12 @@ def ppo_update(model, log_std, optimizer, batch, action_meta, args, value_optimi
                 tf.gather(advantages, idx),
                 tf.gather(returns, idx),
                 tf.gather(train_masks, idx),
+                *demo_batch,
             )
+            loss, policy_loss, value_loss, entropy_bonus = result[:4]
+            if use_demonstrations:
+                demo_losses.append(float(result[4].numpy()))
+                demo_coefficients.append(float(result[5].numpy()))
             losses.append(float(loss.numpy()))
             policy_losses.append(float(policy_loss.numpy()))
             value_losses.append(float(value_loss.numpy()))
@@ -1002,7 +1059,7 @@ def ppo_update(model, log_std, optimizer, batch, action_meta, args, value_optimi
             if approx_kl > 1.5 * target_kl:
                 break
 
-    return {
+    metrics = {
         "loss": float(np.mean(losses)) if losses else 0.0,
         "policy_loss": float(np.mean(policy_losses)) if policy_losses else 0.0,
         "value_loss": float(np.mean(value_losses)) if value_losses else 0.0,
@@ -1010,6 +1067,42 @@ def ppo_update(model, log_std, optimizer, batch, action_meta, args, value_optimi
         "approx_kl": approx_kl, "approx_kl_global": approx_kl_global, "approx_kl_signed": approx_kl_signed,
         "epochs_run": epochs_run, "n_active": int(active.sum()), "n_total": int(len(mask_np)),
     }
+    if use_demonstrations:
+        metrics.update(demo_loss=float(np.mean(demo_losses)) if demo_losses else 0.0, demo_coefficient=float(np.mean(demo_coefficients)) if demo_coefficients else 0.0, demo_samples=len(demo_losses) * args.demo_bc_batch_size)
+    return metrics
+
+
+def prepare_demonstrations(args, model, action_meta, obs_dim, resume_checkpoint, checkpoint=None):
+    sources = args.demo_path + args.demo_bc_path
+    data = ppo_demonstrations.load_demonstrations(sources, obs_dim, action_meta, args.demo_max_transitions)
+    args.ppo_demonstrations = data
+    args.ppo_demo_contract = ppo_demonstrations.training_contract(args, data, action_meta)
+    checkpoint_contract = getattr(checkpoint, "demo_contract", None)
+    if resume_checkpoint:
+        sidecar = Path(str(resume_checkpoint) + ".ppo_demos.json")
+        stored = checkpoint_contract.numpy().decode("utf-8") if checkpoint_contract is not None else ""
+        saved = json.loads(stored) if stored else json.loads(sidecar.read_text()) if sidecar.exists() else None
+        if saved is not None and saved != args.ppo_demo_contract:
+            raise ValueError("PPO demonstration checkpoint contract mismatch: keep the expert data, action contract, imitation schedule, batch size and seed unchanged; use --policy-path for a new training configuration")
+    if checkpoint_contract is not None:
+        checkpoint_contract.assign(json.dumps(args.ppo_demo_contract, sort_keys=True) if args.ppo_demo_contract is not None else "")
+    if data is not None:
+        print(f"Loaded PPO expert samples={len(data['obs'])}; imitation data is separate from on-policy rollouts", flush=True)
+    run_bc = data is not None and args.demo_bc_epochs > 0 and (not resume_checkpoint or args.demo_bc_on_resume)
+    if args.stop_after_bc and not run_bc:
+        raise ValueError("--stop-after-bc requires BC to run; add --demo-bc-on-resume when restoring a checkpoint")
+    if run_bc:
+        validation = ppo_demonstrations.load_demonstrations(args.demo_validation_path, obs_dim, action_meta)
+        ppo_demonstrations.pretrain(model, data, action_meta, args, validation)
+    elif data is not None and args.demo_bc_epochs > 0:
+        print("Skipped PPO behavior cloning on resume; use --demo-bc-on-resume to repeat it explicitly", flush=True)
+    return run_bc
+
+
+def demonstration_metrics(metrics):
+    if metrics is None or "demo_loss" not in metrics:
+        return []
+    return [("demo_loss", f"{metrics['demo_loss']:.5f}"), ("demo_coefficient", f"{metrics['demo_coefficient']:.5f}"), ("demo_samples", metrics["demo_samples"])]
 
 
 def run_async_ppo(
@@ -1037,9 +1130,7 @@ def run_async_ppo(
             )
             for _env in envs
         ]
-    # One traced sampler per collector: they run concurrently, and eager sampling is not
-    # thread-safe. set_weights on the closed-over model keeps each trace current.
-    sample_fns = [build_sample_action_fn(m, obs_dim, action_meta) for m in local_models]
+    sample_fns = build_ppo_collector_sample_fns(local_models, obs_dim, action_meta, getattr(args, "env_seed_base", 100))
     snapshot = PolicySnapshot(model.get_weights(), state=log_std.numpy())
     health_monitor = getattr(best_tracker, "health_monitor", None)
     recovery_handler = getattr(health_monitor, "recovery_handler", None)
@@ -1283,6 +1374,8 @@ def run_async_ppo(
     try:
         while completed < args.num_episodes:
             apply_ready_best_checkpoint(best_tracker)
+            if getattr(best_tracker, "stop_requested", False):
+                break
             try:
                 event = pool.get(timeout=0.2)
             except Empty:
@@ -1353,6 +1446,7 @@ def run_async_ppo(
                     ("policy_loss", f"{metrics['policy_loss']:.5f}"),
                     ("value_loss", f"{metrics['value_loss']:.5f}"),
                     ("entropy", f"{metrics['entropy']:.5f}"),
+                    *demonstration_metrics(metrics),
                 ])
             # Flat numeric mean return, so the dashboard's reward chart (and any metric sink) has a
             # plottable value; rewards_summary itself is a list of per-agent episode returns.
@@ -1478,17 +1572,7 @@ def run_async_multi_policy_ppo(
             }
             for _env in envs
         ]
-    sample_fns = [
-        {
-            policy_id: build_sample_action_fn(
-                model,
-                env0.obs_dim,
-                action_meta,
-            )
-            for policy_id, model in worker_models.items()
-        }
-        for worker_models in local_models
-    ]
+    sample_fns = build_ppo_collector_sample_fns(local_models, env0.obs_dim, action_meta, getattr(args, "env_seed_base", 100))
 
     def live_weights():
         return {
@@ -1705,6 +1789,8 @@ def run_async_multi_policy_ppo(
     try:
         while completed < args.num_episodes:
             apply_ready_best_checkpoint(best_tracker)
+            if getattr(best_tracker, "stop_requested", False):
+                break
             try:
                 event = pool.get(timeout=0.2)
             except Empty:
@@ -2069,6 +2155,8 @@ def run_sync_multi_policy_ppo(
     interrupted = False
     try:
         for episode in range(start_episode, args.num_episodes):
+            if getattr(best_tracker, "stop_requested", False):
+                break
             trajectories = {
                 policy_id: []
                 for policy_id in assignment.policy_ids
@@ -2345,6 +2433,7 @@ def run_sync_multi_policy_ppo(
 
 def main():
     args = parse_args()
+    ppo_demonstrations.validate_options(args)
     validate_residual_mode(args)          # fail-closed BEFORE the multi-policy branch can return unprotected
     budget = TrainingBudget(args.total_timesteps)
     validate_async_arguments(args)
@@ -2481,6 +2570,8 @@ def main():
             residual_manifest_obj = None
 
         _ckpt_kw = {"model": model, "log_std": log_std, "optimizer": optimizer, "episode": episode_var}
+        if not _residual:
+            _ckpt_kw["demo_contract"] = tf.Variable("", dtype=tf.string, trainable=False)
         if value_optimizer is not None:
             _ckpt_kw["value_optimizer"] = value_optimizer
         if _residual:
@@ -2514,6 +2605,12 @@ def main():
                 flush=True,
             )
         optimizer.learning_rate.assign(args.learning_rate)
+        prepare_demonstrations(args, model, action_meta, obs_dim, resume_checkpoint, checkpoint)
+        if args.stop_after_bc:
+            save_training_checkpoint(checkpoint, checkpoint_manager, start_episode, args, final=True)
+            model.save_weights(args.weights_path)
+            print("Stopped after PPO behavior cloning; no on-policy rollout or PPO update was collected", flush=True)
+            return
         # Zero-initialize only a fresh residual policy; resumes and warm starts keep their weights.
         _fresh_residual = residual_should_zero_init(resume_checkpoint is not None, args.policy_path)
         action_adapter = build_action_adapter(args, model, action_meta, zero_init_head=_fresh_residual)
@@ -2534,7 +2631,7 @@ def main():
 
         best_tracker.configure_recovery(
             checkpoint,
-            [("policy", optimizer)],
+            [("policy", optimizer), ("value", value_optimizer)],
         )
 
         if _residual:
@@ -2628,6 +2725,8 @@ def main():
 
         last_saved_episode = None
         for episode in range(start_episode, args.num_episodes):
+            if getattr(best_tracker, "stop_requested", False):
+                break
             opponent_match = opponent_pool.start_episode(model, episode)
             opponent_log_std = (
                 tf.convert_to_tensor(opponent_match.state, dtype=tf.float32)
@@ -2826,6 +2925,7 @@ def main():
                     ("policy_loss", f"{metrics['policy_loss']:.5f}"),
                     ("value_loss", f"{metrics['value_loss']:.5f}"),
                     ("entropy", f"{metrics['entropy']:.5f}"),
+                    *demonstration_metrics(metrics),
                 ])
             print_episode_metrics(episode, [
                 ("mode", [("opponent", opponent_match.label)]),

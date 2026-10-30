@@ -32,6 +32,8 @@ class ReplayBuffer:
         self._priorities = np.ones((self.capacity,), dtype=np.float32)
         self._is_demo = np.zeros((self.capacity,), dtype=np.bool_)
         self._protected_demo_count = 0
+        self._sampled_demo_count = 0
+        self._sampled_replay_count = 0
         self._max_priority = 1.0
         self._save_executor = None
         self._save_futures = []
@@ -119,17 +121,19 @@ class ReplayBuffer:
         rewards = rewards[:count]
         next_obs = next_obs[:count]
         dones = dones[:count]
-        if count >= self.capacity:
-            obs = obs[-self.capacity:]
-            actions = actions[-self.capacity:]
-            rewards = rewards[-self.capacity:]
-            next_obs = next_obs[-self.capacity:]
-            dones = dones[-self.capacity:]
-            count = self.capacity
+        online_capacity = self.capacity - self._protected_demo_count
+        if count >= online_capacity:
+            obs = obs[-online_capacity:]
+            actions = actions[-online_capacity:]
+            rewards = rewards[-online_capacity:]
+            next_obs = next_obs[-online_capacity:]
+            dones = dones[-online_capacity:]
+            count = online_capacity
 
         if self._obs is None:
             self._initialize(obs[0], actions[0], next_obs[0])
 
+        self._position = max(self._position, self._protected_demo_count)
         first_count = min(count, self.capacity - self._position)
         first = slice(self._position, self._position + first_count)
         self._obs[first] = obs[:first_count]
@@ -144,7 +148,7 @@ class ReplayBuffer:
 
         remaining = count - first_count
         if remaining > 0:
-            second = slice(0, remaining)
+            second = slice(self._protected_demo_count, self._protected_demo_count + remaining)
             self._obs[second] = obs[first_count:]
             self._actions[second] = actions[first_count:]
             self._rewards[second] = rewards[first_count:]
@@ -155,7 +159,7 @@ class ReplayBuffer:
                 self.demo_priority_bonus if is_demo else 0.0
             )
 
-        self._position = (self._position + count) % self.capacity
+        self._position = self._protected_demo_count + (self._position - self._protected_demo_count + count) % online_capacity
         self._size = min(self._size + count, self.capacity)
         return count
 
@@ -178,6 +182,8 @@ class ReplayBuffer:
         self._size = 0
         self._position = 0
         self._protected_demo_count = 0
+        self._sampled_demo_count = 0
+        self._sampled_replay_count = 0
         self._max_priority = 1.0
 
     def clear_online(self, preserve_protected_demos=True):
@@ -185,6 +191,8 @@ class ReplayBuffer:
         if preserve_protected_demos and self._protected_demo_count > 0:
             self._size = self._protected_demo_count
             self._position = self._protected_demo_count
+            self._sampled_demo_count = 0
+            self._sampled_replay_count = 0
             self._max_priority = max(
                 1.0,
                 float(np.max(self._priorities[: self._protected_demo_count])),
@@ -270,8 +278,13 @@ class ReplayBuffer:
             if max_items is not None and max_items > 0:
                 limit = min(limit, int(max_items))
             protected = int(data["protected_demo_count"][0]) if "protected_demo_count" in data else 0
+            if not 0 <= protected <= count:
+                raise ValueError("Replay buffer contains an invalid protected demonstration count")
+            if protected and limit <= protected:
+                raise ValueError("Replay restore must leave room for all protected demonstrations and at least one online transition")
+            if not clear and len(self) and (protected or self._protected_demo_count):
+                raise ValueError("Protected replay buffers must be restored with clear=True")
             if protected > 0 and count > limit:
-                protected = min(protected, max(0, limit - 1))
                 online_count = limit - protected
                 indices = np.concatenate((
                     np.arange(protected, dtype=np.int64),
@@ -300,17 +313,20 @@ class ReplayBuffer:
             self._max_priority = max(float(np.max(self._priorities[:loaded])), 1.0)
         if is_demo is not None:
             self._is_demo[:loaded] = is_demo[:loaded]
-        if protected > 0 and loaded > 1:
-            self._protected_demo_count = min(protected, loaded, self.capacity - 1)
+        if protected > 0 and loaded > 0:
+            self._protected_demo_count = protected
             self._is_demo[:self._protected_demo_count] = True
             if self._position < self._protected_demo_count:
                 self._position = self._protected_demo_count
         return loaded
 
-    def sample(self, batch_size, action_dtype=np.int32):
+    def sample(self, batch_size, action_dtype=np.int32, *, track_demo_samples=False):
         if int(batch_size) > self._size:
             raise ValueError(f"Cannot sample batch_size={batch_size} from replay_size={self._size}")
         indices = np.random.randint(0, self._size, size=int(batch_size))
+        if track_demo_samples and self._protected_demo_count:
+            self._sampled_demo_count += int(np.count_nonzero(indices < self._protected_demo_count))
+            self._sampled_replay_count += int(indices.size)
         return (
             self._obs[indices],
             self._actions[indices].astype(action_dtype, copy=False),
@@ -354,6 +370,16 @@ class ReplayBuffer:
     @property
     def protected_demo_count(self):
         return self._protected_demo_count
+
+    @property
+    def demo_sampling_stats(self):
+        """Tracked uniform learner draws since load or replay reset, excluding diagnostic probes."""
+        return {
+            "protected_demo_count": self._protected_demo_count,
+            "sampled_demo_transitions": self._sampled_demo_count,
+            "sampled_replay_transitions": self._sampled_replay_count,
+            "sampled_demo_fraction": self._sampled_demo_count / self._sampled_replay_count if self._sampled_replay_count else 0.0,
+        }
 
     def sample_batches(self, num_batches, batch_size, action_dtype=np.int32):
         num_batches = int(num_batches)

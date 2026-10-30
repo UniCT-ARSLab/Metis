@@ -5,8 +5,7 @@ Metis is developed as one repository and distributed as two coordinated pieces:
 - a Godot add-on under `addons/metis`;
 - a Python package named `metis-rl`.
 
-They share a version and a wire protocol. The release builder refuses to package
-different versions together.
+They share a version and a wire protocol. The release builder refuses to package different versions together. `godot/addons/metis/plugin.cfg` and `python/pyproject.toml` are the canonical version declarations; wheel metadata and the packaged runtime manifest are generated from them. Historical build artifacts and test fixtures do not need their version strings rewritten for a new release.
 
 ## Source layout
 

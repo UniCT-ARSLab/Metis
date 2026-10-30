@@ -8,6 +8,7 @@ entry against the real parsers, then replays the exact argv the wizard would bui
 CLI accepts it and lands the value on the right attribute.
 """
 
+import argparse
 import importlib
 import os
 import re
@@ -202,7 +203,8 @@ class TrainWizardFlagTests(unittest.TestCase):
                 expected = {}
                 for dest in dests:
                     value, stored = off_default(spec[dest])
-                    expected[dest] = stored
+                    action = next(action for action in parser._actions if action.dest == dest)
+                    expected[dest] = [stored] if isinstance(action, argparse._AppendAction) else stored
                     argv.extend(t for t in wizard_tokens(spec[dest], value) if t is not None)
                 parsed = parser.parse_args(argv)
                 for dest, stored in expected.items():

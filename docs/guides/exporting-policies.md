@@ -13,14 +13,11 @@ checkpoints/my_run/
 `-- policy.json
 ```
 
-- `ckpt-*` contains optimizer, target-network, critic, temperature, and counter state
-  needed for resume.
+- `ckpt-*` contains optimizer, target-network, critic, temperature, and counter state needed for resume.
 - `policy.keras` contains the architecture and weights used to select actions.
-- `policy.json` records the observation contract, action components, algorithm, and
-  output decoder.
+- `policy.json` records the observation contract, action components, algorithm, and output decoder.
 
-The `.keras` file is the preferred portable format. Legacy `.weights.h5` files are
-still supported, but code must reconstruct their architecture before loading them.
+The `.keras` file is the preferred portable format. Legacy `.weights.h5` files are still supported, but code must reconstruct their architecture before loading them.
 
 ## Running a Keras policy
 
@@ -40,16 +37,19 @@ The algorithm is read from `policy.json`. To load a specific file:
 --load-from policy --policy-path exports/my_policy/policy.keras
 ```
 
-`--policy-path` also accepts a full HDF5 model (`model.h5`) or legacy weights
-(`model.weights.h5`). A standalone file without `policy.json` has no Metis contract.
-`run.py` can still validate input size, but ambiguous architectures such as discrete
-PPO versus DQN may require `--algorithm`.
+`--policy-path` also accepts a full HDF5 model (`model.h5`) or legacy weights (`model.weights.h5`). A standalone file without `policy.json` has no Metis contract. `run.py` can still validate input size, but ambiguous architectures such as discrete PPO versus DQN may require `--algorithm`.
+
+## Selecting an EMA or certified policy
+
+With `--actor-ema-decay` enabled in single-policy SAC/DDPG/TD3-family training, `policy.keras` is the averaged evaluation/export actor. `policy.json` records `inference.policy_weights: "ema"`. Training checkpoints retain raw actor, optimizer and EMA state separately for continuation; ordinary `run.py --load-from checkpoint` reconstruction loads the raw learner, not the averaged artifact. To evaluate, warm-start or convert the averaged actor, pass the saved `.keras` bundle explicitly. EMA does not require a different inference decoder.
+
+Solved-task certification pins the exact tested candidate under `CHECKPOINT_DIR/certification/attempt-K/`. Use the policy or checkpoint path identified in that attempt's `report.json` and verify that the report passed. The root policy, latest checkpoint and a failed candidate are not interchangeable with the certified model. The report describes a statistical simulator test under a declared reset distribution, not physical safety or universal generalisation.
+
+When moving a run for continuation, preserve the full checkpoint directory, required replay snapshots, expert dataset files and `training_control.json`, not just its deployment artifact. The controller file retains spent certification decks and LR ceilings; PPO auxiliary-imitation data must be supplied again with the matching contract. See [Training stability controls](../training-stability.md) and [PPO demonstrations](../algorithms/ppo.md#demonstrations).
 
 ## Extracting a policy from an exact checkpoint
 
-The root `policy.keras` follows the most recently saved checkpoint, while the best
-checkpoint may live under `best/`. To extract precisely that policy without restoring
-its critic, replay buffer, optimizers, or entropy state:
+The root `policy.keras` follows the most recently saved checkpoint, while the best checkpoint may live under `best/`. For a raw policy, the following command extracts its network for deployment without carrying critic, replay, optimizer or entropy state into the resulting bundle. It is not an EMA extraction command:
 
 ```bash
 python/.venv/bin/python python/run.py \
@@ -64,9 +64,7 @@ python/.venv/bin/python python/run.py \
   --headless
 ```
 
-This writes `actor_policy/policy.keras` and its matching `policy.json`. The scenario
-is opened only to validate the observation and action contract. The resulting bundle
-can be run directly or passed to a new training job with `--policy-path`.
+This writes `actor_policy/policy.keras` and its matching `policy.json`. The scenario is opened only to validate the observation and action contract. The resulting bundle can be run directly or passed to a new training job with `--policy-path`.
 
 ## Warm-starting a new training run
 
@@ -80,12 +78,7 @@ python/.venv/bin/python python/train.py \
   --godot-scene res://scenarios/my_scenario.tscn
 ```
 
-This is a warm start. Episode counters, optimizers, replay, critics, target networks,
-and exploration schedules start fresh. Use `--resume` or `--resume-checkpoint` to
-continue the original training state. Metis rejects combining resume and
-`--policy-path` because that would create an ambiguous state. Off-policy trainers
-also honor `--critic-warmup-updates` after an actor-only warm start, keeping the
-imported actor frozen while the new critic learns the new reward scale.
+This is a warm start. Episode counters, optimizers, replay, critics, target networks, and exploration schedules start fresh. Use `--resume` or `--resume-checkpoint` to continue the original training state. Metis rejects combining resume and `--policy-path` because that would create an ambiguous state. Off-policy trainers also honor `--critic-warmup-updates` after an actor-only warm start, keeping the imported actor frozen while the new critic learns the new reward scale.
 
 ## TensorFlow Lite
 
@@ -105,9 +98,7 @@ The command writes `policy.tflite` next to `policy.keras` and updates the manife
 --tflite-quantization float16
 ```
 
-`none` keeps float32 and is the most predictable default. `dynamic` mainly compresses
-weights. `float16` can help on hardware that accelerates half precision. Full int8
-quantization needs a representative dataset and is never enabled implicitly.
+`none` keeps float32 and is the most predictable default. `dynamic` mainly compresses weights. `float16` can help on hardware that accelerates half precision. Full int8 quantization needs a representative dataset and is never enabled implicitly.
 
 ## ONNX
 
@@ -125,8 +116,7 @@ python/.venv/bin/python python/export.py \
   --format onnx
 ```
 
-Use `--format all` to produce both TFLite and ONNX. ONNX export defaults to opset 18;
-`--onnx-opset` accepts the converter-supported range 14 through 18.
+Use `--format all` to produce both TFLite and ONNX. ONNX export defaults to opset 18; `--onnx-opset` accepts the converter-supported range 14 through 18.
 
 ## Deployment contract
 
@@ -144,5 +134,6 @@ Current decoders are:
 - `tanh_mean_then_scale`: deterministic SAC actor mean;
 - `ppo_deterministic_heads`: argmax for discrete heads and mean for continuous heads.
 
-Critics, replay, exploration noise, and the Godot sensor implementation are not part
-of a production policy artifact.
+Plain discrete PPO still uses `ppo_deterministic_heads`, not `argmax_q_values`; its value head is not an action score. PPO shared-policy and independent-policy inference use the same distinction.
+
+Critics, replay, exploration noise, and the Godot sensor implementation are not part of a production policy artifact.

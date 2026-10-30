@@ -1,7 +1,6 @@
 # Python reference
 
-The Python runtime discovers the contract declared by a Godot scene and connects it
-to the selected RL backend. Scenario-specific trainers are deliberately avoided.
+The Python runtime discovers the contract declared by a Godot scene and connects it to the selected RL backend. Scenario-specific trainers are deliberately avoided.
 
 ## Public commands
 
@@ -15,98 +14,67 @@ metis export      metis-export
 metis doctor      metis-doctor
 ```
 
-The scripts under `python/` are equivalent source-checkout entry points. They remain
-supported so contributors can test edits without rebuilding the package.
+The scripts under `python/` are equivalent source-checkout entry points. They remain supported so contributors can test edits without rebuilding the package.
 
 ### `metis train` / `python/train.py`
 
-Parses shared arguments, probes the action space when necessary, and lazily loads a
-learner. `--backend metis` is the default and dispatches to `python/algorithms`.
-`--backend sb3` dispatches to the optional Stable-Baselines3 adapter in
-`python/backends`. Metis remains the production/default backend. SB3 compatibility is
-provided primarily for repeatable comparisons against its PyTorch implementations,
-not as a claim that both backends expose every Metis feature.
+Parses shared arguments, probes the action space when necessary, and lazily loads a learner. `--backend metis` is the default and dispatches to `python/algorithms`. `--backend sb3` dispatches to the optional Stable-Baselines3 adapter in `python/backends`. Metis remains the production/default backend. SB3 compatibility is provided primarily for repeatable comparisons against its PyTorch implementations, not as a claim that both backends expose every Metis feature.
 
-`--algorithm auto` selects DQN for discrete actions, DDPG for continuous actions, and
-PPO for hybrid actions. The selected backend then validates that contract.
+`--algorithm auto` selects DQN for discrete actions, DDPG for continuous actions, and PPO for hybrid actions. The selected backend then validates that contract.
 
-`--total-timesteps N` adds a transition budget to the native trainers as well as the
-SB3 adapter. With several agents, every agent transition counts. A collector may
-finish its current synchronized batch after crossing the exact number.
+`--total-timesteps N` adds a transition budget to the native trainers as well as the SB3 adapter. With several agents, every agent transition counts. A collector may finish its current synchronized batch after crossing the exact number. The opt-in single-agent DQN independent-reset sync path instead stops at the exact accepted-transition budget, including a partial final batch; see [DQN](../algorithms/dqn.md#independent-synchronous-resets).
 
-`--policy-path` warm-starts only the policy from a Metis bundle, `.keras` model, full
-`.h5` model, or `.weights.h5` file. It does not restore optimizer, critic, replay, or
-episode state.
+`--policy-path` warm-starts only the policy from a Metis bundle, `.keras` model, full `.h5` model, or `.weights.h5` file. It does not restore optimizer, critic, replay, or episode state.
 
-`--dashboard` starts the optional local metrics server on port `8770`. Change the port
-with `--dashboard-port`. The Flask dependencies are deliberately kept out of the base
-runtime and can be installed from `requirements-dashboard.txt`.
+`--dashboard` starts the optional local metrics server on port `8770`. Change the port with `--dashboard-port`. The Flask dependencies are deliberately kept out of the base runtime and can be installed from `requirements-dashboard.txt`.
 
-`--metrics-jsonl PATH` records the same flattened episode rows without starting the
-dashboard. The backend benchmark uses this persistent stream to compare learning
-curves on a transition axis.
+`--metrics-jsonl PATH` records the same flattened episode rows without starting the dashboard. The backend benchmark uses this persistent stream to compare learning curves on a transition axis.
 
-`--adaptive-curriculum` promotes a scene level only from frozen evaluations. A
-checkpoint must contain at least `--curriculum-min-policy-updates` policy/actor optimizer
-updates (100 by default) before its evaluation can count toward promotion. Critic-only
-warmup and a successful random initialization therefore cannot advance the task.
-Frozen evaluation follows the live episode-based curriculum unless
-`--best-evaluation-training-episode` fixes a stage explicitly. Optional demotion uses
-`--curriculum-demotion-threshold` and `--curriculum-demotion-evaluations`; leave the
-threshold unset to keep a monotonic curriculum.
+`--adaptive-curriculum` promotes a scene level only from frozen evaluations. A checkpoint must contain at least `--curriculum-min-policy-updates` policy/actor optimizer updates (100 by default) before its evaluation can count toward promotion. Critic-only warmup and a successful random initialization therefore cannot advance the task. Frozen evaluation follows the live episode-based curriculum unless `--best-evaluation-training-episode` fixes a stage explicitly; enabling solved stopping or evaluation-driven LR scheduling also fixes the evaluation episode, defaulting to `--num-episodes`. Optional demotion uses `--curriculum-demotion-threshold` and `--curriculum-demotion-evaluations`; leave the threshold unset to keep a monotonic curriculum.
+
+Native trainers additionally support opt-in plateau/on-best learning-rate reduction, cumulative recovery reduction and independently certified solved stopping. Single-policy SAC/DDPG/TD3-family trainers can maintain a separate EMA evaluation/export actor. These controls are not SB3 features; solved certification is single-agent/single-policy only. See [Training stability controls](../training-stability.md) for the controller state, confidence budget and resume contract.
+
+SAC can protect complete demonstration transitions in replay with `--demo-protect`. Standard single-policy PPO can use separate BC pretraining and an optional `--ppo-demo-coef` auxiliary supervised objective without placing expert data in rollouts or GAE. These are different mechanisms with different flags and checkpoint requirements; see [Manual demonstrations](../guides/manual-demonstrations.md).
 
 ### `metis run` / `python/run.py`
 
-Loads `policy.keras` and `policy.json` by default. It can also load an explicit policy
-file, legacy H5 weights, or a training checkpoint.
+Loads `policy.keras` and `policy.json` by default. It can also load an explicit policy file, legacy H5 weights, or a training checkpoint.
 
-`--export-policy-dir DIR --export-policy-only` extracts the policy network from the
-selected exact checkpoint and writes a portable Metis bundle without running
-evaluation episodes. This is useful when `best/ckpt-N` is better than the latest root
-`policy.keras`, or when a new run should inherit only the actor.
+PPO inference uses categorical logits and its value-head-aware decoder even for one discrete action component; DQN alone uses the Q-value decoder for a plain discrete contract. Shared-policy and independent-policy inference follow this distinction. An action-space label alone is not enough to infer model outputs when an explicit algorithm or manifest identifies PPO.
 
-Lockstep execution is used for reproducible evaluation. Real-time execution is useful
-for watching a policy at the scene's natural pace.
+When actor EMA is enabled, `policy.keras` contains the averaged deployment actor and its manifest labels `inference.policy_weights` as `ema`. Reconstructing an ordinary training checkpoint loads the raw learner instead. For a certified model, use the exact artifact or checkpoint identified in the attempt's report, not an arbitrary later root policy. See [Selecting an EMA or certified policy](../guides/exporting-policies.md#selecting-an-ema-or-certified-policy).
 
-- `--continue-after-success` asks compatible scenes to keep simulation and inference
-  active after a successful goal.
+`--export-policy-dir DIR --export-policy-only` extracts the policy network from the selected exact checkpoint and writes a portable Metis bundle without running evaluation episodes. This is useful when `best/ckpt-N` is better than the latest root `policy.keras`, or when a new run should inherit only the actor.
+
+Lockstep execution is used for reproducible evaluation. Real-time execution is useful for watching a policy at the scene's natural pace.
+
+- `--continue-after-success` asks compatible scenes to keep simulation and inference active after a successful goal.
 - `--no-reset` starts a new logical episode at the current pose after terminal events.
 - `--no-initial-reset` preserves the scene's initial state before first inference.
 - `--infinite` removes the episode-count limit.
 - `--no-time-limit` removes the run-side step limit.
 
-Collision and failure behavior still belongs to the scenario. A scene may stop a body
-at a terminal state even when no physical reset is requested.
+Collision and failure behavior still belongs to the scenario. A scene may stop a body at a terminal state even when no physical reset is requested.
 
 ### `metis export` / `python/export.py`
 
-Exports a Keras policy bundle to TensorFlow Lite, ONNX, or both. TFLite uses the main
-TensorFlow installation. ONNX requires the optional packages in
-`requirements-export.txt`.
+Exports a Keras policy bundle to TensorFlow Lite, ONNX, or both. TFLite uses the main TensorFlow installation. ONNX requires the optional packages in `requirements-export.txt`.
 
 ### `metis record` / `python/recorder.py`
 
-Starts one manually controlled Godot agent and writes an `.npz` dataset containing
-observations, applied actions, rewards, next observations, `terminated`, `truncated`,
-agent IDs, episodes, and steps.
+Starts one manually controlled Godot agent and writes an `.npz` dataset containing observations, applied actions, rewards, next observations, combined `dones`, agent IDs, episodes, and steps. The current recorder does not retain separate `terminated` and `truncated` arrays; see the replay limitation in [Manual demonstrations](../guides/manual-demonstrations.md).
 
 ### `metis doctor`
 
-Checks the selected dependency profile, imports the relevant training stack, locates
-Godot, and reports available TensorFlow or PyTorch accelerators. The editor runtime
-setup runs this command before accepting a managed or existing interpreter.
+Checks the selected dependency profile, imports the relevant training stack, locates Godot, and reports available TensorFlow or PyTorch accelerators. The editor runtime setup runs this command before accepting a managed or existing interpreter.
 
-Use `--json` when another tool needs a machine-readable result. `--profile` accepts
-`core`, `native`, `dashboard`, `export`, or `sb3`.
+Use `--json` when another tool needs a machine-readable result. `--profile` accepts `core`, `native`, `dashboard`, `export`, or `sb3`.
 
 ## Installation forms
 
-The Asset Library package creates an isolated interpreter under the Godot project's
-`.metis/venv` directory. A normal Python installation can install the wheel directly.
-Repository development uses `python/.venv`.
+The Asset Library package creates an isolated interpreter under the Godot project's `.metis/venv` directory. A normal Python installation can install the wheel directly. Repository development uses `python/.venv`.
 
-These layouts all run the same modules. The full packaging and runtime contract is
-described in [Distribution and installation](distribution.md).
+These layouts all run the same modules. The full packaging and runtime contract is described in [Distribution and installation](distribution.md).
 
 ## Internal packages
 
@@ -120,8 +88,7 @@ described in [Distribution and installation](distribution.md).
 - `ddpgfd.py`: prioritized demonstration replay;
 - `common.py`: shared DDPG/TD3-family implementation.
 
-Each backend owns its parser additions, sync and async loop, checkpoint state, and
-logs, and exposes `main()` to the dispatcher.
+Each backend owns its parser additions, sync and async loop, checkpoint state, and logs, and exposes `main()` to the dispatcher.
 
 ### `python/backends/`
 
@@ -132,50 +99,31 @@ logs, and exposes `main()` to the dispatcher.
 - `sb3_multi_vec_env.py` groups shared-policy agents from the same Godot world;
 - `sb3_state.py` handles checkpoint discovery and companion state.
 
-The adapter supports DQN on discrete spaces; PPO on discrete or continuous spaces;
-and DDPG, TD3, or SAC on continuous spaces. PPO also accepts a hybrid Metis contract
-through a latent `Box` encoding. Every continuous component keeps its declared values;
-each discrete component contributes one bounded latent logit per choice and is decoded
-with `argmax`. Consequently, SB3 optimizes a Gaussian latent policy rather than Metis
-PPO's exact mixed categorical/Gaussian distribution.
+The adapter supports DQN on discrete spaces; PPO on discrete or continuous spaces; and DDPG, TD3, or SAC on continuous spaces. PPO also accepts a hybrid Metis contract through a latent `Box` encoding. Every continuous component keeps its declared values; each discrete component contributes one bounded latent logit per choice and is decoded with `argmax`. Consequently, SB3 optimizes a Gaussian latent policy rather than Metis PPO's exact mixed categorical/Gaussian distribution.
 
-Multi-agent mode uses parameter sharing: each compatible agent is an SB3 vector lane,
-while all actions belonging to one Godot process are grouped into one bridge step.
-Godot worlds cannot reset one vector lane independently. The default behavior
-therefore raises if only some agents terminate. With
-`--sb3-multi-agent-partial-done reset-all`, still-active agents are marked truncated
-and the complete world resets.
+Multi-agent mode uses parameter sharing: each compatible agent is an SB3 vector lane, while all actions belonging to one Godot process are grouped into one bridge step. Godot worlds cannot reset one vector lane independently. The default behavior therefore raises if only some agents terminate. With `--sb3-multi-agent-partial-done reset-all`, still-active agents are marked truncated and the complete world resets.
 
-Collection is always synchronized from the learner's perspective, while socket waits
-for separate Godot processes may overlap in worker threads. `async` is rejected. That
-restriction is intentional: moving collection outside SB3's `learn()` loop would be a
-new trainer rather than a comparison against SB3's normal implementation.
+Collection is always synchronized from the learner's perspective, while socket waits for separate Godot processes may overlap in worker threads. `async` is rejected. That restriction is intentional: moving collection outside SB3's `learn()` loop would be a new trainer rather than a comparison against SB3's normal implementation.
 
-Install this optional backend from `requirements-sb3.txt`. It stores SB3/PyTorch
-models as `.zip` files and off-policy replay as `.pkl`; those files are independent
-of Metis Keras policy bundles.
+Install this optional backend from `requirements-sb3.txt`. It stores SB3/PyTorch models as `.zip` files and off-policy replay as `.pkl`; those files are independent of Metis Keras policy bundles.
 
-The SB3 adapter does not implement independent multi-policy learning.
-`--multi-policy` is rejected rather than silently falling back to parameter sharing.
+The SB3 adapter does not implement independent multi-policy learning. `--multi-policy` is rejected rather than silently falling back to parameter sharing.
 
 ### `python/core/`
 
 - `models.py`: Keras model factories and compiled inference functions;
 - `policy_artifact.py`: atomic `policy.keras` and manifest output;
-- `composite_policy.py` and `policy_action_adapter.py`: generic bounded-residual
-  policy execution and standalone PPO policy export;
-- `critic_audit.py`: task-independent Q-ranking gate used by the documented
-  `--stop-after-critic-warmup` training option;
+- `composite_policy.py` and `policy_action_adapter.py`: generic bounded-residual policy execution and standalone PPO policy export;
+- `critic_audit.py`: task-independent Q-ranking gate used by the documented `--stop-after-critic-warmup` training option;
 - `replay_buffer.py`: uniform/prioritized replay, protected demonstrations, snapshots;
+- `ppo_demonstrations.py`: validated expert-label datasets, BC pretraining, auxiliary imitation and checkpoint-bound objective contracts;
+- `actor_ema.py`: checkpointed raw-versus-averaged actor state and EMA policy artifacts for single-policy continuous off-policy trainers;
 - `transition_snapshots.py`: immutable transition-indexed checkpoint publication;
 - `opponent_pool.py`: historical policy snapshots and opponent sampling;
-- `training.py`: async collection, parallel stepping, TensorFlow setup, best-policy
-  evaluation, health/recovery wiring, transition budgets, JSONL metrics, and shared
-  utilities;
-- `training_health.py`: health-state transitions, persistent alerts, collapse
-  confirmation, and TensorFlow checkpoint recovery;
-- `evaluation.py`: TensorFlow-free episode and evaluation summaries shared by native
-  inference and the SB3 adapter.
+- `training.py`: async collection, parallel stepping, TensorFlow setup, best-policy evaluation, health/recovery wiring, transition budgets, JSONL metrics, and shared utilities;
+- `training_health.py`: health-state transitions, persistent alerts, collapse confirmation, and TensorFlow checkpoint recovery;
+- `training_control.py`: evaluation-driven optimizer rates, monotone LR ceilings, solved qualification, independent certification bounds and spent seed-deck state;
+- `evaluation.py`: TensorFlow-free episode and evaluation summaries shared by native inference and the SB3 adapter.
 
 Core modules must not know about concrete scenes such as Cars, Tanks, or Breakout.
 
@@ -184,29 +132,19 @@ Core modules must not know about concrete scenes such as Cars, Tanks, or Breakou
 - `scenario.py`: Gymnasium wrapper around the TCP protocol;
 - `process_manager.py`: Godot startup, readiness checks, logs, and shutdown.
 
-This is the I/O boundary. Algorithm modules do not open sockets or construct Godot
-commands directly.
+This is the I/O boundary. Algorithm modules do not open sockets or construct Godot commands directly.
 
 ### `python/tools/`
 
-Contains repository-only development commands such as random rollout and bridge
-diagnostics. `benchmark_backends.py` runs Metis and SB3 sequentially with common
-seeds, transition budgets, and deterministic evaluation. These modules are not part
-of the installed Python package; a supported end-user command must be registered in
-`[project.scripts]` instead.
+Contains repository-only development commands such as random rollout and bridge diagnostics. `benchmark_backends.py` runs Metis and SB3 sequentially with common seeds, transition budgets, and deterministic evaluation. These modules are not part of the installed Python package; a supported end-user command must be registered in `[project.scripts]` instead.
 
 ### `python/dashboard/`
 
-Contains the optional local HTTP and WebSocket server and its self-contained browser
-client. `core.training.print_episode_metrics()` forwards one flat metric row per
-episode to the server when `--dashboard` is enabled. The package is imported lazily,
-so Flask is not required for training without the flag.
+Contains the optional local HTTP and WebSocket server and its self-contained browser client. `core.training.print_episode_metrics()` forwards one flat metric row per episode to the server when `--dashboard` is enabled. The package is imported lazily, so Flask is not required for training without the flag.
 
 ### `python/tests/`
 
-Tests cover replay semantics, targets and truncation, action packing, asynchronous
-collection, opponent pools, checkpoints, and dispatch. A new algorithm should add
-tests for its learning and transition semantics, not only an import test.
+Tests cover replay semantics, targets and truncation, action packing, asynchronous collection, opponent pools, checkpoints, and dispatch. A new algorithm should add tests for its learning and transition semantics, not only an import test.
 
 ## Dependency direction
 
@@ -218,38 +156,26 @@ CLI -> algorithms (Metis) -> core
  +--> backends/sb3 ----------> envs
 ```
 
-`core` does not import concrete algorithms. `envs` imports neither TensorFlow nor
-PyTorch. Godot does not depend on a Python learner class. Keeping this direction
-prevents circular imports and allows collector workers to run without owning the
-learner.
+`core` does not import concrete algorithms. `envs` imports neither TensorFlow nor PyTorch. Godot does not depend on a Python learner class. Keeping this direction prevents circular imports and allows collector workers to run without owning the learner.
 
 ## Algorithm matrix
 
 | Algorithm | Actions | Metis | SB3 | Demonstrations in Metis |
 |---|---|---|---|---|
-| DQN | discrete | yes | yes | optional prefill |
-| PPO | discrete/continuous/hybrid | yes | discrete/continuous/hybrid encoding | no |
-| DDPG | continuous | yes | yes | optional prefill |
+| DQN | discrete | yes | yes | optional replay prefill and BC |
+| PPO | discrete/continuous/multi-discrete/hybrid | yes | discrete/continuous/hybrid encoding | optional BC and separate auxiliary imitation; standard single-policy only |
+| DDPG | continuous | yes | yes | optional replay prefill and BC |
 | DDPG+BC | continuous | yes | no | required |
 | DDPGfD | continuous | yes | no | required |
-| TD3 | continuous | yes | yes | optional prefill |
+| TD3 | continuous | yes | yes | optional replay prefill and BC |
 | TD3+BC | continuous | yes | no | required |
-| SAC | continuous | yes | yes | optional prefill |
+| SAC | continuous | yes | yes | optional prefill, BC and protected replay; single-policy only |
 
-Async and multi-agent support are backend responsibilities. They cannot be inferred
-only from a model accepting batched tensors.
+Async and multi-agent support are backend responsibilities. They cannot be inferred only from a model accepting batched tensors.
 
-Every native algorithm builds its hidden layers from one shared list in
-`core/models.py`, defaulting to that algorithm's reference architecture: `256 256` for SAC,
-`400 300` for TD3/DDPG, `64 64` for PPO and DQN. The optional `--network-layers W [W ...]`
-overrides it for the actor, both critics, and the DQN Q network at once; the SB3 adapter
-ignores it and keeps its own `--network`. See
-[Shared training options](../algorithms/common-options.md#network-architecture).
+Every native algorithm builds its hidden layers from one shared list in `core/models.py`, defaulting to that algorithm's reference architecture: `256 256` for SAC, `400 300` for TD3/DDPG, `64 64` for PPO and DQN. The optional `--network-layers W [W ...]` overrides it for the actor, both critics, and the DQN Q network at once; the SB3 adapter ignores it and keeps its own `--network`. See [Shared training options](../algorithms/common-options.md#network-architecture).
 
-For selection advice, complete flag tables, and runnable examples, continue with the
-[algorithm guide](../algorithms/README.md). Shared collector, checkpoint, curriculum,
-health, and rendering flags are catalogued once in
-[Shared training options](../algorithms/common-options.md).
+For selection advice, complete flag tables, and runnable examples, continue with the [algorithm guide](../algorithms/README.md). Shared collector, checkpoint, curriculum, health, and rendering flags are catalogued once in [Shared training options](../algorithms/common-options.md).
 
 ## SB3 compatibility matrix
 
@@ -267,90 +193,50 @@ health, and rendering flags are catalogued once in
 
 ## SAC gradient clipping
 
-SAC applies a global norm cap independently to critic 1, critic 2, and actor
-gradients. The command-line default is:
+SAC applies a global norm cap independently to critic 1, critic 2, and actor gradients. The command-line default is:
 
 ```text
 --grad-clip-norm 10.0
 ```
 
-Set it to `0` to turn clipping off. `--grad-clip-adaptive` maintains an exponential
-running norm for each of the three networks and clips at `--grad-clip-k` times that
-network's estimate. When a positive hard norm is also configured, the adaptive value
-can only make the threshold tighter; it cannot exceed the hard cap. A short warmup
-uses the hard cap while the estimates settle.
+Set it to `0` to turn clipping off. `--grad-clip-adaptive` maintains an exponential running norm for each of the three networks and clips at `--grad-clip-k` times that network's estimate. When a positive hard norm is also configured, the adaptive value can only make the threshold tighter; it cannot exceed the hard cap. A short warmup uses the hard cap while the estimates settle.
 
-The adaptive EMA is local to the learner process and is not restored from a
-checkpoint. The entropy-temperature optimizer is not clipped. DQN, PPO, and the
-DDPG/TD3 family do not currently expose these clipping flags.
+The adaptive gradient-norm EMA is local to the learner process and is not restored from a checkpoint; it is distinct from the optional checkpointed actor EMA. The entropy-temperature optimizer is not clipped. DQN and the DDPG/TD3 family also expose fixed/adaptive gradient clipping, with DQN retaining its unclipped default; PPO uses its separate `--ppo-grad-clip` option.
 
 ## Conservative SAC fine-tuning
 
-`--actor-anchor-coef` adds a trust-region penalty between the live SAC actor and a
-frozen copy of the policy loaded at process startup. It covers both the deterministic
-action mean and, with the relative weight set by `--actor-anchor-log-std-coef`, the
-policy standard deviation. This can stop a competent resumed or warm-started policy
-from drifting while its critics adapt to new replay or a harder curriculum stage.
+`--actor-anchor-coef` adds a trust-region penalty between the live SAC actor and a frozen copy of the policy loaded at process startup. It covers both the deterministic action mean and, with the relative weight set by `--actor-anchor-log-std-coef`, the policy standard deviation. This can stop a competent resumed or warm-started policy from drifting while its critics adapt to new replay or a harder curriculum stage.
 
-The default coefficient is `0`, so ordinary training is unchanged. Start with a
-moderate value such as `10` for conservative fine-tuning. A large coefficient can
-also prevent useful adaptation, so lower or remove it when moving to a substantially
-different task. On checkpoint resume the new process anchors to the restored actor;
-automatic recovery does not move that reference.
+The default coefficient is `0`, so ordinary training is unchanged. Start with a moderate value such as `10` for conservative fine-tuning. A large coefficient can also prevent useful adaptation, so lower or remove it when moving to a substantially different task. On checkpoint resume the new process anchors to the restored actor; automatic recovery does not move that reference.
 
 ## Episode metrics and dashboard sinks
 
-Backends pass structured sections to `print_episode_metrics()`. The function preserves
-the pretty or compact terminal output and also flattens the fields for registered
-metric sinks. Sink failures are ignored so an optional monitor cannot terminate a
-training run.
+Backends pass structured sections to `print_episode_metrics()`. The function preserves the pretty or compact terminal output and also flattens the fields for registered metric sinks. Sink failures are ignored so an optional monitor cannot terminate a training run.
 
-The bundled dashboard recognizes the shared keys `reward`, `progress`,
-`critic_loss`, `actor_loss`, `env_steps_s`, `updates_s`, `alpha`, `finish`,
-`collision`, and `stall`. Algorithms remain free to report additional fields; they
-still appear in `/api/metrics` even when the current page has no chart for them.
+The bundled dashboard recognizes the shared keys `reward`, `progress`, `critic_loss`, `actor_loss`, `env_steps_s`, `updates_s`, `alpha`, `finish`, `collision`, and `stall`. Algorithms remain free to report additional fields; they still appear in `/api/metrics` even when the current page has no chart for them.
 
-`TrainingHealthMonitor` adds `health_state`, `training_phase`, lifetime recovery
-count, recovery cycle, and cycle attempt to metric rows. It emits a separate event
-stream at `/api/health`; current state and event history are persisted beside the
-training checkpoints. Native trainers connect the same monitor to
-`BestCheckpointTracker`, so health decisions use isolated frozen evaluations rather
-than raw episode noise.
+`TrainingHealthMonitor` adds `health_state`, `training_phase`, lifetime recovery count, recovery cycle, and cycle attempt to metric rows. It emits a separate event stream at `/api/health`; current state and event history are persisted beside the training checkpoints. Native trainers connect the same monitor to `BestCheckpointTracker`, so health decisions use isolated frozen evaluations rather than raw episode noise.
 
 The recovery contract is shared, while stabilization remains algorithm-aware:
 
-- DQN restores the full checkpoint, synchronizes the target Q network, rejects stale
-  async transitions, and waits for verification before learning again.
-- PPO rejects rollout generations from the previous policy version and freezes
-  optimization during verification. It has no replay-clearing phase.
-- SAC and the DDPG/TD3 family can escalate from replay-preserving soft recovery to a
-  hard recovery that removes online replay, retains protected DDPGfD demonstrations,
-  synchronizes targets, and performs critic-only warmup.
+- DQN restores the full checkpoint, synchronizes the target Q network, rejects stale async transitions, and waits for verification before learning again.
+- PPO rejects rollout generations from the previous policy version and freezes optimization during verification. It has no replay-clearing phase.
+- SAC and the DDPG/TD3 family can escalate from replay-preserving soft recovery to a hard recovery that removes online replay, retains protected demonstrations from DDPGfD or protected SAC replay, synchronizes targets, and performs critic-only warmup.
 
-Recovery limits belong to the current collapse cycle. Validated healthy evaluations
-close the cycle without deleting lifetime recovery telemetry.
+Recovery limits belong to the current collapse cycle. Validated healthy evaluations close the cycle without deleting lifetime recovery telemetry.
 
-See [Monitoring training](../guides/monitoring-training.md) for the launch command,
-retention behavior, and dashboard limitations.
+See [Monitoring training](../guides/monitoring-training.md) for the launch command, retention behavior, and dashboard limitations.
 
 ## Implementation conventions
 
 - Shared arguments keep the same name across backends.
-- `--backend metis` remains the default; optional adapters must fail clearly on
-  unsupported scene contracts.
+- `--backend metis` remains the default; optional adapters must fail clearly on unsupported scene contracts.
 - Zero `max_steps` means no external step limit where the scene supports it.
 - Every native training checkpoint refreshes the portable Keras policy bundle.
 - `run.py` can load a checkpoint without loading replay.
 - A full off-policy resume restores replay when a matching snapshot is available.
 - Multi-agent metrics count agents and transitions, not only environment steps.
-- Episode output should go through `print_episode_metrics()` so optional metrics sinks
-  receive the same values as the terminal log.
-- Best-checkpoint evaluation uses one CPU thread by default to avoid starving the
-  learner and collectors. Configure it with `--best-evaluation-cpu-threads`, or turn
-  it off with `--no-best-checkpoint`.
-- Automatic recovery requires best-checkpoint evaluation. It restores complete
-  validated TensorFlow state, scales optimizer roles separately, republishes async
-  policy snapshots, verifies the restore immediately, and escalates off-policy replay
-  handling only when a soft attempt fails.
-- Public commands remain `train.py`, `run.py`, `recorder.py`, and `export.py`. Internal
-  modules are not additional user-facing entry points.
+- Episode output should go through `print_episode_metrics()` so optional metrics sinks receive the same values as the terminal log.
+- Best-checkpoint evaluation uses one CPU thread by default to avoid starving the learner and collectors. Configure it with `--best-evaluation-cpu-threads`, or turn it off with `--no-best-checkpoint`.
+- Automatic recovery requires best-checkpoint evaluation. It restores complete validated TensorFlow state, scales optimizer roles separately, republishes async policy snapshots, verifies the restore immediately, and escalates off-policy replay handling only when a soft attempt fails.
+- Public commands remain `train.py`, `run.py`, `recorder.py`, and `export.py`. Internal modules are not additional user-facing entry points.

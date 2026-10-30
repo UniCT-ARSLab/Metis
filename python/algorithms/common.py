@@ -51,6 +51,7 @@ import tensorflow as tf
 
 from core.critic_audit import format_audit, q_ranking_audit
 from core.curriculum import scenario_curriculum_config
+from core.actor_ema import ActorEMA, add_actor_ema_arguments, configure_actor_ema, validate_actor_ema_options, validate_actor_ema_checkpoint
 from core.models import (
     build_actor_forward_fn,
     build_continuous_actor,
@@ -205,6 +206,7 @@ def parse_args(trainer_variant):
 
     group = argument_group(parser, GROUP_CHECKPOINTS)
     group.add_argument("--actor-weights-path", default="generic_ddpg_actor.weights.h5")
+    add_actor_ema_arguments(group)
     group.add_argument(
         "--policy-path",
         default=None,
@@ -1530,6 +1532,7 @@ def build_deterministic_learner_step(
     batch_size=128,
     compiled=True,
     xla=False,
+    actor_ema=None,
 ):
     """Build the DDPG/TD3 gradient step, optionally compiled into a tf.function.
 
@@ -1555,7 +1558,7 @@ def build_deterministic_learner_step(
         def learner_step(buffer, *, update_actor, learner_update, bc_weight=0.0,
                          q_filter_active=True, q_weight=1.0, gradient_telemetry=False,
                          bc_reference_actor=None):
-            return train_deterministic_step(
+            result = train_deterministic_step(
                 actor,
                 critic,
                 target_actor,
@@ -1593,6 +1596,9 @@ def build_deterministic_learner_step(
                 grad_clip_adaptive=grad_clip_adaptive,
                 grad_clip_k=grad_clip_k,
             )
+            if actor_ema is not None and result["policy_updated"]:
+                actor_ema.update()
+            return result
 
         return learner_step
 
@@ -1666,6 +1672,8 @@ def build_deterministic_learner_step(
         grads = tape.gradient(actor_loss, actor.trainable_variables)
         grads = clip_actor(grads)
         actor_optimizer.apply_gradients(zip(grads, actor.trainable_variables))
+        if actor_ema is not None:
+            actor_ema.update()
         return actor_loss, q_loss, critic_loss, critic2_loss
 
     if compiled:
@@ -2159,6 +2167,7 @@ def run_async_ddpg(
         grad_clip_norm=args.grad_clip_norm,
         grad_clip_adaptive=args.grad_clip_adaptive,
         grad_clip_k=args.grad_clip_k,
+        actor_ema=getattr(args, "_actor_ema", None),
     )
     completed = int(start_episode)
     done_workers = 0
@@ -2183,6 +2192,8 @@ def run_async_ddpg(
     try:
         while done_workers < len(envs):
             apply_ready_best_checkpoint(best_tracker)
+            if getattr(best_tracker, "stop_requested", False):
+                break
             try:
                 event = scheduler.next_event(pool, timeout=0.2)
             except Empty:
@@ -2938,6 +2949,8 @@ def run_async_multi_policy_deterministic(
     try:
         while done_workers < len(envs):
             apply_ready_best_checkpoint(best_tracker)
+            if getattr(best_tracker, "stop_requested", False):
+                break
             try:
                 event = scheduler.next_event(pool, timeout=0.2)
             except Empty:
@@ -3750,6 +3763,8 @@ def run_sync_multi_policy_deterministic(
     }
     try:
         for episode in range(start_episode, args.num_episodes):
+            if getattr(best_tracker, "stop_requested", False):
+                break
             trainable_replay_size = min(
                 (
                     len(policy.buffer)
@@ -4190,6 +4205,7 @@ def run_sync_multi_policy_deterministic(
 
 def main(trainer_variant):
     args = parse_args(trainer_variant)
+    validate_actor_ema_options(args)
     budget = TrainingBudget(args.total_timesteps)
     apply_variant_defaults(args)
     validate_variant_arguments(args)
@@ -4363,6 +4379,9 @@ def main(trainer_variant):
                 critic2_optimizer=critic2_optimizer,
             )
         checkpoint = tf.train.Checkpoint(**checkpoint_items)
+        if args.actor_ema_decay:
+            actor_optimizer.build(actor.trainable_variables)
+            checkpoint.actor_ema = ActorEMA(actor, args.actor_ema_decay)
         checkpoint_manager = tf.train.CheckpointManager(
             checkpoint,
             directory=args.checkpoint_dir,
@@ -4370,6 +4389,7 @@ def main(trainer_variant):
         )
         resume_checkpoint = resolve_resume_checkpoint(args, checkpoint_manager)
         restored_replay_count = 0
+        validate_actor_ema_checkpoint(args, resume_checkpoint)
         if resume_checkpoint and args.policy_path:
             raise RuntimeError("--policy-path cannot be combined with --resume or --resume-checkpoint")
         if resume_checkpoint:
@@ -4560,6 +4580,7 @@ def main(trainer_variant):
             else 0
         )
 
+        configure_actor_ema(args, checkpoint, best_tracker, build_policy_metadata(args.trainer_variant, env0), reset=_bc_ran)
         # Deterministic BC gate: after BC (+ saved BC actor), ONE frozen evaluation, then STOP
         # before any RL update. Fails closed if BC did not actually run.
         if getattr(args, "stop_after_bc", False):
@@ -4662,6 +4683,7 @@ def main(trainer_variant):
             grad_clip_norm=args.grad_clip_norm,
             grad_clip_adaptive=args.grad_clip_adaptive,
             grad_clip_k=args.grad_clip_k,
+            actor_ema=getattr(args, "_actor_ema", None),
         )
 
         def refill_recovery_replay():
@@ -4707,6 +4729,8 @@ def main(trainer_variant):
             bc_reference_actor.set_weights(actor.get_weights())
         last_saved_episode = None
         for episode in range(start_episode, args.num_episodes):
+            if getattr(best_tracker, "stop_requested", False):
+                break
             opponent_match = opponent_pool.start_episode(actor, episode)
             use_random_exploration = should_use_random_exploration(
                 episode,
